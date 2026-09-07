@@ -425,3 +425,124 @@
                          (when (> pos hi) (setf hi pos))
                          (incf n))))))
         (values n hi)))))
+
+;;; ---- P slices ------------------------------------------------------------------------------------
+
+(defun cabac-mb-skip-flag (ss)
+  "mb_skip_flag (9.3.3.1.1.1).  CABAC has no skip RUN: every macroblock carries its own flag, and
+   the context is how many of its neighbours were themselves NOT skipped."
+  (let ((pic (ss-pic ss)) (inc 0))
+    (dolist (d '((-1 0) (0 -1)))
+      (let ((i (%nbr-mbi ss (first d) (second d))))
+        (when (and i (/= -2 (aref (pic-mb-types pic) i))) (incf inc))))
+    (= 1 (decode-decision (ss-cabac ss) (+ +ctx-mb-skip-p+ inc)))))
+
+(defun cabac-mb-type-p (ss)
+  "mb_type in a P slice.  Returns an inter type 0..3, or (+ 5 intra-type) so the caller can use the
+   same `5 and up is intra' convention CAVLC uses.
+
+   P_8x8ref0 has no CABAC binarization at all — it exists only in the CAVLC table — so the values
+   here stop at 3."
+  (let ((c (ss-cabac ss)))
+    (if (= 1 (decode-decision c (+ +ctx-mb-type-p-prefix+ 0)))
+        ;; the intra suffix, which is the I-slice tree on its own contexts (Table 9-39)
+        (+ 5
+           (if (zerop (decode-decision c (+ +ctx-mb-type-p-suffix+ 0)))
+               0
+               (if (= 1 (decode-terminate c))
+                   25
+                   (let* ((cbp-luma (decode-decision c (+ +ctx-mb-type-p-suffix+ 1)))
+                          (chroma (if (zerop (decode-decision c (+ +ctx-mb-type-p-suffix+ 2)))
+                                      0
+                                      (if (zerop (decode-decision c (+ +ctx-mb-type-p-suffix+ 2)))
+                                          1 2)))
+                          (p1 (decode-decision c (+ +ctx-mb-type-p-suffix+ 3)))
+                          (p0 (decode-decision c (+ +ctx-mb-type-p-suffix+ 3))))
+                     (+ 1 (* 12 cbp-luma) (* 4 chroma) (* 2 p1) p0)))))
+        (let* ((b1 (decode-decision c (+ +ctx-mb-type-p-prefix+ 1)))
+               (b2 (decode-decision c (+ +ctx-mb-type-p-prefix+ (if (= b1 1) 3 2)))))
+          ;; 000 -> 16x16, 001 -> 8x8, 010 -> 8x16, 011 -> 16x8
+          (if (zerop b1)
+              (if (zerop b2) 0 3)
+              (if (zerop b2) 2 1))))))
+
+(defun cabac-sub-mb-type-p (ss)
+  "sub_mb_type in a P slice: 1 -> 8x8, 00 -> 8x4, 011 -> 4x8, 010 -> 4x4."
+  (let ((c (ss-cabac ss)))
+    (if (= 1 (decode-decision c (+ +ctx-sub-mb-type-p+ 0)))
+        0
+        (if (zerop (decode-decision c (+ +ctx-sub-mb-type-p+ 1)))
+            1
+            (if (= 1 (decode-decision c (+ +ctx-sub-mb-type-p+ 2))) 2 3)))))
+
+(defun %ref-idx-ctx-inc (ss bx by)
+  "ctxIdxInc for bin 0 of ref_idx (9.3.3.1.1.6): a neighbour counts when it used a reference other
+   than the first one."
+  (let ((pic (ss-pic ss)))
+    (flet ((term (nbx nby)
+             (let* ((mbw (pic-mb-width pic)))
+               (if (or (minusp nbx) (minusp nby) (>= nbx (* 4 mbw)))
+                   0
+                   (let* ((dx (- (floor nbx 4) (ss-mbx ss))) (dy (- (floor nby 4) (ss-mby ss)))
+                          (i (if (and (zerop dx) (zerop dy))
+                                 (+ (* (ss-mby ss) mbw) (ss-mbx ss))
+                                 (%nbr-mbi ss dx dy))))
+                     (cond
+                       ((null i) 0)
+                       ;; intra and skipped neighbours have no reference to have chosen
+                       ((>= (aref (pic-mb-types pic) i) 0) 0)
+                       ((= -2 (aref (pic-mb-types pic) i)) 0)
+                       (t (multiple-value-bind (mx my r) (blk-mv pic nbx nby)
+                            (declare (ignore mx my))
+                            (if (> r 0) 1 0)))))))))
+      (+ (term (1- bx) by) (* 2 (term bx (1- by)))))))
+
+(defun cabac-ref-idx (ss bx by)
+  "ref_idx_l0: unary, with the first three bins on their own contexts."
+  (let ((c (ss-cabac ss)))
+    (if (zerop (decode-decision c (+ +ctx-ref-idx+ (%ref-idx-ctx-inc ss bx by))))
+        0
+        (if (zerop (decode-decision c (+ +ctx-ref-idx+ 4)))
+            1
+            (let ((n 2))
+              (loop while (= 1 (decode-decision c (+ +ctx-ref-idx+ 5)))
+                    do (incf n)
+                       (when (> n 32) (%err "runaway ref_idx")))
+              n)))))
+
+(defun %mvd-ctx-inc (ss bx by comp)
+  "ctxIdxInc for bin 0 of a vector difference (9.3.3.1.1.7).
+
+   The context is the SIZE of the neighbouring differences, not their direction: where the
+   neighbours barely moved relative to their own predictions, this one probably will not either."
+  (let* ((pic (ss-pic ss)) (sum 0))
+    (flet ((term (nbx nby)
+             (let ((mbw (pic-mb-width pic)))
+               (unless (or (minusp nbx) (minusp nby) (>= nbx (* 4 mbw)))
+                 (let* ((dx (- (floor nbx 4) (ss-mbx ss))) (dy (- (floor nby 4) (ss-mby ss)))
+                        (i (if (and (zerop dx) (zerop dy))
+                               (+ (* (ss-mby ss) mbw) (ss-mbx ss))
+                               (%nbr-mbi ss dx dy))))
+                   (when (and i (< (aref (pic-mb-types pic) i) -2))
+                     (multiple-value-bind (dxv dyv) (blk-mvd pic nbx nby)
+                       (incf sum (abs (if (zerop comp) dxv dyv))))))))))
+      (term (1- bx) by)
+      (term bx (1- by)))
+    (cond ((< sum 3) 0) ((> sum 32) 2) (t 1))))
+
+(defun cabac-mvd (ss bx by comp)
+  "One component of a motion vector difference: UEG3, signed, with the unary part context coded
+   and everything past nine in bypass."
+  (let* ((c (ss-cabac ss))
+         (base (if (zerop comp) +ctx-mvd-x+ +ctx-mvd-y+))
+         (n 0))
+    (declare (type fixnum n))
+    (loop while (< n 9)
+          do (let ((ctx (+ base (case n
+                                  (0 (%mvd-ctx-inc ss bx by comp))
+                                  (1 3) (2 4) (3 5) (t 6)))))
+               (if (zerop (decode-decision c ctx)) (return) (incf n))))
+    (let ((v n))
+      (declare (type fixnum v))
+      (when (= n 9) (incf v (%exp-golomb-bypass c 3)))
+      (if (zerop v) 0 (if (= 1 (decode-bypass c)) (- v) v)))))

@@ -84,6 +84,9 @@
   ;; (-1 where the block is intra).  The loop filter reads both, and so does the next picture.
   (mvs (%emptyfx) :type fixnums)
   (refs (%emptyfx) :type fixnums)
+  ;; the coded DIFFERENCES, which only CABAC needs: the context for a vector difference is chosen
+  ;; from how large the neighbouring differences were, not from the vectors themselves
+  (mvds (%emptyfx) :type fixnums)
   ;; Per macroblock, and only CABAC reads them: it chooses a context for nearly every syntax
   ;; element from what the neighbouring macroblocks decoded, so facts CAVLC could forget as soon
   ;; as it used them have to survive here.
@@ -111,6 +114,7 @@
      :mb-qps (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0)
      :mvs (make-array (* mbw 4 mbh 4 2) :element-type 'fixnum :initial-element 0)
      :refs (make-array (* mbw 4 mbh 4) :element-type 'fixnum :initial-element -1)
+     :mvds (make-array (* mbw 4 mbh 4 2) :element-type 'fixnum :initial-element 0)
      :mb-cbp (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0)
      :mb-chroma-mode (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0)
      :mb-dc-cbf (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0))))
@@ -182,6 +186,21 @@
     (setf (aref (pic-mvs pic) (* 2 i)) mvx
           (aref (pic-mvs pic) (1+ (* 2 i))) mvy
           (aref (pic-refs pic) i) ref)))
+
+(declaim (inline mb-skipped-p blk-mvd))
+(defun mb-skipped-p (pic mbx mby)
+  "Was that macroblock a P_Skip?  -2 is reserved for it; other inter types are -3 and below, so
+   the two are distinguishable, which the skip-flag context needs and nothing else does."
+  (= -2 (aref (pic-mb-types pic) (+ (* mby (pic-mb-width pic)) mbx))))
+
+(defun blk-mvd (pic bx by)
+  (let ((i (%mv-index pic bx by)))
+    (values (aref (pic-mvds pic) (* 2 i)) (aref (pic-mvds pic) (1+ (* 2 i))))))
+
+(defun set-blk-mvd (pic bx by dx dy)
+  (let ((i (%mv-index pic bx by)))
+    (setf (aref (pic-mvds pic) (* 2 i)) dx
+          (aref (pic-mvds pic) (1+ (* 2 i))) dy)))
 
 ;;; ---- nC: the coefficient-count context ------------------------------------------------------------
 
@@ -397,7 +416,9 @@
     (when (> mb-type 25) (%err "mb_type ~d in an I slice" mb-type))
     (setf (aref (pic-mb-types pic) mbi) mb-type)
     (let ((bx (* 4 (ss-mbx ss))) (by (* 4 (ss-mby ss))))
-      (dotimes (j 4) (dotimes (i 4) (set-blk-mv pic (+ bx i) (+ by j) 0 0 -1))))
+      (dotimes (j 4) (dotimes (i 4)
+                       (set-blk-mv pic (+ bx i) (+ by j) 0 0 -1)
+                       (set-blk-mvd pic (+ bx i) (+ by j) 0 0))))
     (if (zerop mb-type)
         (decode-i4x4-macroblock ss)
         (decode-i16x16-macroblock ss (1- mb-type)))
@@ -609,6 +630,10 @@
   (declare (optimize (speed 3) (safety 1)))
   (if (= n 2) (- 1 (u1 br)) (ue br)))
 
+(defun %set-partition-mvd (ss bx by wb hb dx dy)
+  (let ((pic (ss-pic ss)))
+    (dotimes (j hb) (dotimes (i wb) (set-blk-mvd pic (+ bx i) (+ by j) dx dy)))))
+
 (defun %set-partition-motion (ss bx by wb hb mvx mvy ref)
   "Record one partition's vector on every 4x4 block it covers.
 
@@ -682,6 +707,7 @@
     (setf (aref (pic-mb-types pic) mbi) -2)
     (setf (ss-mb-done ss) 0)
     (multiple-value-bind (mvx mvy) (skip-mv ss)
+      (%set-partition-mvd ss (* 4 mbx) (* 4 mby) 4 4 0 0)
       (%set-partition-motion ss (* 4 mbx) (* 4 mby) 4 4 mvx mvy 0)
       (%mc-partition ss (ss-ref0 ss) (* 16 mbx) (* 16 mby) 16 16 mvx mvy))
     (dotimes (blk 16) (set-luma-nz ss blk 0))
@@ -715,17 +741,34 @@
          (refs (make-array 4 :element-type 'fixnum :initial-element 0)))
     (declare (dynamic-extent subs refs))
     (unless ref-pic (%err "a P macroblock with no reference picture"))
-    (setf (aref (pic-mb-types pic) mbi) (- -2 mb-type))
+    (setf (aref (pic-mb-types pic) mbi) (- -3 mb-type))
     (setf (ss-mb-done ss) 0)
     ;; 1. every sub_mb_type
     (when p8x8
       (dotimes (i 4)
-        (let ((st (ue br)))
+        (let ((st (if (ss-cabac ss) (cabac-sub-mb-type-p ss) (ue br))))
           (when (> st 3) (%err "sub_mb_type ~d in a P slice" st))
           (setf (aref subs i) st))))
     ;; 2. every reference index.  P_8x8ref0 (mb_type 4) codes none: they are all zero.
     (when (and (> nref 1) (/= mb-type 4))
-      (dotimes (i nparts) (setf (aref refs i) (%te br nref))))
+      (dotimes (i nparts)
+        (multiple-value-bind (sx sy sw sh*)
+            (if p8x8
+                (values (* 8 (mod i 2)) (* 8 (floor i 2)) 8 8)
+                (let ((across (floor 16 pw)))
+                  (values (* pw (mod i across)) (* ph (floor i across)) pw ph)))
+          (let ((bx (+ bx0 (ash sx -2))) (by (+ by0 (ash sy -2))))
+            (setf (aref refs i)
+                  (if (ss-cabac ss) (cabac-ref-idx ss bx by) (%te br nref)))
+            ;; RECORD IT NOW, not with the vector later.  Every reference index of the macroblock
+            ;; is read before any vector difference is, and the context for one partition's index
+            ;; asks what its neighbours chose — including the partition beside it in this same
+            ;; macroblock, whose index was read a moment ago and whose vector has not been read at
+            ;; all yet.  Leaving the array until the vectors are known feeds the arithmetic decoder
+            ;; a stale context, and with CABAC that loses the rest of the slice.
+            (dotimes (jj (ash sh* -2))
+              (dotimes (ii (ash sw -2))
+                (setf (aref (pic-refs pic) (%mv-index pic (+ bx ii) (+ by jj))) (aref refs i))))))))
     ;; 3. every vector difference, and with it the prediction, the storage and the resampling
     (if p8x8
         (dotimes (i 4)
@@ -740,7 +783,10 @@
                      (sy (+ oy (* shh (floor k across))))
                      (bx (+ bx0 (ash sx -2))) (by (+ by0 (ash sy -2))))
                 (multiple-value-bind (mpx mpy) (predict-mv ss bx by (ash sw -2) ref)
-                  (let ((mvx (+ mpx (se br))) (mvy (+ mpy (se br))))
+                  (let* ((dx (if (ss-cabac ss) (cabac-mvd ss bx by 0) (se br)))
+                         (dy (if (ss-cabac ss) (cabac-mvd ss bx by 1) (se br)))
+                         (mvx (+ mpx dx)) (mvy (+ mpy dy)))
+                    (%set-partition-mvd ss bx by (ash sw -2) (ash shh -2) dx dy)
                     (%set-partition-motion ss bx by (ash sw -2) (ash shh -2) mvx mvy ref)
                     (%mc-partition ss (%ref-picture ss ref) (+ px sx) (+ py sy) sw shh mvx mvy)))))))
         (let ((across (floor 16 pw)))
@@ -750,7 +796,10 @@
                    (ref (aref refs i)))
               (multiple-value-bind (mpx mpy)
                   (predict-mv ss bx by (ash pw -2) ref :shape shape :part i)
-                (let ((mvx (+ mpx (se br))) (mvy (+ mpy (se br))))
+                (let* ((dx (if (ss-cabac ss) (cabac-mvd ss bx by 0) (se br)))
+                       (dy (if (ss-cabac ss) (cabac-mvd ss bx by 1) (se br)))
+                       (mvx (+ mpx dx)) (mvy (+ mpy dy)))
+                  (%set-partition-mvd ss bx by (ash pw -2) (ash ph -2) dx dy)
                   (%set-partition-motion ss bx by (ash pw -2) (ash ph -2) mvx mvy ref)
                   (%mc-partition ss (%ref-picture ss ref) (+ px sx) (+ py sy) pw ph mvx mvy)))))))
     ;; 4. the residual, on top of what motion compensation predicted
@@ -781,8 +830,6 @@
     (unless (or (sh-i-slice-p sh) p-slice)
       (%err "only I and P slices are decoded so far; this is a ~a slice"
             (slice-type-name (sh-slice-type sh))))
-    (when (and cabac-p p-slice)
-      (%err "CABAC is decoded for I slices so far; this is a P slice"))
     (flet ((at (n) (setf (ss-mbx ss) (mod n mbw) (ss-mby ss) (floor n mbw)))
            (more-p ()
              ;; CABAC ends a slice with an explicit decision, not by running out of bits: the
@@ -792,25 +839,41 @@
                  (more-rbsp-data-p br))))
       (loop
         (when (>= mb total) (return))
-        ;; a CAVLC P slice codes a RUN of skipped macroblocks before each coded one, and the run
-        ;; may be the last thing in the slice — so the end-of-data test belongs after it
-        (when p-slice
-          (let ((skip (ue br)))
-            (dotimes (i skip)
-              (when (>= mb total) (return))
-              (at mb)
-              (decode-skip-macroblock ss)
-              (incf mb))
-            (when (>= mb total) (return))
-            (when (and (plusp skip) (not (more-rbsp-data-p br))) (return))))
-        (at mb)
-        (if p-slice
-            (let ((mt (ue br)))
-              ;; in a P slice, mb_type 5 and up is an intra macroblock with 5 subtracted
-              (if (< mt 5)
-                  (decode-p-macroblock ss mt)
-                  (decode-intra-macroblock ss (- mt 5))))
-            (decode-intra-macroblock ss (if cabac-p (cabac-mb-type-i ss) (ue br))))
-        (incf mb)
+        (cond
+          ;; CABAC: every macroblock carries its own skip flag, so there is no run to unroll and
+          ;; the end-of-slice decision comes after skipped macroblocks too
+          ((and p-slice cabac-p)
+           (at mb)
+           (if (cabac-mb-skip-flag ss)
+               (decode-skip-macroblock ss)
+               (let ((mt (cabac-mb-type-p ss)))
+                 (if (< mt 5)
+                     (decode-p-macroblock ss mt)
+                     (decode-intra-macroblock ss (- mt 5)))))
+           (incf mb))
+          ;; CAVLC: a RUN of skipped macroblocks precedes each coded one, and the run may be the
+          ;; last thing in the slice — so the end-of-data test belongs after it
+          (p-slice
+           (let ((skip (ue br)) (ran-out nil))
+             (dotimes (i skip)
+               (when (>= mb total) (return))
+               (at mb)
+               (decode-skip-macroblock ss)
+               (incf mb))
+             (when (>= mb total) (return))
+             (when (and (plusp skip) (not (more-rbsp-data-p br))) (setf ran-out t))
+             (unless ran-out
+               (at mb)
+               (let ((mt (ue br)))
+                 ;; in a P slice, mb_type 5 and up is an intra macroblock with 5 subtracted
+                 (if (< mt 5)
+                     (decode-p-macroblock ss mt)
+                     (decode-intra-macroblock ss (- mt 5))))
+               (incf mb))
+             (when ran-out (return))))
+          (t
+           (at mb)
+           (decode-intra-macroblock ss (if cabac-p (cabac-mb-type-i ss) (ue br)))
+           (incf mb)))
         (unless (more-p) (return))))
     ss))

@@ -167,36 +167,40 @@ returns it.
 Three fixtures hold that down: `bt-r3`, `bs-r3` and `bt-r1`. Neither temporal direct nor multiple
 references fails alone, which is why all three are kept.
 
-## Known gap: one bin, in a rare configuration
+## Fixed: a direct-predicted neighbour has a reference index nobody told it
 
-`b-hard` (320x240, everything on at once) and an ordinary YouTube file both still desynchronise.
-The YouTube file decodes 236 pictures bit-exactly and fails in the 237th; `b-hard` fails in its 7th
-slice and reproduces in seconds.
+The last desynchronisation. In a B slice, the context for `ref_idx` counts a neighbour that used a
+reference other than the first — but 9.3.3.1.1.6 excludes an intra neighbour, a SKIPPED one, and
+**any partition predicted in direct mode**. The third exclusion was missing.
 
-In `b-hard` the divergence is narrowed to a **single bin**. Everything before macroblock (1,3) of
-that slice is verified identical to ffmpeg: 60 macroblocks matching in type, in partition shape, in
-skip-versus-coded status, and pixel for pixel. The skip flag's context index is right there
-(neighbours skip and coded, so ctxIdxInc 1). Since the arithmetic decoder's state is a pure
-function of the bins consumed, some earlier macroblock must have consumed a different number of
-bins in a way that changed neither pixels nor types. The quantiser is uniform across that picture,
-which means a `mb_qp_delta` of zero read or not read would be entirely invisible — that is the
-first thing to check.
+It takes three things at once to bite: a CODED direct macroblock rather than a skipped one, sitting
+beside a macroblock that codes a reference index, in a stream with more than one reference so the
+inferred index can exceed zero. With a single reference picture it can never happen, which is why
+every simple fixture passed.
 
-### The tooling, which is the useful part
+The flag has to be per 4x4 block, not per macroblock, because a B_8x8 can be direct in some of its
+four partitions and not others.
 
-`ffmpeg -v debug -threads 1 -debug mb_type` and `-debug qp` print per-macroblock maps, and
-`-threads 1` matters because frame threads interleave the log lines into nonsense. Two things about
-the map are not guessable and cost hours if assumed:
+## How the last two bugs were actually found
 
-- **`>` is list-0-only and `<` is list-1-only**, which is the opposite of what the arrows suggest.
-  Reading them naturally invents a list swap that is not there.
-- **Lowercase `d` is direct AND skipped; uppercase `D` is direct but coded.** The suffix character
-  is the partition shape: `+` is 8x8, `-` is 16x8, `|` is 8x16, space is 16x16. Without the suffix
-  a B_8x8 and a bi-predicted 16x16 look identical, and they consume wildly different numbers of
-  bins.
+Both were single wrong bins hundreds of macroblocks into a stream, and the same method found both.
 
-The quantiser map is the sharpest tracer when a picture has quantiser changes in it: comparing it
-against the decoder's own `pic-mb-qps` located the YouTube fault to one macroblock in one run.
+1. **Narrow with encoder features.** Encode fixtures varying ONE x264 setting at a time and see
+   which turns red. Temporal direct and multiple references were each fine alone and broke
+   together; weighted prediction turned out to be a red herring that merely changed the content
+   enough to reach the bug.
+2. **Locate with ffmpeg's debug maps.** `-debug qp` and `-debug mb_type`, with `-threads 1` because
+   frame threads interleave the log into nonsense. Comparing the quantiser map against the
+   decoder's own `pic-mb-qps` located a fault to one macroblock in a single run.
+3. **Confirm with pixels.** Comparing against `-skip_loop_filter all` output says which macroblock
+   first goes wrong, which is often earlier than where the decoder throws.
+
+Two details of the maps are not guessable and cost hours if assumed:
+
+- **`>` is list-0-only and `<` is list-1-only** — the opposite of what the arrows suggest.
+- **Lowercase `d` is direct AND skipped; uppercase `D` is direct but coded.** The suffix is the
+  partition shape: `+` 8x8, `-` 16x8, `|` 8x16, space 16x16. Without it a B_8x8 and a bi-predicted
+  16x16 look identical while consuming wildly different numbers of bins.
 
 ## Performance
 

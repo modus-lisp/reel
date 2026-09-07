@@ -483,7 +483,7 @@
             1
             (if (= 1 (decode-decision c (+ +ctx-sub-mb-type-p+ 2))) 2 3)))))
 
-(defun %ref-idx-ctx-inc (ss bx by &optional (lx 0))
+(defun %ref-idx-ctx-inc (ss bx by &optional (lx 0) b-slice)
   "ctxIdxInc for bin 0 of ref_idx (9.3.3.1.1.6): a neighbour counts when it used a reference other
    than the first one."
   (let ((pic (ss-pic ss)))
@@ -497,12 +497,20 @@
                                  (%nbr-mbi ss dx dy))))
                      (cond
                        ((null i) 0)
-                       ;; 9.3.3.1.1.6 excludes an intra neighbour AND a skipped one, and the
-                       ;; second exclusion is load-bearing rather than an optimisation: a skipped
-                       ;; B macroblock does have a direct-derived reference index, and counting it
-                       ;; desynchronises within a couple of dozen slices.
+                       ;; 9.3.3.1.1.6 excludes an intra neighbour, a skipped one, and — in a B
+                       ;; slice — any partition predicted in DIRECT mode.  All three exclusions are
+                       ;; load-bearing rather than tidiness: a direct partition has a reference
+                       ;; index it was never told, only inferred, and counting it desynchronises.
+                       ;;
+                       ;; It takes three things at once to notice: a CODED direct macroblock rather
+                       ;; than a skipped one, sitting next to a macroblock that codes a reference
+                       ;; index, in a stream with more than one reference so that the inferred index
+                       ;; can exceed zero.  With a single reference it can never bite.
                        ((>= (aref (pic-mb-types pic) i) 0) 0)
                        ((= -2 (aref (pic-mb-types pic) i)) 0)
+                       ((and b-slice
+                             (plusp (aref (pic-blk-direct pic) (%mv-index pic nbx nby))))
+                        0)
                        (t (multiple-value-bind (mx my r) (blk-mv pic nbx nby lx)
                             (declare (ignore mx my))
                             (if (> r 0) 1 0)))))))))
@@ -511,7 +519,8 @@
 (defun cabac-ref-idx (ss bx by &optional (lx 0))
   "ref_idx for list LX: unary, with the first three bins on their own contexts."
   (let ((c (ss-cabac ss)))
-    (if (zerop (decode-decision c (+ +ctx-ref-idx+ (%ref-idx-ctx-inc ss bx by lx))))
+    (if (zerop (decode-decision c (+ +ctx-ref-idx+
+                                    (%ref-idx-ctx-inc ss bx by lx (sh-b-slice-p (ss-sh ss))))))
         0
         (if (zerop (decode-decision c (+ +ctx-ref-idx+ 4)))
             1

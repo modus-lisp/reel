@@ -103,6 +103,10 @@ order count can be negative, so absence needs a value no picture can hold.")
   ;; Per macroblock, and only CABAC reads them: it chooses a context for nearly every syntax
   ;; element from what the neighbouring macroblocks decoded, so facts CAVLC could forget as soon
   ;; as it used them have to survive here.
+  ;; Was this 4x4 block predicted in DIRECT mode?  Only the reference-index context asks, and it
+  ;; asks per block rather than per macroblock because a B_8x8 can be direct in some of its four
+  ;; partitions and not others.
+  (blk-direct (%emptyfx) :type fixnums)
   (mb-cbp (%emptyfx) :type fixnums)       ; coded_block_pattern, for the CBP contexts
   (mb-chroma-mode (%emptyfx) :type fixnums) ; intra_chroma_pred_mode
   (mb-dc-cbf (%emptyfx) :type fixnums))   ; bit 0 luma DC, 1 Cb DC, 2 Cr DC
@@ -130,6 +134,7 @@ order count can be negative, so absence needs a value no picture can hold.")
      :mvds (make-array (* mbw 4 mbh 4 4) :element-type 'fixnum :initial-element 0)
      :ref-pics (make-array (* mbw 4 mbh 4 2) :element-type 'fixnum
                            :initial-element +no-ref-poc+)
+     :blk-direct (make-array (* mbw 4 mbh 4) :element-type 'fixnum :initial-element 0)
      :mb-cbp (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0)
      :mb-chroma-mode (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0)
      :mb-dc-cbf (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0))))
@@ -218,6 +223,7 @@ order count can be negative, so absence needs a value no picture can hold.")
 
 (defun clear-blk-motion (pic bx by)
   "Mark a block as predicting from nothing, which is what an intra block does."
+  (setf (aref (pic-blk-direct pic) (%mv-index pic bx by)) 0)
   (dotimes (lx 2) (set-blk-mv pic bx by 0 0 -1 lx +no-ref-poc+))
   (let ((i (%mv-index pic bx by)))
     (dotimes (k 4) (setf (aref (pic-mvds pic) (+ (* 4 i) k)) 0))))
@@ -696,6 +702,7 @@ order count can be negative, so absence needs a value no picture can hold.")
         (bx0 (* 4 (ss-mbx ss))) (by0 (* 4 (ss-mby ss))))
     (dotimes (j hb)
       (dotimes (i wb)
+        (setf (aref (pic-blk-direct pic) (%mv-index pic (+ bx i) (+ by j))) 0)
         (set-blk-mv pic (+ bx i) (+ by j) mvx mvy ref 0 rid)
         (set-blk-mv pic (+ bx i) (+ by j) 0 0 -1 1 +no-ref-poc+)
         (let ((lx (- (+ bx i) bx0)) (ly (- (+ by j) by0)))
@@ -1008,6 +1015,7 @@ order count can be negative, so absence needs a value no picture can hold.")
   (let ((pic (ss-pic ss)))
     (dotimes (j hb)
       (dotimes (i wb)
+        (setf (aref (pic-blk-direct pic) (%mv-index pic (+ bx i) (+ by j))) 0)
         (if (pred-uses-l0-p mode)
             (set-blk-mv pic (+ bx i) (+ by j) mv0x mv0y r0 0 (%ref-picture-poc ss r0 0))
             (set-blk-mv pic (+ bx i) (+ by j) 0 0 -1 0 +no-ref-poc+))
@@ -1122,6 +1130,7 @@ order count can be negative, so absence needs a value no picture can hold.")
 
 (defun %apply-direct (ss bx by)
   "Predict and record one 4x4 direct block, by whichever direct method the slice chose."
+  (setf (aref (pic-blk-direct (ss-pic ss)) (%mv-index (ss-pic ss) bx by)) 1)
   (let ((px (* 4 bx)) (py (* 4 by)))
     (multiple-value-bind (cbx cby) (%direct-col-xy ss bx by)
       (if (ss-direct-spatial ss)
@@ -1136,7 +1145,8 @@ order count can be negative, so absence needs a value no picture can hold.")
                 (%mc-b ss px py 4 4 mode r0 m0x m0y r1 m1x m1y))))
           (multiple-value-bind (r0 r1 m0x m0y m1x m1y) (%direct-temporal ss cbx cby)
             (%set-b-motion ss bx by 1 1 +pred-bi+ r0 m0x m0y r1 m1x m1y)
-            (%mc-b ss px py 4 4 +pred-bi+ r0 m0x m0y r1 m1x m1y))))))
+            (%mc-b ss px py 4 4 +pred-bi+ r0 m0x m0y r1 m1x m1y))))
+    (setf (aref (pic-blk-direct (ss-pic ss)) (%mv-index (ss-pic ss) bx by)) 1)))
 
 (defun %direct-16x16 (ss)
   "A whole macroblock of direct blocks."

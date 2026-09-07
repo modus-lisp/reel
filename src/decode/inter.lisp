@@ -66,7 +66,8 @@
 
 ;;; ---- pictures (what the caller sees) -------------------------------------------
 
-(defstruct (picture (:conc-name picture-))
+(defstruct (picture (:conc-name picture-) (:constructor make-picture)
+                    (:constructor %make-shared-picture))
   (width 0 :type fixnum) (height 0 :type fixnum)
   y u v                                         ; octet planes (shared with the decoder's reference)
   (y-stride 0 :type fixnum) (uv-stride 0 :type fixnum)

@@ -41,4 +41,18 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
        (:file "intra")         ; the key-frame pixel pipeline
        (:file "loopfilter")    ; the in-loop deblocking filter
        (:file "inter-tables")  ; mode contexts, MV probabilities, sub-pixel filters
-       (:file "inter")))))))   ; inter frames, references, and the decoder proper
+       (:file "inter")))     ; inter frames, references, and the decoder proper
+     ;; ---- H.264 / AVC, its own package again and for the same reason: a second codec
+     (:module "h264"
+      :serial t
+      :components
+      ((:file "bits")         ; NAL units, RBSP, the Exp-Golomb bit reader
+       (:file "params")       ; sequence and picture parameter sets, slice headers
+       (:file "tables")       ; the CAVLC VLC tables, the scan order, the dequant tables
+       (:file "cavlc")        ; residual blocks: coeff_token, levels, runs
+       (:file "transform")    ; dequantisation, the inverse 4x4 and the DC transforms
+       (:file "intra")        ; the nine 4x4, four 16x16 and four chroma prediction modes
+       (:file "slice")        ; the macroblock layer and the slice loop
+       (:file "deblock-tables")  ; the loop filter's alpha/beta/tc0 thresholds
+       (:file "deblock")      ; the in-loop deblocking filter
+       (:file "decode")))))))  ; NAL units in, pictures out

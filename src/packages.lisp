@@ -39,6 +39,32 @@
    ;; conditions
    #:vp8-error #:vp8-error-message))
 
+(defpackage #:reel.h264
+  (:use #:cl)
+  (:export
+   ;; the bitstream layer
+   #:h264-error #:h264-error-message
+   #:nal #:nal-ref-idc #:nal-type #:nal-rbsp #:nal-idr-p #:nal-slice-p
+   #:annex-b-nals #:length-prefixed-nals #:parse-nal #:avcc-parameter-sets #:rbsp-from
+   #:bitreader #:make-bitreader #:u1 #:ub #:ue #:se #:more-rbsp-data-p #:byte-align #:br-eof-p
+   #:+nal-slice+ #:+nal-idr+ #:+nal-sps+ #:+nal-pps+ #:+nal-sei+
+   ;; the headers
+   #:sps #:parse-sps #:sps-id #:sps-profile #:sps-level #:sps-width #:sps-height
+   #:sps-mb-width #:sps-mb-height #:sps-log2-max-frame-num #:sps-poc-type #:sps-max-ref-frames
+   #:sps-crop-left #:sps-crop-right #:sps-crop-top #:sps-crop-bottom
+   #:pps #:parse-pps #:pps-id #:pps-sps-id #:pps-cabac #:pps-init-qp #:pps-chroma-qp-offset
+   #:pps-deblocking-control #:pps-constrained-intra #:pps-chroma-qp-offset-for
+   #:slice-header #:parse-slice-header #:slice-type-name #:sh-i-slice-p #:sh-p-slice-p
+   #:sh-first-mb #:sh-slice-type #:sh-frame-num #:sh-qp #:sh-sps #:sh-pps #:sh-nal
+   #:sh-disable-deblocking #:sh-alpha-offset #:sh-beta-offset
+   ;; residual decoding
+   #:residual-block #:+zigzag-4x4+ #:+dequant-coeff+ #:+dequant-class+ #:+qpc-from-qpy+
+   ;; the decoder
+   #:decoder #:make-decoder #:feed-nal #:decode-picture #:decode-annex-b
+   #:decoder-width #:decoder-height
+   #:picture #:pic-width #:pic-height #:pic-y #:pic-u #:pic-v #:picture->yuv420
+   #:deblock-picture #:as-picture))
+
 (defpackage #:reel
   (:use #:cl)
   (:nicknames #:vp8)

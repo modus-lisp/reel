@@ -56,16 +56,27 @@
 
 (defconstant +pad+ 16 "Border samples around each plane, so a neighbour read at -1 is in bounds.")
 
+(deftype fixnums () '(simple-array fixnum (*)))
+
+(declaim (inline %empty8 %emptyfx))
+(defun %empty8 () (make-array 0 :element-type '(unsigned-byte 8)))
+(defun %emptyfx () (make-array 0 :element-type 'fixnum))
+
 (defstruct (picture (:conc-name pic-))
   (width 0 :type fixnum) (height 0 :type fixnum)          ; displayed, after cropping
   (mb-width 0 :type fixnum) (mb-height 0 :type fixnum)
-  y u v
+  ;; TYPED, and it matters more than it looks.  Every sample the decoder reads or writes goes
+  ;; through one of these slots, and an untyped slot makes each of those a generic array dispatch
+  ;; at run time — it measured at 4% of decode time all by itself.
+  (y (%empty8) :type octets) (u (%empty8) :type octets) (v (%empty8) :type octets)
   (ystride 0 :type fixnum) (cstride 0 :type fixnum)
   (yoff 0 :type fixnum) (coff 0 :type fixnum)
   ;; per-4x4-block coefficient counts, for nC
-  nz-y nz-u nz-v
+  (nz-y (%emptyfx) :type fixnums) (nz-u (%emptyfx) :type fixnums) (nz-v (%emptyfx) :type fixnums)
   ;; per-4x4-block Intra4x4 prediction modes, and per-macroblock facts the loop filter needs
-  modes mb-types mb-qps)
+  (modes (%emptyfx) :type fixnums)
+  (mb-types (%emptyfx) :type fixnums)
+  (mb-qps (%emptyfx) :type fixnums))
 
 (defun make-picture-for (sps)
   (let* ((mbw (sps-mb-width sps)) (mbh (sps-mb-height sps))
@@ -88,9 +99,11 @@
 
 (declaim (inline pic-y-base pic-c-base))
 (defun pic-y-base (p mbx mby)
-  (+ (pic-yoff p) (* (* 16 mby) (pic-ystride p)) (* 16 mbx)))
+  
+  (declare (optimize (speed 3) (safety 1)))(+ (pic-yoff p) (* (* 16 mby) (pic-ystride p)) (* 16 mbx)))
 (defun pic-c-base (p mbx mby)
-  (+ (pic-coff p) (* (* 8 mby) (pic-cstride p)) (* 8 mbx)))
+  
+  (declare (optimize (speed 3) (safety 1)))(+ (pic-coff p) (* (* 8 mby) (pic-cstride p)) (* 8 mbx)))
 
 ;;; ---- the decoding state for one slice -----------------------------------------------------------
 
@@ -98,14 +111,16 @@
   pic sh br
   (mbx 0 :type fixnum) (mby 0 :type fixnum)
   (qp 26 :type fixnum)
-  (coeffs (make-array 16 :element-type 'fixnum))       ; scan-order scratch
-  (block (make-array 16 :element-type 'fixnum))        ; raster-order scratch
-  (luma-dc (make-array 16 :element-type 'fixnum))
-  (chroma-dc (make-array 4 :element-type 'fixnum))
-  (chroma-dc-v (make-array 4 :element-type 'fixnum))   ; the second plane's, so neither is per-macroblock
-  (pred (make-array 16 :element-type '(unsigned-byte 8)))
-  (pt (make-array 9 :element-type '(unsigned-byte 8)))
-  (pl (make-array 4 :element-type '(unsigned-byte 8))))
+  ;; typed for the same reason the picture's planes are: these are read and written per block
+  (coeffs (make-array 16 :element-type 'fixnum) :type fixnums)   ; scan-order scratch
+  (block (make-array 16 :element-type 'fixnum) :type fixnums)    ; raster-order scratch
+  (luma-dc (make-array 16 :element-type 'fixnum) :type fixnums)
+  (chroma-dc (make-array 4 :element-type 'fixnum) :type fixnums)
+  ;; the second plane's, so neither is per-macroblock
+  (chroma-dc-v (make-array 4 :element-type 'fixnum) :type fixnums)
+  (pred (make-array 16 :element-type '(unsigned-byte 8)) :type octets)
+  (pt (make-array 9 :element-type '(unsigned-byte 8)) :type octets)
+  (pl (make-array 4 :element-type '(unsigned-byte 8)) :type octets))
 
 (defun mb-available-p (ss dx dy)
   "Is the macroblock at (mbx+DX, mby+DY) decoded and in this slice?
@@ -113,6 +128,7 @@
    Raster order and one slice per picture, so this is `is it inside, and is it before us'.  A
    decoder with several slices per picture must also compare slice numbers here, which is why
    this is one function and not an inline test in six places."
+  (declare (optimize (speed 3) (safety 1)))
   (let* ((x (+ (ss-mbx ss) dx)) (y (+ (ss-mby ss) dy))
          (pic (ss-pic ss)))
     (and (>= x 0) (>= y 0) (< x (pic-mb-width pic)) (< y (pic-mb-height pic))
@@ -121,10 +137,12 @@
 ;;; ---- nC: the coefficient-count context ------------------------------------------------------------
 
 (defun %nz-at (grid gw bx by)
-  (if (or (minusp bx) (minusp by)) nil (aref grid (+ (* by gw) bx))))
+  
+  (declare (optimize (speed 3) (safety 1)))(if (or (minusp bx) (minusp by)) nil (aref grid (+ (* by gw) bx))))
 
 (defun luma-nc (ss blk)
   "nC for luma 4x4 block BLK of the current macroblock (9.2.1)."
+  (declare (optimize (speed 3) (safety 1)))
   (let* ((pic (ss-pic ss)) (gw (* 4 (pic-mb-width pic)))
          (bx (+ (* 4 (ss-mbx ss)) (aref +blk-x+ blk)))
          (by (+ (* 4 (ss-mby ss)) (aref +blk-y+ blk)))
@@ -137,6 +155,7 @@
 
 (defun chroma-nc (ss plane blk)
   "nC for a chroma 4x4 block (0..3) of PLANE (0 = Cb, 1 = Cr)."
+  (declare (optimize (speed 3) (safety 1)))
   (let* ((pic (ss-pic ss)) (gw (* 2 (pic-mb-width pic)))
          (grid (if (zerop plane) (pic-nz-u pic) (pic-nz-v pic)))
          (lx (logand blk 1)) (ly (ash blk -1))
@@ -148,14 +167,16 @@
           (left left) (up up) (t 0))))
 
 (defun set-luma-nz (ss blk n)
-  (let* ((pic (ss-pic ss)) (gw (* 4 (pic-mb-width pic))))
+  
+  (declare (optimize (speed 3) (safety 1)))(let* ((pic (ss-pic ss)) (gw (* 4 (pic-mb-width pic))))
     (setf (aref (pic-nz-y pic)
                 (+ (* (+ (* 4 (ss-mby ss)) (aref +blk-y+ blk)) gw)
                    (+ (* 4 (ss-mbx ss)) (aref +blk-x+ blk))))
           n)))
 
 (defun set-chroma-nz (ss plane blk n)
-  (let* ((pic (ss-pic ss)) (gw (* 2 (pic-mb-width pic)))
+  
+  (declare (optimize (speed 3) (safety 1)))(let* ((pic (ss-pic ss)) (gw (* 2 (pic-mb-width pic)))
          (grid (if (zerop plane) (pic-nz-u pic) (pic-nz-v pic))))
     (setf (aref grid (+ (* (+ (* 2 (ss-mby ss)) (ash blk -1)) gw)
                         (+ (* 2 (ss-mbx ss)) (logand blk 1))))
@@ -165,6 +186,7 @@
 
 (defun neighbour-mb-available-p (ss blk dx dy)
   "Is the MACROBLOCK containing the neighbour DX,DY away from BLK available?"
+  (declare (optimize (speed 3) (safety 1)))
   (let* ((lx (+ (aref +blk-x+ blk) dx)) (ly (+ (aref +blk-y+ blk) dy))
          (mbdx (cond ((minusp lx) -1) ((> lx 3) 1) (t 0)))
          (mbdy (cond ((minusp ly) -1) ((> ly 3) 1) (t 0))))
@@ -174,6 +196,7 @@
 (defun neighbour-mode (ss blk dx dy)
   "The Intra4x4 mode of the block DX,DY away from BLK, or 2 (DC) when the macroblock it lives in
    was not Intra4x4 coded."
+  (declare (optimize (speed 3) (safety 1)))
   (let* ((pic (ss-pic ss)) (gw (* 4 (pic-mb-width pic)))
          (lx (+ (aref +blk-x+ blk) dx)) (ly (+ (aref +blk-y+ blk) dy))
          (mbdx (cond ((minusp lx) -1) ((> lx 3) 1) (t 0)))
@@ -203,6 +226,7 @@
    reading and it is wrong.  It desynchronises nothing, because the flag and remainder are the
    same number of bits either way; it silently decodes the wrong prediction mode, and the picture
    comes out structured but wrong in a way that looks like a transform bug."
+  (declare (optimize (speed 3) (safety 1)))
   (let ((a-ok (neighbour-mb-available-p ss blk -1 0))
         (b-ok (neighbour-mb-available-p ss blk 0 -1)))
     (if (not (and a-ok b-ok))
@@ -210,7 +234,8 @@
         (min (neighbour-mode ss blk -1 0) (neighbour-mode ss blk 0 -1)))))
 
 (defun set-mode (ss blk mode)
-  (let* ((pic (ss-pic ss)) (gw (* 4 (pic-mb-width pic))))
+  
+  (declare (optimize (speed 3) (safety 1)))(let* ((pic (ss-pic ss)) (gw (* 4 (pic-mb-width pic))))
     (setf (aref (pic-modes pic)
                 (+ (* (+ (* 4 (ss-mby ss)) (aref +blk-y+ blk)) gw)
                    (+ (* 4 (ss-mbx ss)) (aref +blk-x+ blk))))
@@ -229,6 +254,7 @@
    When it is unavailable the mode is not forbidden — p[3,-1] is replicated into p[4..7,-1]
    (8.3.1.2) — so getting this wrong does not crash, it quietly predicts two of the nine modes
    from the wrong samples."
+  (declare (optimize (speed 3) (safety 1)))
   (let* ((bx (aref +blk-x+ blk)) (by (aref +blk-y+ blk))
          (nx (1+ bx)) (ny (1- by)))
     (cond
@@ -253,10 +279,12 @@
      ,@body))
 
 (declaim (inline %mb-index))
-(defun %mb-index (ss) (+ (* (ss-mby ss) (pic-mb-width (ss-pic ss))) (ss-mbx ss)))
+(defun %mb-index (ss) 
+  (declare (optimize (speed 3) (safety 1)))(+ (* (ss-mby ss) (pic-mb-width (ss-pic ss))) (ss-mbx ss)))
 
 (defun decode-i-macroblock (ss)
   "Parse and reconstruct one I-slice macroblock."
+  (declare (optimize (speed 3) (safety 1)))
   (let* ((br (ss-br ss)) (pic (ss-pic ss))
          (mb-type (ue br))
          (mbi (+ (* (ss-mby ss) (pic-mb-width pic)) (ss-mbx ss))))
@@ -269,10 +297,12 @@
     (setf (aref (pic-mb-qps pic) mbi) (ss-qp ss))
     mb-type))
 
-(defun %chroma-pred-mode (br) (ue br))
+(defun %chroma-pred-mode (br) 
+  (declare (optimize (speed 3) (safety 1)))(ue br))
 
 (defun decode-i4x4-macroblock (ss)
-  (let* ((br (ss-br ss)) (pic (ss-pic ss))
+  
+  (declare (optimize (speed 3) (safety 1)))(let* ((br (ss-br ss)) (pic (ss-pic ss))
          (modes (make-array 16 :element-type 'fixnum)))
     (declare (dynamic-extent modes))
     ;; the sixteen prediction modes, each coded against its neighbours' minimum
@@ -338,6 +368,7 @@
 (defun decode-i16x16-macroblock (ss code)
   "An Intra16x16 macroblock.  CODE is mb_type - 1, which packs three things: the prediction mode,
    whether chroma has DC only or DC and AC, and whether luma has AC at all."
+  (declare (optimize (speed 3) (safety 1)))
   (let* ((br (ss-br ss)) (pic (ss-pic ss))
          (pred-mode (mod code 4))
          (cbp-chroma (mod (floor code 4) 3))
@@ -383,6 +414,7 @@
    planes are otherwise processed in.  Doing Cb entirely and then Cr — which is what writing the
    loop the obvious way gives you — reads the Cr DC block out of the middle of Cb's AC data and
    desynchronises the whole slice from that macroblock on."
+  (declare (optimize (speed 3) (safety 1)))
   (let* ((br (ss-br ss)) (sh (ss-sh ss)) (pps (sh-pps sh)) (pic (ss-pic ss))
          (cbp-chroma (ash cbp -4))
          (base (pic-c-base pic (ss-mbx ss) (ss-mby ss)))

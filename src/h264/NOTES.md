@@ -58,5 +58,26 @@ compensation, and the inter boundary-strength derivation the deblocking filter w
 That is the larger half of Constrained Baseline. B slices, CABAC, MBAFF and FMO are outside
 Constrained Baseline and are refused too.
 
-Performance is roughly 19 fps on all-intra 640x360, against 30 nominal, so the media player drops
-frames on that clip. Nothing here has been optimised; the decode loop is the obvious place to start.
+## Performance
+
+About 35 fps on all-intra 640x360, up from 20.6, so real time for a 30 fps clip with headroom.
+Allocation is 0.87 MB per picture, down from 3.83. The profile is flat now: the deblocking filter
+is the largest single item at ~13%, and nothing else is above 8%.
+
+What produced that, in order of what it was worth:
+
+| change | why it mattered |
+|---|---|
+| CAVLC lookup tables | the table walk read a bit and rescanned every entry, up to 68 deep and 16 bits long — 22% of decode. Peeking the row's longest code and indexing directly costs ~87k entries total, under 200 KB. |
+| `declaim` on the tables | they are special variables, so every `aref` on one was `HAIRY-DATA-VECTOR-REF`, a generic dispatch per lookup. |
+| typed `picture` and `slice-state` slots | every sample the decoder touches goes through those slots; untyped, each access dispatched generically. |
+| narrowed arithmetic in `dequant-4x4` | fixnum times fixnum may be a bignum, so `fixnum` alone still called generic multiply and shift. The real bounds are much tighter. |
+| `(speed 3)` on the hot functions | most of them had type declarations but no policy, so the default kept them slow. |
+
+The lesson worth carrying: in this decoder every win came from *telling the compiler what was already
+true*, not from changing an algorithm — except the CAVLC tables, which were a genuine algorithm
+change. Nothing here altered a single output sample, which is why the bit-exactness tests could be
+run after each step and were.
+
+`%vlc` stays at `safety 1` deliberately. Every index in it is bounded by construction, but this
+decodes files off the internet and the checks measured at about 3%.

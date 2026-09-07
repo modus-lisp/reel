@@ -15,6 +15,19 @@
 
 (in-package #:reel.h264)
 
+;;; The tables are special variables, so without these DECLAIMs every AREF on one compiles to
+;;; SB-KERNEL:HAIRY-DATA-VECTOR-REF — a full generic dispatch on the array's type, at run time,
+;;; per lookup.  It measured at 7% of decode time.  Naming the type once here makes each of them a
+;;; direct indexed read instead.
+(declaim (type (simple-array (unsigned-byte 8) (* *))
+               +coeff-token-len+ +coeff-token-bits+
+               +chroma-dc-coeff-token-len+ +chroma-dc-coeff-token-bits+
+               +total-zeros-len+ +total-zeros-bits+
+               +chroma-dc-total-zeros-len+ +chroma-dc-total-zeros-bits+
+               +run-len+ +run-bits+ +dequant-coeff+))
+(declaim (type (simple-array (unsigned-byte 8) (*))
+               +zigzag-4x4+ +dequant-class+ +qpc-from-qpy+))
+
 (defparameter +coeff-token-len+
   ;; Table 9-5, indexed [nC range][4*total_coeff + trailing_ones].
   (make-array '(4 68) :element-type '(unsigned-byte 8)

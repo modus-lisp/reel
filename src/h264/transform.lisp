@@ -19,7 +19,8 @@
 (in-package #:reel.h264)
 
 (declaim (inline clamp255))
-(defun clamp255 (v) (declare (type fixnum v)) (max 0 (min 255 v)))
+(defun clamp255 (v) 
+  (declare (optimize (speed 3) (safety 1)))(declare (type fixnum v)) (max 0 (min 255 v)))
 
 ;;; ---- dequantisation ---------------------------------------------------------------------------
 
@@ -34,15 +35,21 @@ just far too small to matter, so the output looks like prediction alone.")
 
    START is 1 for the AC-only block of an Intra16x16 macroblock, whose DC came from the separate
    Hadamard-coded block; OUT position 0 is then left for the caller to fill in."
+  (declare (optimize (speed 3) (safety 1)))
   (declare (type (simple-array fixnum (*)) coeffs out) (type fixnum qp start))
   (let ((m (mod qp 6)) (e (floor qp 6)))
-    (declare (type fixnum m e))
-    (loop for scan of-type fixnum from start below 16
-          for c of-type fixnum = (aref coeffs scan)
+    (declare (type (integer 0 5) m) (type (integer 0 8) e))
+    (loop for scan of-type (integer 0 16) from start below 16
+          ;; NARROW, not merely FIXNUM.  A fixnum times a fixnum may be a bignum as far as the
+          ;; compiler knows, so the obvious declaration still calls generic multiply and generic
+          ;; shift.  A coefficient is bounded by the level code and the scale by table 8-15, and
+          ;; saying so is what turns this loop into machine arithmetic.
+          for c of-type (signed-byte 26) = (aref coeffs scan)
           do (let* ((raster (aref +zigzag-4x4+ scan))
-                    (scale (* +flat-weight-scale+
-                              (aref +dequant-coeff+ m (aref +dequant-class+ raster)))))
-               (declare (type fixnum raster scale))
+                    (scale (the (integer 0 8192)
+                                (* +flat-weight-scale+
+                                   (aref +dequant-coeff+ m (aref +dequant-class+ raster))))))
+               (declare (type (integer 0 15) raster))
                (setf (aref out raster)
                      (if (zerop c)
                          0
@@ -91,6 +98,7 @@ just far too small to matter, so the output looks like prediction alone.")
    transformed again — a second-order transform, exactly as VP8's Y2 block is.  Both formats
    reached for it for the same reason: on flat content the DCs are the only thing left and they
    correlate strongly with each other."
+  (declare (optimize (speed 3) (safety 1)))
   (declare (type (simple-array fixnum (16)) dc) (type fixnum qp))
   ;; Rows, then columns, of the un-normalised Hadamard (8.5.10).  The matrix is
   ;;     1  1  1  1 / 1  1 -1 -1 / 1 -1 -1  1 / 1 -1  1 -1
@@ -124,6 +132,7 @@ just far too small to matter, so the output looks like prediction alone.")
 
 (defun chroma-dc-transform (dc qp)
   "The 2x2 Hadamard over a chroma component's four DC coefficients (8.5.11).  DC is four elements."
+  (declare (optimize (speed 3) (safety 1)))
   (declare (type (simple-array fixnum (*)) dc) (type fixnum qp))
   (let* ((a (aref dc 0)) (b (aref dc 1)) (c (aref dc 2)) (d (aref dc 3))
          (e0 (+ a b)) (e1 (- a b)) (e2 (+ c d)) (e3 (- c d))
@@ -155,6 +164,7 @@ just far too small to matter, so the output looks like prediction alone.")
 
 (defun chroma-qp (qpy offset)
   "The chroma quantiser for a luma QP and the PPS/slice offset (Table 8-15)."
+  (declare (optimize (speed 3) (safety 1)))
   (declare (type fixnum qpy offset))
   (let ((qpi (max 0 (min 51 (+ qpy offset)))))
     (aref +qpc-from-qpy+ qpi)))

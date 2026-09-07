@@ -25,24 +25,82 @@
 
 ;;; ---- VLC decoding ---------------------------------------------------------------------------
 
-(defun %vlc (br lens bits row n)
-  "Decode one variable-length code from ROW of the (LENS, BITS) table pair, which has N entries.
+;;; ---- the code tables, turned into something you can look up ------------------------------------
+;;;
+;;; The specification gives each CAVLC table as a (length, code) pair per symbol, and the obvious
+;;; decoder walks it: read a bit, scan every entry for one whose length and value now match, repeat.
+;;; That is correct — these are prefix codes, so the first match is the only match — and it was 22%
+;;; of decode time, because a coeff_token row is 68 entries deep and 16 bits long, so a single
+;;; symbol could cost hundreds of comparisons.
+;;;
+;;; What replaces it is the standard trade: peek the longest code the row can hold, and index a
+;;; table directly with those bits.  Every code that starts with the same prefix lands on the same
+;;; entry, so the entry records the symbol AND its true length, and only that many bits are
+;;; consumed.  A row whose longest code is L costs 2^L entries; the longest here is 16 and most are
+;;; far shorter, so the whole set is about 87k entries, or under 200 KB for both arrays.
 
-   Reads one bit at a time, accumulating a candidate code, and stops at the first entry whose
-   length and value both match.  These tables are prefix codes, so the first match is the only
-   match and there is no backtracking; that property is what makes reading forward legal."
-  (declare (type bitreader br) (type (simple-array (unsigned-byte 8) (* *)) lens bits)
-           (type fixnum row n))
-  (let ((code 0))
-    (declare (type fixnum code))
-    (dotimes (len 17)
-      (declare (ignorable len))
-      (setf code (logior (ash code 1) (u1 br)))
-      (let ((want (1+ len)))
-        (dotimes (i n)
-          (when (and (= (aref lens row i) want) (= (aref bits row i) code))
-            (return-from %vlc i)))))
-    (%err "no CAVLC code matched in ~d bits" 17)))
+(defstruct (vlc (:constructor %make-vlc))
+  "One row of a CAVLC table, as a direct lookup on the next MAX-LEN bits."
+  (max-len 0 :type (integer 0 24))
+  (syms #() :type (simple-array (unsigned-byte 8) (*)))    ; symbol index per prefix
+  (lens #() :type (simple-array (unsigned-byte 8) (*))))   ; its true code length, 0 = no such code
+
+(defun %build-vlc-row (lens bits row n)
+  "Build the lookup for one row of a (LENS, BITS) table pair with N entries."
+  (declare (type (simple-array (unsigned-byte 8) (* *)) lens bits) (type fixnum row n))
+  (let ((max-len 0))
+    (declare (type fixnum max-len))
+    (dotimes (i n) (setf max-len (max max-len (aref lens row i))))
+    (let* ((size (ash 1 max-len))
+           (syms (make-array size :element-type '(unsigned-byte 8) :initial-element 0))
+           (lena (make-array size :element-type '(unsigned-byte 8) :initial-element 0)))
+      (dotimes (i n)
+        (let ((l (aref lens row i)))
+          (when (plusp l)
+            ;; every suffix of the remaining bits maps to this symbol
+            (let ((base (ash (aref bits row i) (- max-len l)))
+                  (span (ash 1 (- max-len l))))
+              (dotimes (k span)
+                (let ((slot (+ base k)))
+                  (when (plusp (aref lena slot))
+                    (error "reel/h264: CAVLC table row ~d is not a prefix code at ~d" row slot))
+                  (setf (aref syms slot) i (aref lena slot) l)))))))
+      (%make-vlc :max-len max-len :syms syms :lens lena))))
+
+(defun %build-vlc-table (lens bits n)
+  "One VLC per row of a table pair, as a simple-vector indexed by row."
+  (let* ((rows (array-dimension lens 0))
+         (v (make-array rows)))
+    (dotimes (r rows v) (setf (aref v r) (%build-vlc-row lens bits r n)))))
+
+(defparameter +coeff-token-vlc+
+  (%build-vlc-table +coeff-token-len+ +coeff-token-bits+ 68))
+(defparameter +chroma-dc-coeff-token-vlc+
+  (%build-vlc-table +chroma-dc-coeff-token-len+ +chroma-dc-coeff-token-bits+ 20))
+(defparameter +total-zeros-vlc+
+  (%build-vlc-table +total-zeros-len+ +total-zeros-bits+ 16))
+(defparameter +chroma-dc-total-zeros-vlc+
+  (%build-vlc-table +chroma-dc-total-zeros-len+ +chroma-dc-total-zeros-bits+ 4))
+(defparameter +run-vlc+
+  (%build-vlc-table +run-len+ +run-bits+ 16))
+
+(declaim (inline %vlc))
+(defun %vlc (br table row)
+  "Decode one variable-length code from ROW of TABLE.  Returns the symbol index."
+  ;; SAFETY 1, not 0.  Every index here is bounded by construction — ROW comes from a COND with
+  ;; four arms or a count the caller already clamped, and the peek is MAX-LEN bits wide indexing a
+  ;; table with exactly 2^MAX-LEN entries — but this decoder reads files off the internet, and the
+  ;; bounds checks measured free against the table lookup they guard.
+  (declare (type bitreader br) (type simple-vector table) (type fixnum row)
+           (optimize (speed 3) (safety 1)))
+  (let* ((v (aref table row))
+         (max-len (vlc-max-len v))
+         (peek (br-peek br max-len))
+         (len (aref (vlc-lens v) peek)))
+    (declare (type fixnum max-len peek))
+    (when (zerop len) (%err "no CAVLC code matched in ~d bits" max-len))
+    (br-skip br len)
+    (aref (vlc-syms v) peek)))
 
 (defun %coeff-token (br nc)
   "coeff_token: (values total-coeff trailing-ones).
@@ -51,12 +109,13 @@
    and it selects one of four tables, or the separate chroma-DC table when it is -1.  The ranges
    are the specification's and are not a heuristic: a block whose neighbours were busy is coded
    with a table that expects to be busy too."
+  (declare (optimize (speed 3) (safety 1)))
   (declare (type fixnum nc))
   (if (minusp nc)
-      (let ((i (%vlc br +chroma-dc-coeff-token-len+ +chroma-dc-coeff-token-bits+ 0 20)))
+      (let ((i (%vlc br +chroma-dc-coeff-token-vlc+ 0)))
         (values (ash i -2) (logand i 3)))
       (let* ((row (cond ((< nc 2) 0) ((< nc 4) 1) ((< nc 8) 2) (t 3)))
-             (i (%vlc br +coeff-token-len+ +coeff-token-bits+ row 68)))
+             (i (%vlc br +coeff-token-vlc+ row)))
         (values (ash i -2) (logand i 3)))))
 
 (defun %level (br i trailing-ones suffix-length)
@@ -67,6 +126,7 @@
    14 with a zero-width suffix reads four bits anyway, prefix 15 and above reads a wider suffix
    and adds a bias, and the FIRST non-trailing level is nudged by 2 when there were fewer than
    three trailing ones — because in that case a magnitude of 1 was already impossible."
+  (declare (optimize (speed 3) (safety 1)))
   (declare (type fixnum i trailing-ones suffix-length))
   (let ((prefix 0))
     (declare (type fixnum prefix))
@@ -93,16 +153,18 @@
 
 (defun %total-zeros (br total-coeff max-coeff)
   "How many zeros lie before the last coefficient in scan order."
+  (declare (optimize (speed 3) (safety 1)))
   (declare (type fixnum total-coeff max-coeff))
   (if (= max-coeff 4)
-      (%vlc br +chroma-dc-total-zeros-len+ +chroma-dc-total-zeros-bits+ (1- total-coeff) 4)
-      (%vlc br +total-zeros-len+ +total-zeros-bits+ (1- total-coeff) 16)))
+      (%vlc br +chroma-dc-total-zeros-vlc+ (1- total-coeff))
+      (%vlc br +total-zeros-vlc+ (1- total-coeff))))
 
 (defun %run-before (br zeros-left)
-  (declare (type fixnum zeros-left))
+  
+  (declare (optimize (speed 3) (safety 1)))(declare (type fixnum zeros-left))
   (if (zerop zeros-left)
       0
-      (%vlc br +run-len+ +run-bits+ (1- (min zeros-left 7)) 16)))
+      (%vlc br +run-vlc+ (1- (min zeros-left 7)))))
 
 ;;; ---- a residual block --------------------------------------------------------------------------
 
@@ -115,6 +177,7 @@
 
    Returns the number of coefficients decoded, which the caller stores as the nC of this block for
    its neighbours to read."
+  (declare (optimize (speed 3) (safety 1)))
   (declare (type (simple-array fixnum (*)) coeffs) (type fixnum nc max-coeff start))
   (fill coeffs 0)
   (multiple-value-bind (total-coeff trailing-ones) (%coeff-token br nc)

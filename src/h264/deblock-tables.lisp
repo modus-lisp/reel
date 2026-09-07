@@ -12,6 +12,9 @@
 
 (in-package #:reel.h264)
 
+(declaim (type (simple-array (unsigned-byte 8) (*)) +alpha-table+ +beta-table+))
+(declaim (type (simple-array (signed-byte 8) (* *)) +tc0-table+))
+
 (defparameter +alpha-table+
   (make-array 156 :element-type '(unsigned-byte 8) :initial-contents
     '(0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4 4 5 6 7 8 9 10 12 13 15 17 20 22 25 28 32 36 40 45 50 56 63 71 80 90 101 113 127 144 162 182 203 226 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255)))

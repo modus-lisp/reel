@@ -27,7 +27,9 @@
 negative slice offset still lands inside the array instead of before it.")
 
 (declaim (inline clip3))
-(defun clip3 (lo hi v) (declare (type fixnum lo hi v)) (max lo (min hi v)))
+(defun clip3 (lo hi v)
+  (declare (type fixnum lo hi v) (optimize (speed 3) (safety 0)))
+  (max lo (min hi v)))
 
 ;;; ---- one edge ---------------------------------------------------------------------------------
 
@@ -92,7 +94,9 @@ negative slice offset still lands inside the array instead of before it.")
 
 (defun %filter-edge (plane q0i step line-step count bs qp alpha-off beta-off chroma-p)
   "Filter COUNT lines of one edge.  QP is the average of the two sides' quantisers."
-  (declare (type fixnum q0i step line-step count bs qp alpha-off beta-off))
+  (declare (type fixnum q0i step line-step count bs qp alpha-off beta-off)
+           (type (simple-array (unsigned-byte 8) (*)) plane)
+           (optimize (speed 3) (safety 1)))
   (when (zerop bs) (return-from %filter-edge nil))
   (let* ((ia (+ +qp-table-offset+ (clip3 0 51 (+ qp alpha-off))))
          (ib (+ +qp-table-offset+ (clip3 0 51 (+ qp beta-off))))
@@ -108,6 +112,7 @@ negative slice offset still lands inside the array instead of before it.")
 
 (defun deblock-picture (pic sh)
   "Filter every macroblock of PIC, in the order 8.7 requires."
+  (declare (optimize (speed 3) (safety 1)))
   (let* ((idc (sh-disable-deblocking sh)))
     (when (= idc 1) (return-from deblock-picture pic))
     (let* ((pps (sh-pps sh))

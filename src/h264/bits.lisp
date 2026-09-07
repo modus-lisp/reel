@@ -169,6 +169,29 @@
     (setf (br-bit br) (1+ i))
     (ldb (byte 1 (- 7 (logand i 7))) (aref (br-data br) (ash i -3)))))
 
+(declaim (inline br-peek br-skip))
+(defun br-peek (br n)
+  "The next N bits as an integer, MSB first, WITHOUT consuming them.  Past the end of the data the
+   result is zero-padded rather than an error: a variable-length code near the end of a slice is
+   shorter than the window a table lookup peeks through, and refusing to peek would refuse the last
+   legitimate code in the bitstream.  Reading past the end is still an error — SKIP catches it."
+  (declare (type bitreader br) (type (integer 0 24) n) (optimize (speed 3) (safety 0)))
+  (let ((v 0) (i (br-bit br)) (end (br-end br)) (data (br-data br)))
+    (declare (type fixnum v i end) (type (simple-array (unsigned-byte 8) (*)) data))
+    (dotimes (k n v)
+      (declare (type fixnum k))
+      (setf v (logior (ash v 1)
+                      (if (>= (+ i k) end)
+                          0
+                          (ldb (byte 1 (- 7 (logand (+ i k) 7))) (aref data (ash (+ i k) -3)))))))))
+
+(defun br-skip (br n)
+  "Consume N bits, having already looked at them."
+  (declare (type bitreader br) (type fixnum n) (optimize (speed 3) (safety 1)))
+  (let ((i (+ (br-bit br) n)))
+    (when (> i (br-end br)) (%err "read past the end of the bitstream"))
+    (setf (br-bit br) i)))
+
 (defun ub (br n)
   "N bits as an unsigned integer, MSB first — the specification's u(n)."
   (declare (type bitreader br) (type fixnum n) (optimize (speed 3) (safety 1)))

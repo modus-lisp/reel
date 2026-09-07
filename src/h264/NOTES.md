@@ -82,12 +82,55 @@ The way both were found is worth keeping: encode fixtures that vary ONE encoder 
 red. That took the second bug from "somewhere in inter prediction" to "sub-8x8 partitions only" in
 two ffmpeg invocations, and `*skip-loop-filter*` had already ruled out the filter in one.
 
-## Not started
+## CABAC
 
-CABAC — Main profile's entropy coder, refused in `params.lisp`. B slices, which additionally need
-two reference lists, the direct modes and picture order reordering. Weighted prediction. Together
-those are what an ordinary YouTube H.264 file needs; a Baseline file needs none of them and plays
-now.
+**Done, and bit-exact**, for both I and P slices. Forty frames of intra across quantisers 12 to 34,
+and 100 frames of inter including real motion with three references and every partition size.
+
+The failure mode shaped how it was built. A wrong context index does not corrupt one block — it
+feeds the wrong probability to the arithmetic decoder, which returns the wrong bin, and everything
+after it in the slice is garbage. There is no partial credit and no bisecting a picture to find the
+fault. So `cabac-tables.lisp` is **generated**, not typed, and checked against invariants the
+specification states independently of the numbers. Those held, and the decoder was then bit-exact
+first time on intra.
+
+Three things worth remembering:
+
+- `cabac_init_idc` sits between the reference picture marking and `slice_qp_delta` in 7.3.3.
+  Reading it anywhere else costs the quantiser and everything after it.
+- `coded_block_flag` is the one element where an ABSENT neighbour contributes 1 for intra and 0 for
+  inter. That is the opposite of the others, which is why the rule is written at the point of use.
+- Every reference index of a macroblock is read before any vector difference. A partition's index
+  context asks what the partition beside it chose, so the indices must be recorded as they are read
+  and not when the vectors arrive. Same shape as the sub-8x8 bug in the CAVLC path.
+
+## Weighted prediction
+
+Done, with the reference list modification it forces. **The list can be longer than the number of
+pictures in it**: reordering inserts at a position and drops only the copy *after* the insertion
+point, so the same picture legitimately appears at two indices — which is how weighting gets two
+different weights from one reference. Treating the list as a set decodes most streams and then
+fails on ordinary ones.
+
+That also means the loop filter must compare reference PICTURES, not indices (8.7.2.1). Comparing
+indices filters edges between blocks that came from the same place. It showed as a handful of
+samples of magnitude two, and was only findable because it appeared identically under both entropy
+coders, which ruled out everything above the reconstruction.
+
+## Not started: B slices
+
+The last thing between this and an ordinary YouTube file. Fixtures are built and waiting —
+`b-spat`, `b-temp`, `b-cabac`, covering both direct modes and both entropy coders.
+
+What it needs, roughly in dependency order: picture order count, which drives everything else; an
+output reorder buffer, because B pictures are decoded out of display order and `feed-nal` currently
+hands back a picture the moment it is finished; list 1 and the POC-based ordering of both lists;
+the B macroblock type tables for both entropy coders; bi-prediction averaging and weighted
+bi-prediction; the spatial and temporal direct modes, which are the intricate part; and a boundary
+strength derivation that copes with two references and two vectors per block.
+
+Also not started: High profile (the 8x8 transform and scaling matrices), 4:2:2 and 4:4:4, more than
+eight bits per sample, MBAFF, FMO, and long-term reference pictures. All are refused explicitly.
 
 ## Performance
 

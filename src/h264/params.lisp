@@ -139,6 +139,14 @@
     ;; the optional tail, present only in High-profile streams
     (when (more-rbsp-data-p br)
       (setf (pps-transform-8x8 p) (= 1 (u1 br)))
+      ;; REFUSED, not merely recorded.  With the 8x8 transform enabled, every macroblock that
+      ;; carries luma residual also carries a transform_size_8x8_flag, and a decoder that does not
+      ;; read that bit does not lose the transform — it loses the bitstream, one bit per macroblock,
+      ;; and produces confident garbage from the first picture.  Note the test is the FLAG and not
+      ;; the profile: a High profile stream that happens to enable neither the 8x8 transform nor
+      ;; scaling matrices is decodable here, and there is no reason to turn it away.
+      (when (pps-transform-8x8 p)
+        (%err "the 8x8 transform is not supported (High profile)"))
       (when (= 1 (u1 br)) (%err "picture scaling matrices are not supported"))
       (setf (pps-second-chroma-qp-offset p) (se br)))
     p))

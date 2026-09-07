@@ -30,16 +30,37 @@ weightScale entry is 16.  Leaving it out is the single easiest way to build an H
 parses every bit correctly and produces a picture 16 times too flat — the residual is there, it is
 just far too small to matter, so the output looks like prediction alone.")
 
-(defun dequant-4x4 (coeffs out qp &key (start 0))
+(declaim (inline idct-4x4-dc))
+(defun idct-4x4-dc (block d)
+  "The inverse transform of a block whose only coefficient is the DC one.
+
+   Both butterfly passes turn a lone d into d everywhere, so the whole transform is a fill.  This
+   is not a rare case: at any ordinary quantiser most coded blocks carry only low-frequency energy,
+   and a large share carry exactly one coefficient."
+  (declare (type (simple-array fixnum (16)) block) (type fixnum d)
+           (optimize (speed 3) (safety 0)))
+  (fill block d)
+  block)
+
+(defun dequant-4x4 (coeffs out qp &key (start 0) (end 15))
   "Dequantise a 4x4 block.  COEFFS is in SCAN order, OUT is filled in RASTER order.
 
    START is 1 for the AC-only block of an Intra16x16 macroblock, whose DC came from the separate
-   Hadamard-coded block; OUT position 0 is then left for the caller to fill in."
+   Hadamard-coded block; OUT position 0 is then left for the caller to fill in.
+
+   END is the highest scan position that actually carries a coefficient, which RESIDUAL-BLOCK
+   returns as its second value.  Walking to it rather than to 15 is most of what this costs: a
+   block with two coefficients has fourteen positions nobody need look at.  OUT is zeroed first,
+   so positions past END — and zeros inside the range — need no work at all."
   (declare (optimize (speed 3) (safety 1)))
-  (declare (type (simple-array fixnum (*)) coeffs out) (type fixnum qp start))
+  (declare (type (simple-array fixnum (*)) coeffs out) (type fixnum qp start end))
+  (fill out 0)
+  ;; END is -1 when the block carried nothing, and below START when everything it carried was the
+  ;; DC the caller supplies separately.  Either way the zeroed OUT is already the answer.
+  (when (< end start) (return-from dequant-4x4 out))
   (let ((m (mod qp 6)) (e (floor qp 6)))
     (declare (type (integer 0 5) m) (type (integer 0 8) e))
-    (loop for scan of-type (integer 0 16) from start below 16
+    (loop for scan of-type (integer 0 16) from start to (the (integer 0 15) end)
           ;; NARROW, not merely FIXNUM.  A fixnum times a fixnum may be a bignum as far as the
           ;; compiler knows, so the obvious declaration still calls generic multiply and generic
           ;; shift.  A coefficient is bounded by the level code and the scale by table 8-15, and
@@ -50,12 +71,11 @@ just far too small to matter, so the output looks like prediction alone.")
                                 (* +flat-weight-scale+
                                    (aref +dequant-coeff+ m (aref +dequant-class+ raster))))))
                (declare (type (integer 0 15) raster))
-               (setf (aref out raster)
-                     (if (zerop c)
-                         0
-                         (if (>= e 4)
-                             (ash (* c scale) (- e 4))
-                             (ash (+ (* c scale) (ash 1 (- 3 e))) (- (- 4 e))))))))
+               (unless (zerop c)
+                 (setf (aref out raster)
+                       (if (>= e 4)
+                           (ash (* c scale) (- e 4))
+                           (ash (+ (* c scale) (ash 1 (- 3 e))) (- (- 4 e))))))))
     out))
 
 ;;; ---- the inverse 4x4 transform (8.5.12.2) ------------------------------------------------------

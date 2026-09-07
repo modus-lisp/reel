@@ -151,7 +151,9 @@
 ;;; residual decoder calls it several times per coefficient.
 
 (defstruct (bitreader (:conc-name br-) (:constructor %make-bitreader))
-  (data nil :type (or null octets))
+  ;; not (OR NULL OCTETS): the union costs a check on every single access, and there is no useful
+  ;; state in which a reader has no data — an empty vector says the same thing and stays fast
+  (data (make-array 0 :element-type '(unsigned-byte 8)) :type octets)
   (bit 0 :type fixnum)                  ; the next bit to read, counted from the start of DATA
   (end 0 :type fixnum))                 ; total bits available
 
@@ -165,25 +167,38 @@
   "One bit."
   (declare (type bitreader br) (optimize (speed 3) (safety 1)))
   (let ((i (br-bit br)))
+    (declare (type fixnum i))
     (when (>= i (br-end br)) (%err "read past the end of the bitstream"))
     (setf (br-bit br) (1+ i))
     (ldb (byte 1 (- 7 (logand i 7))) (aref (br-data br) (ash i -3)))))
 
 (declaim (inline br-peek br-skip))
 (defun br-peek (br n)
-  "The next N bits as an integer, MSB first, WITHOUT consuming them.  Past the end of the data the
-   result is zero-padded rather than an error: a variable-length code near the end of a slice is
-   shorter than the window a table lookup peeks through, and refusing to peek would refuse the last
-   legitimate code in the bitstream.  Reading past the end is still an error — SKIP catches it."
+  "The next N bits (N <= 24) as an integer, MSB first, WITHOUT consuming them.
+
+   Gathers FOUR BYTES and shifts, rather than reading a bit at a time.  The bit-at-a-time version
+   is the obvious one and it cost an array reference per bit — sixteen of them for a single CAVLC
+   code, which is where the bitstream reader spent most of its time.
+
+   Past the end of the available data the result is zero-padded rather than an error: a
+   variable-length code near the end of a slice is shorter than the window a table lookup peeks
+   through, so refusing to peek would refuse the last legitimate code in the bitstream.  Consuming
+   bits past the end is still an error, which is BR-SKIP's job."
   (declare (type bitreader br) (type (integer 0 24) n) (optimize (speed 3) (safety 0)))
-  (let ((v 0) (i (br-bit br)) (end (br-end br)) (data (br-data br)))
-    (declare (type fixnum v i end) (type (simple-array (unsigned-byte 8) (*)) data))
-    (dotimes (k n v)
-      (declare (type fixnum k))
-      (setf v (logior (ash v 1)
-                      (if (>= (+ i k) end)
-                          0
-                          (ldb (byte 1 (- 7 (logand (+ i k) 7))) (aref data (ash (+ i k) -3)))))))))
+  (let* ((i (br-bit br))
+         (data (br-data br))
+         (limit (ash (br-end br) -3))           ; first byte that is not ours to read
+         (byte (ash i -3))
+         (off (logand i 7)))
+    (declare (type fixnum i limit byte off)
+             (type (simple-array (unsigned-byte 8) (*)) data))
+    (macrolet ((b (k) `(let ((j (+ byte ,k)))
+                         (declare (type fixnum j))
+                         (if (< j limit) (aref data j) 0))))
+      (let ((w (logior (ash (b 0) 24) (ash (b 1) 16) (ash (b 2) 8) (b 3))))
+        (declare (type (unsigned-byte 32) w))
+        ;; w is the 32 bits starting at this byte; drop OFF from the front and keep N
+        (logand (ash w (- (+ off n) 32)) (1- (ash 1 n)))))))
 
 (defun br-skip (br n)
   "Consume N bits, having already looked at them."
@@ -195,24 +210,37 @@
 (defun ub (br n)
   "N bits as an unsigned integer, MSB first — the specification's u(n)."
   (declare (type bitreader br) (type fixnum n) (optimize (speed 3) (safety 1)))
-  (let ((v 0))
-    (declare (type (integer 0) v))
-    (dotimes (i n v) (setf v (logior (ash v 1) (u1 br))))))
+  (if (<= n 24)
+      (let ((v (br-peek br n))) (br-skip br n) v)
+      ;; wider than one peek: take it in two, which is only the SPS/PPS path
+      (let* ((hi (- n 24)) (a (ub br hi)) (b (ub br 24)))
+        (logior (ash a 24) b))))
 
 (defun ue (br)
   "An unsigned Exp-Golomb code — the specification's ue(v).
 
    N leading zeros, a one, then N more bits: the value is 2^N - 1 plus those bits.  The leading
    zero count is bounded here rather than trusted, because a corrupt stream otherwise spins to the
-   end of the buffer counting zeros and reports the wrong failure."
-  (declare (type bitreader br))
-  (let ((zeros 0))
-    (declare (type fixnum zeros))
-    (loop until (br-eof-p br)
-          while (zerop (u1 br))
-          do (incf zeros)
-             (when (> zeros 32) (%err "Exp-Golomb code with ~d leading zeros" zeros)))
-    (when (and (br-eof-p br) (plusp zeros)) (%err "Exp-Golomb code runs off the end"))
+   end of the buffer counting zeros and reports the wrong failure.
+
+   The zeros are counted with INTEGER-LENGTH over a peeked window rather than one bit at a time."
+  (declare (type bitreader br) (optimize (speed 3) (safety 1)))
+  (let* ((w (br-peek br 24))
+         (zeros (if (zerop w) 24 (- 24 (integer-length w)))))
+    (declare (type (unsigned-byte 24) w) (type (integer 0 24) zeros))
+    (when (>= zeros 24)
+      ;; 24 zeros and still going: either a very large value or a corrupt stream.  Either way it
+      ;; is off the fast path, so count the rest honestly and let the bound catch it.
+      (br-skip br 24)
+      (let ((more 24))
+        (declare (type fixnum more))
+        (loop until (br-eof-p br)
+              while (zerop (u1 br))
+              do (incf more)
+                 (when (> more 32) (%err "Exp-Golomb code with ~d leading zeros" more)))
+        (when (br-eof-p br) (%err "Exp-Golomb code runs off the end"))
+        (return-from ue (+ (1- (ash 1 more)) (ub br more)))))
+    (br-skip br (1+ zeros))                     ; the zeros and the one that ends them
     (+ (1- (ash 1 zeros)) (ub br zeros))))
 
 (defun se (br)

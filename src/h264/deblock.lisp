@@ -33,6 +33,7 @@ negative slice offset still lands inside the array instead of before it.")
 
 ;;; ---- one edge ---------------------------------------------------------------------------------
 
+(declaim (inline %filter-line))
 (defun %filter-line (plane q0i step bs alpha beta tc0 chroma-p)
   "Filter one line of samples across an edge.  Q0I indexes q0; STEP is the distance from one
    sample to the next ACROSS the edge (1 for a vertical edge, the stride for a horizontal one)."
@@ -105,8 +106,18 @@ negative slice offset still lands inside the array instead of before it.")
          (tc0 (if (= bs 4) 0 (aref +tc0-table+ ia bs))))
     (declare (type fixnum ia ib alpha beta tc0))
     (when (or (zerop alpha) (zerop beta)) (return-from %filter-edge nil))
-    (dotimes (i count)
-      (%filter-line plane (+ q0i (* i line-step)) step bs alpha beta tc0 chroma-p))))
+    ;; FOUR LOOPS, not one.  CHROMA-P and "is bS 4" are constant for a whole edge, but tested per
+    ;; line inside the filter, and at 1080p this is 34% of decode: about 1.6 million filtered lines
+    ;; a picture.  Expanding the filter once per combination lets the compiler fold both tests away
+    ;; and specialise the body; the cost is four copies of it in the object file.
+    (macrolet ((run (chroma bs4)
+                 `(dotimes (i count)
+                    (declare (type fixnum i))
+                    (%filter-line plane (+ q0i (* i line-step)) step
+                                  ,(if bs4 4 'bs) alpha beta tc0 ,chroma))))
+      (if chroma-p
+          (if (= bs 4) (run t t) (run t nil))
+          (if (= bs 4) (run nil t) (run nil nil))))))
 
 ;;; ---- the picture ---------------------------------------------------------------------------------
 

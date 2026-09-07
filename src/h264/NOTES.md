@@ -60,24 +60,45 @@ Constrained Baseline and are refused too.
 
 ## Performance
 
-About 35 fps on all-intra 640x360, up from 20.6, so real time for a 30 fps clip with headroom.
-Allocation is 0.87 MB per picture, down from 3.83. The profile is flat now: the deblocking filter
-is the largest single item at ~13%, and nothing else is above 8%.
+Through the container, with the read-ahead batch on:
 
-What produced that, in order of what it was worth:
+| | serial, before any of this | now |
+|---|---|---|
+| 640x360 | 20.6 fps | 117.7 |
+| 720p | — | 94.5 |
+| 1080p | — | 70.9 |
+
+Single-threaded it is 38 fps at 640x360 and 10.6 at 1080p; the rest is parallelism. Allocation is
+0.87 MB per picture, down from 3.83.
+
+**Where the single-thread wins came from.** In order of what each was worth:
 
 | change | why it mattered |
 |---|---|
 | CAVLC lookup tables | the table walk read a bit and rescanned every entry, up to 68 deep and 16 bits long — 22% of decode. Peeking the row's longest code and indexing directly costs ~87k entries total, under 200 KB. |
 | `declaim` on the tables | they are special variables, so every `aref` on one was `HAIRY-DATA-VECTOR-REF`, a generic dispatch per lookup. |
 | typed `picture` and `slice-state` slots | every sample the decoder touches goes through those slots; untyped, each access dispatched generically. |
-| narrowed arithmetic in `dequant-4x4` | fixnum times fixnum may be a bignum, so `fixnum` alone still called generic multiply and shift. The real bounds are much tighter. |
-| `(speed 3)` on the hot functions | most of them had type declarations but no policy, so the default kept them slow. |
+| four specialised deblocking loops | `chroma-p` and "is bS 4" are constant per edge but were tested per line, and at 1080p the filter is a third of decode: 1.6 million filtered lines a picture. |
+| a byte-gathering `br-peek` | reading a bit at a time cost an array reference per bit, sixteen for one CAVLC code. |
+| narrowed arithmetic in `dequant-4x4` | fixnum times fixnum may be a bignum, so `fixnum` alone still called generic multiply and shift. |
+| bounded dequantisation, DC-only transform | `residual-block` now reports its highest scan position, so neither walks 16 positions for a block holding two. A lone DC coefficient makes the inverse transform a `fill`. |
+| `(speed 3)` on the hot functions | most had type declarations but no policy, so the default kept them slow. |
 
-The lesson worth carrying: in this decoder every win came from *telling the compiler what was already
-true*, not from changing an algorithm — except the CAVLC tables, which were a genuine algorithm
-change. Nothing here altered a single output sample, which is why the bit-exactness tests could be
-run after each step and were.
+Almost all of that is *telling the compiler what was already true*, not changing an algorithm — the
+CAVLC tables are the one real algorithm change. None of it altered an output sample, which is why
+the bit-exactness test could be run after every step, and was.
+
+**Parallelism** is in `parallel.lisp` and is worth more than everything above put together, but it
+is not general: it decodes whole pictures at once, which is legal only because an I picture is
+independent of every other. It checks rather than assumes — every access unit must be all-I slices
+and carry no parameter set — and hands back NIL for anything else, so an inter-coded file simply
+takes the serial path. **The day P slices land, this stops applying** and the honest replacement is
+slice-level or wavefront parallelism inside a picture.
+
+Two bugs in it are worth remembering because both failed *quietly*, by falling back rather than
+breaking. The independence check asked "is this an I slice?" of every NAL including SEI, so every
+real stream answered no. And the processor count came from an SBCL internal alien symbol that did
+not resolve, so a 116-core machine silently decided it had four.
 
 `%vlc` stays at `safety 1` deliberately. Every index in it is bounded by construction, but this
 decodes files off the internet and the checks measured at about 3%.

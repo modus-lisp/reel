@@ -55,4 +55,5 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
        (:file "slice")        ; the macroblock layer and the slice loop
        (:file "deblock-tables")  ; the loop filter's alpha/beta/tc0 thresholds
        (:file "deblock")      ; the in-loop deblocking filter
-       (:file "decode")))))))  ; NAL units in, pictures out
+       (:file "decode")      ; NAL units in, pictures out
+       (:file "parallel")))))))  ; independent pictures, decoded at the same time

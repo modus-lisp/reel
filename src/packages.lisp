@@ -61,6 +61,7 @@
    #:residual-block #:+zigzag-4x4+ #:+dequant-coeff+ #:+dequant-class+ #:+qpc-from-qpy+
    ;; the decoder
    #:decoder #:make-decoder #:feed-nal #:decode-picture #:decode-annex-b
+   #:decode-independent #:split-access-units #:access-units-independent-p #:default-decode-threads
    #:decoder-width #:decoder-height
    #:picture #:pic-width #:pic-height #:pic-y #:pic-u #:pic-v #:picture->yuv420
    #:deblock-picture #:as-picture))

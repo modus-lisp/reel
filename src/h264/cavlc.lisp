@@ -182,7 +182,7 @@
   (fill coeffs 0)
   (multiple-value-bind (total-coeff trailing-ones) (%coeff-token br nc)
     (declare (type fixnum total-coeff trailing-ones))
-    (when (zerop total-coeff) (return-from residual-block 0))
+    (when (zerop total-coeff) (return-from residual-block (values 0 -1)))
     (when (> total-coeff max-coeff)
       (%err "coeff_token says ~d coefficients in a block that holds ~d" total-coeff max-coeff))
     ;; SIXTEEN, not TOTAL-COEFF, and that is the whole point.  A DYNAMIC-EXTENT array whose size is
@@ -226,5 +226,8 @@
                    (when (>= pos (+ start max-coeff))
                      (%err "a coefficient landed at scan position ~d, past the ~d this block holds"
                            pos max-coeff))
-                   (setf (aref coeffs pos) (aref levels i)))))
-      total-coeff)))
+                   (setf (aref coeffs pos) (aref levels i))))
+        ;; the SECOND value is the highest scan position written.  Dequantisation and the inverse
+        ;; transform both get much cheaper when they know where a block stops: most blocks carry a
+        ;; handful of low-frequency coefficients and the rest of the scan is zeros nobody need walk.
+        (values total-coeff (+ start coeff-num))))))

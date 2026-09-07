@@ -70,15 +70,24 @@
    :y-stride (pic-ystride pic) :uv-stride (pic-cstride pic)
    :y-offset (pic-yoff pic) :uv-offset (pic-coff pic)))
 
-(defun decode-annex-b (bytes)
-  "Decode every picture in an Annex B byte stream.  Returns a list of PICTUREs."
-  (let ((d (make-decoder)) (out '()) (pending '()))
-    (dolist (n (annex-b-nals bytes))
-      (cond ((nal-slice-p n)
-             (let ((p (feed-nal d n)))
-               (when p (push p out))))
-            (t (feed-nal d n) (push n pending))))
-    (nreverse out)))
+(defun decode-annex-b (bytes &key (threads (default-decode-threads)))
+  "Decode every picture in an Annex B byte stream.  Returns a list of PICTUREs.
+
+   When every picture in the stream is independently decodable — which for now means every slice is
+   an I slice — they are decoded CONCURRENTLY, because such pictures have nothing to say to each
+   other.  A stream that is not gets the ordinary serial walk.  Pass :THREADS 1 for the serial path
+   whatever the stream is; the two produce identical pictures, which is what the conformance test
+   checks."
+  (let* ((nals (annex-b-nals bytes))
+         (d (make-decoder)))
+    (multiple-value-bind (params aus) (split-access-units nals)
+      ;; the parameter sets first and serially: every worker reads them, none writes them
+      (dolist (n params) (feed-nal d n))
+      (or (and (> threads 1) (decode-independent d aus :threads threads))
+          (let ((out (list)))
+            (dolist (au aus (nreverse out))
+              (dolist (n au)
+                (let ((p (feed-nal d n))) (when p (push p out))))))))))
 
 ;;; ---- getting the samples out --------------------------------------------------------------------
 

@@ -314,7 +314,8 @@
          (td (max -128 (min 127 (- poc1 poc0)))))
     (if (zerop td)
         (values 32 32)
-        (let* ((tx (floor (+ 16384 (abs (floor td 2))) td))
+        ;; truncating division, for the same reason as the temporal direct scaling
+        (let* ((tx (truncate (+ 16384 (abs (truncate td 2))) td))
                (dsf (max -1024 (min 1023 (ash (+ (* tb tx) 32) -6))))
                (w1 (ash dsf -2)))
           (if (or (< w1 -64) (> w1 128))

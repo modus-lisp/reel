@@ -1088,7 +1088,13 @@ order count can be negative, so absence needs a value no picture can hold.")
                  (tb (max -128 (min 127 (- curr poc0)))))
             (if (zerop td)
                 (values idx 0 mx my 0 0)
-                (let* ((tx (floor (+ 16384 (abs (floor td 2))) td))
+                ;; TRUNCATE, not FLOOR.  The specification's `/' truncates toward zero and Lisp's
+                ;; FLOOR rounds toward negative infinity; they agree for positive values and part
+                ;; company for negative ones.  TD is negative whenever the co-located picture's own
+                ;; reference sits after it in display order, which cannot happen with a single
+                ;; reference picture and happens constantly with several — so this is invisible
+                ;; until a stream uses both temporal direct and more than one reference.
+                (let* ((tx (truncate (+ 16384 (abs (truncate td 2))) td))
                        (scale (max -1024 (min 1023 (ash (+ (* tb tx) 32) -6))))
                        (m0x (ash (+ (* scale mx) 128) -8))
                        (m0y (ash (+ (* scale my) 128) -8)))
@@ -1203,45 +1209,21 @@ order count can be negative, so absence needs a value no picture can hold.")
                        (setf (aref (pic-refs pic)
                                    (+ (* 2 (%mv-index pic (+ bx ii) (+ by jj))) lx))
                              (aref (if (zerop lx) r0s r1s) i))))))))))
-       ;; DIRECT PARTITIONS FIRST, before any vector difference is read.  A direct partition needs
-       ;; no bits — its motion comes from the macroblock's neighbours and the co-located picture —
-       ;; but a LATER partition predicts its own vector from the ones beside it, and that includes
-       ;; a direct one.  Deriving them after the vector differences leaves those predictions
-       ;; reading an unwritten entry, which is the same mistake as reading a neighbour before it is
-       ;; recorded, and it shows as a handful of wrong samples rather than anything obvious.
-       (when b8x8
-         (dotimes (i 4)
-           (when (= (aref modes i) +pred-direct+)
-             (let ((sx (* 8 (mod i 2))) (sy (* 8 (floor i 2))))
-               (dotimes (j 2)
-                 (dotimes (ii 2)
-                   (%apply-direct ss (+ bx0 (ash sx -2) ii) (+ by0 (ash sy -2) j))))))))
-       ;; then the vector differences, in the same order, predicting as we go
-       (let ((mv (make-array '(4 4 2 2) :element-type 'fixnum :initial-element 0)))
-         (declare (dynamic-extent mv))
+       ;; READING AND DERIVING ARE TWO PASSES, and they run in different orders.
+       ;;
+       ;; The syntax is list-major: every list-0 vector difference for the whole macroblock, then
+       ;; every list-1 one.  The DERIVATION is partition-major: partition 1 predicts its vectors
+       ;; from partition 0's, and must not see partition 2's, in either list.  Those two orders are
+       ;; incompatible, so the differences are read first as plain numbers — nothing about reading
+       ;; them depends on prediction — and the vectors are worked out afterwards, one partition at a
+       ;; time.  Doing it in one pass makes a later partition visible to an earlier one during the
+       ;; list-1 pass, which is a wrong prediction and not a desynchronisation.
+       (let ((mvd (make-array '(4 4 2 2) :element-type 'fixnum :initial-element 0)))
+         (declare (dynamic-extent mvd))
          (dotimes (lx 2)
            (dotimes (i nparts)
              (let* ((m (aref modes i))
                     (uses (if (zerop lx) (pred-uses-l0-p m) (pred-uses-l1-p m))))
-               ;; A partition counts as DECODED once it is reached, whichever lists it happens to
-               ;; use.  Marking it only when a vector is stored for it makes a list-1-only
-               ;; partition look undecoded during the list-0 pass — and an unavailable neighbour is
-               ;; not the same as one with no reference in that list, because unavailability is
-               ;; what makes the above-left neighbour stand in for the above-right one.
-               (when (and (zerop lx) (/= m +pred-direct+))
-                 (multiple-value-bind (sx sy sw sh*)
-                     (if b8x8
-                         (values (* 8 (mod i 2)) (* 8 (floor i 2)) 8 8)
-                         (let ((across (floor 16 pw)))
-                           (values (* pw (mod i across)) (* ph (floor i across)) pw ph)))
-                   (declare (ignorable sw))
-                   (let ((bx (+ bx0 (ash sx -2))) (by (+ by0 (ash sy -2))))
-                     (dotimes (jj (ash sh* -2))
-                       (dotimes (ii (ash sw -2))
-                         (let ((llx (- (+ bx ii) bx0)) (lly (- (+ by jj) by0)))
-                           (when (and (<= 0 llx 3) (<= 0 lly 3))
-                             (setf (ss-mb-done ss)
-                                   (logior (ss-mb-done ss) (ash 1 (+ (* 4 lly) llx)))))))))))
                (when (and (/= m +pred-direct+) uses)
                  (multiple-value-bind (sx sy sw sh*)
                      (if b8x8
@@ -1255,39 +1237,14 @@ order count can be negative, so absence needs a value no picture can hold.")
                        (let* ((ox (if b8x8 (* sw (mod k across)) 0))
                               (oy (if b8x8 (* sh* (floor k across)) 0))
                               (bx (+ bx0 (ash (+ sx ox) -2))) (by (+ by0 (ash (+ sy oy) -2)))
-                              (ref (aref (if (zerop lx) r0s r1s) i)))
-                         (multiple-value-bind (mpx mpy)
-                             ;; The DIRECTIONAL cases of 8.4.1.3 apply to a B slice's two-partition
-                             ;; types exactly as they do to a P slice's, and leaving them out takes
-                             ;; the median where the specification takes one particular neighbour.
-                             ;; That is a wrong prediction and not a desynchronisation, so it shows
-                             ;; up as one macroblock here and there rather than as a broken picture.
-                             (predict-mv ss bx by (ash sw -2) ref :lx lx
-                                         :shape (and (not b8x8)
-                                                     (cond ((and (= pw 16) (= ph 8)) :16x8)
-                                                           ((and (= pw 8) (= ph 16)) :8x16)))
-                                         :part i)
-                           (let* ((dx (if (ss-cabac ss) (cabac-mvd ss bx by 0 lx) (se br)))
-                                  (dy (if (ss-cabac ss) (cabac-mvd ss bx by 1 lx) (se br))))
-                             (setf (aref mv i k lx 0) (+ mpx dx)
-                                   (aref mv i k lx 1) (+ mpy dy))
-                             (%set-partition-mvd ss bx by (ash sw -2) (ash sh* -2) dx dy lx)
-                             ;; The vector has to be visible to the next partition's prediction,
-                             ;; and so does the fact that this block HAS one: a neighbour that is
-                             ;; decoded but unmarked reads as unavailable, which makes the
-                             ;; above-left neighbour stand in for the above-right one and quietly
-                             ;; changes the median.  Marking it is what SS-MB-DONE is for.
-                             (dotimes (jj (ash sh* -2))
-                               (dotimes (ii (ash sw -2))
-                                 (set-blk-mv pic (+ bx ii) (+ by jj)
-                                             (aref mv i k lx 0) (aref mv i k lx 1) ref lx
-                                             (%ref-picture-poc ss ref lx))
-                                 (let ((llx (- (+ bx ii) bx0)) (lly (- (+ by jj) by0)))
-                                   (when (and (<= 0 llx 3) (<= 0 lly 3))
-                                     (setf (ss-mb-done ss)
-                                           (logior (ss-mb-done ss)
-                                                   (ash 1 (+ (* 4 lly) llx))))))))))))))))))
-         ;; and now the pictures themselves, once every vector of the macroblock is known
+                              (dx (if (ss-cabac ss) (cabac-mvd ss bx by 0 lx) (se br)))
+                              (dy (if (ss-cabac ss) (cabac-mvd ss bx by 1 lx) (se br))))
+                         (setf (aref mvd i k lx 0) dx (aref mvd i k lx 1) dy)
+                         ;; recorded now because the NEXT difference's context asks how big the
+                         ;; neighbouring differences were, and that is a property of the bitstream
+                         ;; rather than of the prediction
+                         (%set-partition-mvd ss bx by (ash sw -2) (ash sh* -2) dx dy lx)))))))))
+         ;; now the vectors, one partition at a time
          (dotimes (i nparts)
            (let ((m (aref modes i)))
              (multiple-value-bind (sx sy sw sh*)
@@ -1296,19 +1253,41 @@ order count can be negative, so absence needs a value no picture can hold.")
                              (aref +b-sub+ (aref subs i) 1) (aref +b-sub+ (aref subs i) 2))
                      (let ((across (floor 16 pw)))
                        (values (* pw (mod i across)) (* ph (floor i across)) pw ph)))
-               (unless (= m +pred-direct+)     ; already done, above
+               (if (= m +pred-direct+)
+                   ;; a direct 8x8 is four direct 4x4s, derived at this partition's turn
+                   (dotimes (j 2)
+                     (dotimes (ii 2)
+                       (%apply-direct ss (+ bx0 (ash sx -2) ii) (+ by0 (ash sy -2) j))))
                    (let ((nsub (if b8x8 (aref +b-sub+ (aref subs i) 0) 1))
                          (across (if b8x8 (floor 8 sw) 1)))
                      (dotimes (k nsub)
                        (let* ((ox (if b8x8 (* sw (mod k across)) 0))
                               (oy (if b8x8 (* sh* (floor k across)) 0))
-                              (bx (+ bx0 (ash (+ sx ox) -2))) (by (+ by0 (ash (+ sy oy) -2))))
-                         (%set-b-motion ss bx by (ash sw -2) (ash sh* -2) m
-                                        (aref r0s i) (aref mv i k 0 0) (aref mv i k 0 1)
-                                        (aref r1s i) (aref mv i k 1 0) (aref mv i k 1 1))
+                              (bx (+ bx0 (ash (+ sx ox) -2))) (by (+ by0 (ash (+ sy oy) -2)))
+                              (wb (ash sw -2)) (hb (ash sh* -2))
+                              (mv0x 0) (mv0y 0) (mv1x 0) (mv1y 0))
+                         (when (pred-uses-l0-p m)
+                           (multiple-value-bind (px* py*)
+                               (predict-mv ss bx by wb (aref r0s i) :lx 0
+                                           :shape (and (not b8x8)
+                                                       (cond ((and (= pw 16) (= ph 8)) :16x8)
+                                                             ((and (= pw 8) (= ph 16)) :8x16)))
+                                           :part i)
+                             (setf mv0x (+ px* (aref mvd i k 0 0))
+                                   mv0y (+ py* (aref mvd i k 0 1)))))
+                         (when (pred-uses-l1-p m)
+                           (multiple-value-bind (px* py*)
+                               (predict-mv ss bx by wb (aref r1s i) :lx 1
+                                           :shape (and (not b8x8)
+                                                       (cond ((and (= pw 16) (= ph 8)) :16x8)
+                                                             ((and (= pw 8) (= ph 16)) :8x16)))
+                                           :part i)
+                             (setf mv1x (+ px* (aref mvd i k 1 0))
+                                   mv1y (+ py* (aref mvd i k 1 1)))))
+                         (%set-b-motion ss bx by wb hb m
+                                        (aref r0s i) mv0x mv0y (aref r1s i) mv1x mv1y)
                          (%mc-b ss (+ px sx ox) (+ py sy oy) sw sh* m
-                                (aref r0s i) (aref mv i k 0 0) (aref mv i k 0 1)
-                                (aref r1s i) (aref mv i k 1 0) (aref mv i k 1 1))))))))))))
+                                (aref r0s i) mv0x mv0y (aref r1s i) mv1x mv1y)))))))))))
     ;; the residual, on top of whatever was predicted
     (let ((cbp (%read-cbp ss nil)))
       (setf (aref (pic-mb-cbp pic) mbi) cbp)

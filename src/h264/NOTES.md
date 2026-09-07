@@ -151,17 +151,33 @@ Every one was a neighbour that had been decoded but did not look decoded, or the
 (9.3.3.1.1.6): a skipped B macroblock does have a direct-derived reference index, and counting it
 desynchronises within a couple of dozen slices. That was verified by breaking it on purpose.
 
-## Known gap
+## Known gap: temporal direct with more than one reference
 
-An ordinary YouTube file (Main profile, CABAC, B slices, implicit weighted bi-prediction) decodes
-**236 slices of about 400** and then desynchronises inside a B slice. The header parses correctly
-there — the quantisers are low but stable across hundreds of slices — so it is content-dependent
-and mid-slice. None of the fixtures reproduce it.
+**Isolated, reproducible in seconds, not yet fixed.** Three fixtures pin it down exactly:
 
-Coverage says what is still untested: **B sub_mb_types 4 through 12**, the 8x4, 4x8 and 4x4
-sub-partitions of a B_8x8. x264 does not appear to emit them, so no x264-encoded fixture will cover
-them; reproducing that path needs a different encoder or a hand-built stream. That is the first
-place to look.
+| fixture | direct mode | references | result |
+|---|---|---|---|
+| `bs-r3` | spatial | 3 | bit-exact |
+| `bt-r1` | temporal | 1 | bit-exact |
+| `bt-r3` | temporal | 3 | 13 frames of 30 wrong |
+
+So it is neither temporal direct nor multiple references on their own — it is the two together.
+`b-hard` is the same fault with everything else turned on as well, where it desynchronises rather
+than merely predicting wrong.
+
+What has been checked and is NOT the cause: the scaling arithmetic (worked through by hand against
+8.4.1.2.3 for a real block and it agrees), the reference lookup for that block, the choice of
+co-located picture, and the list construction. `truncate` replaced `floor` in the distance scaling
+along the way, which is correct — the specification's division truncates toward zero and they part
+company for negative distances — but it was not this bug.
+
+An ordinary YouTube file (Main, CABAC, B slices, implicit weighted bi-prediction) decodes **236 of
+its pictures bit-exactly** and then desynchronises inside the 237th. That was tracked to a single
+macroblock by comparing per-macroblock quantiser maps from `ffmpeg -debug qp` against the decoder's
+own — rows 0 to 7 agree exactly, including every quantiser change, and row 8 diverges at column 9.
+`ffmpeg -debug mb_type` gives the same for macroblock types, and is worth knowing about: its
+`>` means list-0-only and `<` means list-1-only, which is the opposite of what the characters
+suggest, and reading them the natural way invents a bug that is not there.
 
 ## Performance
 

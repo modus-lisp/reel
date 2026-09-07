@@ -102,6 +102,7 @@
   (block (make-array 16 :element-type 'fixnum))        ; raster-order scratch
   (luma-dc (make-array 16 :element-type 'fixnum))
   (chroma-dc (make-array 4 :element-type 'fixnum))
+  (chroma-dc-v (make-array 4 :element-type 'fixnum))   ; the second plane's, so neither is per-macroblock
   (pred (make-array 16 :element-type '(unsigned-byte 8)))
   (pt (make-array 9 :element-type '(unsigned-byte 8)))
   (pl (make-array 4 :element-type '(unsigned-byte 8))))
@@ -240,6 +241,20 @@
 
 (defvar *debug-blk* nil "When (mb . blk), print that block's decode in detail.")
 
+(defmacro when-debug-blk ((mb blk) &body body)
+  "BODY runs only when *DEBUG-BLK* names this block.
+
+   The NULL test comes first and the pair is built only once it passes.  The obvious spelling —
+   (equal *debug-blk* (cons mb blk)) — conses a fresh pair for every block just to compare it,
+   which is some twenty thousand conses per picture with debugging switched off.  That is not
+   free: SBCL stops every thread to collect, so on a desktop that is also mixing audio it is
+   heard, not merely measured."
+  `(when (and *debug-blk* (equal *debug-blk* (cons ,mb ,blk)))
+     ,@body))
+
+(declaim (inline %mb-index))
+(defun %mb-index (ss) (+ (* (ss-mby ss) (pic-mb-width (ss-pic ss))) (ss-mbx ss)))
+
 (defun decode-i-macroblock (ss)
   "Parse and reconstruct one I-slice macroblock."
   (let* ((br (ss-br ss)) (pic (ss-pic ss))
@@ -266,7 +281,7 @@
              (flag (u1 br))
              (rem (if (= flag 1) nil (ub br 3)))
              (mode (if (= flag 1) pred (if (< rem pred) rem (1+ rem)))))
-        (when (equal *debug-blk* (cons (+ (* (ss-mby ss) (pic-mb-width pic)) (ss-mbx ss)) :modes))
+        (when-debug-blk ((%mb-index ss) :modes)
           (format t "~&  blk ~2d: pred=~d flag=~d rem=~a -> mode ~d~%" blk pred flag rem mode))
         (setf (aref modes blk) mode)
         (set-mode ss blk mode)))
@@ -296,8 +311,7 @@
                                  up-p left-p up-right-p up-left-p)
           (intra4x4-predict (ss-pred ss) (aref modes blk) (ss-pt ss) (ss-pl ss)
                             up-p left-p up-left-p)
-          (when (equal *debug-blk*
-                       (cons (+ (* (ss-mby ss) (pic-mb-width pic)) (ss-mbx ss)) blk))
+          (when-debug-blk ((%mb-index ss) blk)
             (format t "~&  blk ~d mode=~d up=~a left=~a upleft=~a upright=~a~%   pt=~a~%   pl=~a~%   pred=~a~%"
                     blk (aref modes blk) up-p left-p up-left-p up-right-p
                     (coerce (ss-pt ss) 'list) (coerce (ss-pl ss) 'list)
@@ -309,8 +323,7 @@
                     (aref (ss-pred ss) (+ (* i 4) j)))))
           (if (logbitp (ash blk -2) cbp)
               (let ((n (residual-block br (ss-coeffs ss) (luma-nc ss blk) 16)))
-                (when (equal *debug-blk*
-                             (cons (+ (* (ss-mby ss) (pic-mb-width pic)) (ss-mbx ss)) blk))
+                (when-debug-blk ((%mb-index ss) blk)
                   (format t "   nc=~d n=~d coeffs(scan)=~a~%" (luma-nc ss blk) n
                           (coerce (ss-coeffs ss) 'list)))
                 (set-luma-nz ss blk n)
@@ -378,8 +391,12 @@
          (planes (vector (pic-u pic) (pic-v pic)))
          (qps (vector (chroma-qp (ss-qp ss) (pps-chroma-qp-offset-for pps 0))
                       (chroma-qp (ss-qp ss) (pps-chroma-qp-offset-for pps 1))))
-         (dcs (vector (make-array 4 :element-type 'fixnum :initial-element 0)
-                      (make-array 4 :element-type 'fixnum :initial-element 0))))
+         ;; scratch off the slice state rather than fresh per macroblock: see the note in
+         ;; RESIDUAL-BLOCK about what per-macroblock garbage does to the audio on the same desktop
+         (dcs (vector (ss-chroma-dc ss) (ss-chroma-dc-v ss))))
+    (declare (dynamic-extent planes qps dcs))
+    (fill (ss-chroma-dc ss) 0)
+    (fill (ss-chroma-dc-v ss) 0)
     ;; prediction first, for both planes
     (dotimes (plane 2)
       (chroma-predict (aref planes plane) (pic-cstride pic) base mode up-p left-p))

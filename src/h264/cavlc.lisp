@@ -122,8 +122,14 @@
     (when (zerop total-coeff) (return-from residual-block 0))
     (when (> total-coeff max-coeff)
       (%err "coeff_token says ~d coefficients in a block that holds ~d" total-coeff max-coeff))
-    (let ((levels (make-array total-coeff :element-type 'fixnum))
-          (runs (make-array total-coeff :element-type 'fixnum :initial-element 0)))
+    ;; SIXTEEN, not TOTAL-COEFF, and that is the whole point.  A DYNAMIC-EXTENT array whose size is
+    ;; a variable is not something SBCL will put on the stack, so the obvious spelling of this
+    ;; allocated two fresh heap vectors for every coded block — about 2.5 MB of garbage per 640x360
+    ;; picture, which is enough collector pressure to make the audio on the same desktop stutter,
+    ;; because SBCL stops every thread to collect.  A block holds at most sixteen coefficients, so a
+    ;; constant bound costs nothing and stack-allocates.
+    (let ((levels (make-array 16 :element-type 'fixnum))
+          (runs (make-array 16 :element-type 'fixnum :initial-element 0)))
       (declare (dynamic-extent levels runs))
       ;; the trailing ones: a sign bit each, magnitude known
       (dotimes (i trailing-ones)

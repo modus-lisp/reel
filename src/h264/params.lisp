@@ -154,7 +154,10 @@
   (idr-pic-id 0)
   (poc-lsb 0) (delta-poc-bottom 0)
   (redundant-pic-cnt 0)
-  (num-ref-idx-l0 1)
+  ;; NIL, not 1: this is the flag for "the slice did not override it", and a default of 1 makes
+  ;; the fallback to the picture parameter set below unreachable — which reads no reference indices
+  ;; at all on a stream with more than one reference, and desynchronises the slice.
+  (num-ref-idx-l0 nil)
   (ref-list-reordering '())
   (no-output-of-prior-pics nil) (long-term-reference nil)
   (adaptive-ref-marking nil)

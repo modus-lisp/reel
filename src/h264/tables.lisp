@@ -181,3 +181,34 @@
                                      20 21 22 23 24 25 26 27 28 29
                                      29 30 31 32 32 33 34 34 35 35 36 36 37 37 37 38 38 38 39 39 39 39)))
 
+
+;;; ---- inter macroblocks -----------------------------------------------------------------------
+
+(defparameter +inter-cbp+
+  ;; Table 9-4 again, the OTHER column.  Inter macroblocks map the same code numbers to different
+  ;; patterns, and using the intra column for them is a silent wrong answer rather than an error.
+  (make-array 48 :element-type '(unsigned-byte 8)
+                 :initial-contents '(0 16 1 2  4 8 32 3  5 10 12 15  47 7 11 13
+                                     14 6 9 31  35 37 42 44  33 34 36 40  39 43 45 46
+                                     17 18 20 24  19 21 26 28  23 27 29 30  22 25 38 41)))
+
+(defparameter +p-part-width+
+  ;; Table 7-13: the partition shape of each P macroblock type.  Types 0..3 are inter; 4 is
+  ;; P_8x8ref0, which is 8x8 with ref_idx inferred to be 0 rather than coded.
+  (make-array 5 :element-type '(unsigned-byte 8) :initial-contents '(16 16 8 8 8)))
+(defparameter +p-part-height+
+  (make-array 5 :element-type '(unsigned-byte 8) :initial-contents '(16 8 16 8 8)))
+(defparameter +p-part-count+
+  (make-array 5 :element-type '(unsigned-byte 8) :initial-contents '(1 2 2 4 4)))
+
+(defparameter +p-sub-width+
+  ;; Table 7-17: the shape of each sub-macroblock partition inside a P_8x8.
+  (make-array 4 :element-type '(unsigned-byte 8) :initial-contents '(8 8 4 4)))
+(defparameter +p-sub-height+
+  (make-array 4 :element-type '(unsigned-byte 8) :initial-contents '(8 4 8 4)))
+(defparameter +p-sub-count+
+  (make-array 4 :element-type '(unsigned-byte 8) :initial-contents '(1 2 2 4)))
+
+(declaim (type (simple-array (unsigned-byte 8) (*))
+               +inter-cbp+ +p-part-width+ +p-part-height+ +p-part-count+
+               +p-sub-width+ +p-sub-height+ +p-sub-count+))

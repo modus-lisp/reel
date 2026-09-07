@@ -52,6 +52,7 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
        (:file "cavlc")        ; residual blocks: coeff_token, levels, runs
        (:file "transform")    ; dequantisation, the inverse 4x4 and the DC transforms
        (:file "intra")        ; the nine 4x4, four 16x16 and four chroma prediction modes
+       (:file "motion")       ; inter prediction: vector prediction and quarter-pel resampling
        (:file "slice")        ; the macroblock layer and the slice loop
        (:file "deblock-tables")  ; the loop filter's alpha/beta/tc0 thresholds
        (:file "deblock")      ; the in-loop deblocking filter

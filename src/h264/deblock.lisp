@@ -121,9 +121,54 @@ negative slice offset still lands inside the array instead of before it.")
 
 ;;; ---- the picture ---------------------------------------------------------------------------------
 
-(defun deblock-picture (pic sh)
-  "Filter every macroblock of PIC, in the order 8.7 requires."
+
+;;; ---- how hard: the boundary strength (8.7.2.1) ----------------------------------------------------
+
+(defun %boundary-strength (pic pbx pby qbx qby mb-edge-p)
+  "bS for the pair of 4x4 blocks either side of an edge, P before Q in decoding order.
+
+   The intra cases are constants — 4 across a macroblock edge, 3 inside one — because intra content
+   has no motion to compare and its block structure is the thing the filter exists to remove.  For
+   inter content the strength is EARNED: 2 where either side carries residual coefficients, 1 where
+   the two sides genuinely came from different places, and 0 where they came from the same place
+   with the same vector, in which case there is no seam to soften and filtering would only blur."
   (declare (optimize (speed 3) (safety 1)))
+  (let ((p-intra (mb-intra-p pic (floor pbx 4) (floor pby 4)))
+        (q-intra (mb-intra-p pic (floor qbx 4) (floor qby 4))))
+    (cond
+      ((or p-intra q-intra) (if mb-edge-p 4 3))
+      (t
+       (let ((gw (* 4 (pic-mb-width pic))))
+         (if (or (plusp (aref (pic-nz-y pic) (+ (* pby gw) pbx)))
+                 (plusp (aref (pic-nz-y pic) (+ (* qby gw) qbx))))
+             2
+             (multiple-value-bind (pmx pmy pref) (blk-mv pic pbx pby)
+               (multiple-value-bind (qmx qmy qref) (blk-mv pic qbx qby)
+                 ;; a quarter-pel difference of 4 is one whole sample, which is the specification's
+                 ;; threshold for "these two blocks did not move together"
+                 (if (or (/= pref qref)
+                         (>= (abs (- pmx qmx)) 4)
+                         (>= (abs (- pmy qmy)) 4))
+                     1
+                     0)))))))))
+
+(defvar *skip-loop-filter* nil
+  "Bind true to reconstruct without filtering, matching `ffmpeg -skip_loop_filter all\'.
+
+   A DIAGNOSTIC, not an option: the filter is in-loop, so skipping it does not merely look
+   blockier, it diverges from the encoder and keeps diverging.  Its use is telling in one run
+   whether a mismatch is in the filter or underneath it, and that is worth a variable because the
+   alternative is guessing.")
+
+(defun deblock-picture (pic sh)
+  "Filter every macroblock of PIC, in the order 8.7 requires.
+
+   Each edge is filtered in FOUR GROUPS with their own boundary strength, not as one edge with one
+   strength: bS is a property of the pair of 4x4 blocks either side, and in inter content it varies
+   along a single macroblock edge.  A chroma group is two lines where a luma group is four, because
+   4:2:0 chroma is half resolution and takes its strength from the luma edge it lies on."
+  (declare (optimize (speed 3) (safety 1)))
+  (when *skip-loop-filter* (return-from deblock-picture pic))
   (let* ((idc (sh-disable-deblocking sh)))
     (when (= idc 1) (return-from deblock-picture pic))
     (let* ((pps (sh-pps sh))
@@ -137,6 +182,7 @@ negative slice offset still lands inside the array instead of before it.")
                  (qp (aref (pic-mb-qps pic) mbi))
                  (ybase (pic-y-base pic mbx mby))
                  (cbase (pic-c-base pic mbx mby))
+                 (bx0 (* 4 mbx)) (by0 (* 4 mby))
                  (left-p (plusp mbx))
                  (up-p (plusp mby))
                  (qp-left (and left-p (aref (pic-mb-qps pic) (1- mbi))))
@@ -144,31 +190,56 @@ negative slice offset still lands inside the array instead of before it.")
             (flet ((cqp (a b plane)
                      ;; chroma filters at the CHROMA quantiser, derived per side then averaged
                      (ash (+ (chroma-qp a (pps-chroma-qp-offset-for pps plane))
-                             (chroma-qp b (pps-chroma-qp-offset-for pps plane)) 1) -1)))
-              ;; ---- vertical edges, left to right
-              (when left-p
-                (%filter-edge (pic-y pic) ybase 1 ys 16 4
-                              (ash (+ qp qp-left 1) -1) alpha-off beta-off nil)
-                (dotimes (plane 2)
-                  (%filter-edge (if (zerop plane) (pic-u pic) (pic-v pic))
-                                cbase 1 cs 8 4 (cqp qp qp-left plane) alpha-off beta-off t)))
-              (loop for dx in '(4 8 12)
-                    do (%filter-edge (pic-y pic) (+ ybase dx) 1 ys 16 3 qp alpha-off beta-off nil))
-              (dotimes (plane 2)
-                (%filter-edge (if (zerop plane) (pic-u pic) (pic-v pic))
-                              (+ cbase 4) 1 cs 8 3 (cqp qp qp plane) alpha-off beta-off t))
-              ;; ---- horizontal edges, top to bottom
-              (when up-p
-                (%filter-edge (pic-y pic) ybase ys 1 16 4
-                              (ash (+ qp qp-up 1) -1) alpha-off beta-off nil)
-                (dotimes (plane 2)
-                  (%filter-edge (if (zerop plane) (pic-u pic) (pic-v pic))
-                                cbase cs 1 8 4 (cqp qp qp-up plane) alpha-off beta-off t)))
-              (loop for dy in '(4 8 12)
-                    do (%filter-edge (pic-y pic) (+ ybase (* dy ys)) ys 1 16 3
-                                     qp alpha-off beta-off nil))
-              (dotimes (plane 2)
-                (%filter-edge (if (zerop plane) (pic-u pic) (pic-v pic))
-                              (+ cbase (* 4 cs)) cs 1 8 3 (cqp qp qp plane)
-                              alpha-off beta-off t))))))
+                             (chroma-qp b (pps-chroma-qp-offset-for pps plane)) 1) -1))
+                   (bs-v (dx k)
+                     ;; vertical edge DX samples in, group K: the block pair is side by side
+                     (%boundary-strength pic (+ bx0 (ash dx -2) -1) (+ by0 k)
+                                         (+ bx0 (ash dx -2)) (+ by0 k) (zerop dx)))
+                   (bs-h (dy k)
+                     (%boundary-strength pic (+ bx0 k) (+ by0 (ash dy -2) -1)
+                                         (+ bx0 k) (+ by0 (ash dy -2)) (zerop dy))))
+              (macrolet ((each-group ((kvar) &body body) `(dotimes (,kvar 4) ,@body)))
+                ;; ---- vertical edges, left to right
+                (when left-p
+                  (each-group (k)
+                    (let ((bs (bs-v 0 k)))
+                      (%filter-edge (pic-y pic) (+ ybase (* 4 k ys)) 1 ys 4 bs
+                                    (ash (+ qp qp-left 1) -1) alpha-off beta-off nil)
+                      (dotimes (plane 2)
+                        (%filter-edge (if (zerop plane) (pic-u pic) (pic-v pic))
+                                      (+ cbase (* 2 k cs)) 1 cs 2 bs
+                                      (cqp qp qp-left plane) alpha-off beta-off t)))))
+                (loop for dx in '(4 8 12)
+                      do (each-group (k)
+                           (let ((bs (bs-v dx k)))
+                             (%filter-edge (pic-y pic) (+ ybase dx (* 4 k ys)) 1 ys 4 bs
+                                           qp alpha-off beta-off nil))))
+                ;; chroma has one internal vertical edge, at the luma edge 8 samples in
+                (each-group (k)
+                  (let ((bs (bs-v 8 k)))
+                    (dotimes (plane 2)
+                      (%filter-edge (if (zerop plane) (pic-u pic) (pic-v pic))
+                                    (+ cbase 4 (* 2 k cs)) 1 cs 2 bs
+                                    (cqp qp qp plane) alpha-off beta-off t))))
+                ;; ---- horizontal edges, top to bottom
+                (when up-p
+                  (each-group (k)
+                    (let ((bs (bs-h 0 k)))
+                      (%filter-edge (pic-y pic) (+ ybase (* 4 k)) ys 1 4 bs
+                                    (ash (+ qp qp-up 1) -1) alpha-off beta-off nil)
+                      (dotimes (plane 2)
+                        (%filter-edge (if (zerop plane) (pic-u pic) (pic-v pic))
+                                      (+ cbase (* 2 k)) cs 1 2 bs
+                                      (cqp qp qp-up plane) alpha-off beta-off t)))))
+                (loop for dy in '(4 8 12)
+                      do (each-group (k)
+                           (let ((bs (bs-h dy k)))
+                             (%filter-edge (pic-y pic) (+ ybase (* dy ys) (* 4 k)) ys 1 4 bs
+                                           qp alpha-off beta-off nil))))
+                (each-group (k)
+                  (let ((bs (bs-h 8 k)))
+                    (dotimes (plane 2)
+                      (%filter-edge (if (zerop plane) (pic-u pic) (pic-v pic))
+                                    (+ cbase (* 4 cs) (* 2 k)) cs 1 2 bs
+                                    (cqp qp qp plane) alpha-off beta-off t)))))))))
       pic)))

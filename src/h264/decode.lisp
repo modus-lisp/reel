@@ -15,6 +15,10 @@
   (sps (make-hash-table) :type hash-table)
   (pps (make-hash-table) :type hash-table)
   (picture nil)
+  ;; Decoded pictures kept as references, most recent first.  Baseline marking is a sliding
+  ;; window: a new reference picture goes on the front and the oldest falls off the back once
+  ;; there are more than the sequence parameter set allows.  An IDR empties it.
+  (refs '() :type list)
   (frames 0 :type fixnum))
 
 (defun make-decoder () (%make-decoder))
@@ -42,12 +46,24 @@
        (when (zerop (sh-first-mb sh))
          (setf (h264-picture d) (make-picture-for sps)))
        (unless (h264-picture d) (%err "a slice arrived before any picture was started"))
-       (decode-slice (h264-picture d) sh br)
+       ;; list 0 for a P slice is the reference pictures in decoding order, most recent first,
+       ;; which for a stream without list reordering is the whole of the list construction
+       (when (sh-ref-list-reordering sh)
+         (%err "reference picture list reordering is not supported"))
+       (decode-slice (h264-picture d) sh br (coerce (h264-refs d) 'vector))
        ;; the loop filter runs over the whole picture once its macroblocks are reconstructed, and
        ;; never during: intra prediction reads UNFILTERED neighbours (8.3), so filtering as we go
        ;; would feed the next macroblock samples the encoder never predicted from
        (deblock-picture (h264-picture d) sh)
        (incf (h264-frames d))
+       ;; the filtered picture is what later pictures predict from, so this happens after the
+       ;; loop filter and not before it
+       (when (nal-idr-p nal) (setf (h264-refs d) '()))
+       (when (plusp (nal-ref-idc nal))
+         (push (h264-picture d) (h264-refs d))
+         (let ((limit (max 1 (sps-max-ref-frames sps))))
+           (when (> (length (h264-refs d)) limit)
+             (setf (h264-refs d) (subseq (h264-refs d) 0 limit)))))
        (h264-picture d)))
     (t nil)))                                   ; SEI, AUD, and everything else: not our business
 

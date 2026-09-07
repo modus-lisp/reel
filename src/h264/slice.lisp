@@ -75,8 +75,15 @@
   (nz-y (%emptyfx) :type fixnums) (nz-u (%emptyfx) :type fixnums) (nz-v (%emptyfx) :type fixnums)
   ;; per-4x4-block Intra4x4 prediction modes, and per-macroblock facts the loop filter needs
   (modes (%emptyfx) :type fixnums)
+  ;; MB-TYPES doubles as "has this macroblock been decoded": -1 means not yet, a value >= 0 is an
+  ;; intra type, and an inter one is stored negative.  That keeps availability and Intra4x4 mode
+  ;; prediction correct without either of them having to learn about inter macroblocks.
   (mb-types (%emptyfx) :type fixnums)
-  (mb-qps (%emptyfx) :type fixnums))
+  (mb-qps (%emptyfx) :type fixnums)
+  ;; motion, per 4x4 block: two components each, in quarter-pel units, and the reference index
+  ;; (-1 where the block is intra).  The loop filter reads both, and so does the next picture.
+  (mvs (%emptyfx) :type fixnums)
+  (refs (%emptyfx) :type fixnums))
 
 (defun make-picture-for (sps)
   (let* ((mbw (sps-mb-width sps)) (mbh (sps-mb-height sps))
@@ -95,7 +102,9 @@
      :nz-v (make-array (* mbw 2 mbh 2) :element-type 'fixnum :initial-element 0)
      :modes (make-array (* mbw 4 mbh 4) :element-type 'fixnum :initial-element 2)
      :mb-types (make-array (* mbw mbh) :element-type 'fixnum :initial-element -1)
-     :mb-qps (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0))))
+     :mb-qps (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0)
+     :mvs (make-array (* mbw 4 mbh 4 2) :element-type 'fixnum :initial-element 0)
+     :refs (make-array (* mbw 4 mbh 4) :element-type 'fixnum :initial-element -1))))
 
 (declaim (inline pic-y-base pic-c-base))
 (defun pic-y-base (p mbx mby)
@@ -109,6 +118,15 @@
 
 (defstruct (slice-state (:conc-name ss-))
   pic sh br
+  ref0                                          ; list-0 entry 0, the common case
+  (reflist #() :type simple-vector)              ; the whole of list 0, indexed by ref_idx
+  ;; Which of this macroblock's sixteen 4x4 blocks have had their motion assigned yet, as a bit
+  ;; per block in raster order.  6.4.11.7 marks a neighbouring partition NOT AVAILABLE while it is
+  ;; still undecoded, and that is not the same as available-with-a-zero-vector: an unavailable C
+  ;; makes D stand in for it, and a zero one does not.  The difference only shows on partitions
+  ;; smaller than 8x8, where a partition's above-right neighbour can be a later partition of the
+  ;; same macroblock.
+  (mb-done 0 :type fixnum)
   (mbx 0 :type fixnum) (mby 0 :type fixnum)
   (qp 26 :type fixnum)
   ;; typed for the same reason the picture's planes are: these are read and written per block
@@ -133,6 +151,27 @@
          (pic (ss-pic ss)))
     (and (>= x 0) (>= y 0) (< x (pic-mb-width pic)) (< y (pic-mb-height pic))
          (/= -1 (aref (pic-mb-types pic) (+ (* y (pic-mb-width pic)) x))))))
+
+(declaim (inline mb-intra-p %mv-index))
+(defun mb-intra-p (pic mbx mby)
+  "Was the macroblock at MBX,MBY coded intra?  Undecoded counts as not-intra and callers check
+   availability separately."
+  (>= (aref (pic-mb-types pic) (+ (* mby (pic-mb-width pic)) mbx)) 0))
+
+(defun %mv-index (pic bx by)
+  "Index of the 4x4 block at picture block coordinates BX,BY in the motion arrays."
+  (+ (* by (* 4 (pic-mb-width pic))) bx))
+
+(defun blk-mv (pic bx by)
+  "(values mvx mvy ref) for the 4x4 block at BX,BY, all in quarter-pel units."
+  (let ((i (%mv-index pic bx by)))
+    (values (aref (pic-mvs pic) (* 2 i)) (aref (pic-mvs pic) (1+ (* 2 i))) (aref (pic-refs pic) i))))
+
+(defun set-blk-mv (pic bx by mvx mvy ref)
+  (let ((i (%mv-index pic bx by)))
+    (setf (aref (pic-mvs pic) (* 2 i)) mvx
+          (aref (pic-mvs pic) (1+ (* 2 i))) mvy
+          (aref (pic-refs pic) i) ref)))
 
 ;;; ---- nC: the coefficient-count context ------------------------------------------------------------
 
@@ -282,20 +321,31 @@
 (defun %mb-index (ss) 
   (declare (optimize (speed 3) (safety 1)))(+ (* (ss-mby ss) (pic-mb-width (ss-pic ss))) (ss-mbx ss)))
 
-(defun decode-i-macroblock (ss)
-  "Parse and reconstruct one I-slice macroblock."
+(defun decode-intra-macroblock (ss mb-type)
+  "Reconstruct one INTRA macroblock whose mb_type has already been read.
+
+   Split out from DECODE-I-MACROBLOCK because a P slice reaches it too: an mb_type of 5 or more
+   there is an intra macroblock with 5 subtracted, and it must be decoded exactly as it would be
+   in an I slice — including clearing its motion, so that a neighbour predicting a vector from it
+   sees `intra\' rather than whatever the array happened to hold."
   (declare (optimize (speed 3) (safety 1)))
-  (let* ((br (ss-br ss)) (pic (ss-pic ss))
-         (mb-type (ue br))
+  (let* ((pic (ss-pic ss))
          (mbi (+ (* (ss-mby ss) (pic-mb-width pic)) (ss-mbx ss))))
     (when (= mb-type 25) (%err "I_PCM macroblocks are not supported"))
     (when (> mb-type 25) (%err "mb_type ~d in an I slice" mb-type))
     (setf (aref (pic-mb-types pic) mbi) mb-type)
+    (let ((bx (* 4 (ss-mbx ss))) (by (* 4 (ss-mby ss))))
+      (dotimes (j 4) (dotimes (i 4) (set-blk-mv pic (+ bx i) (+ by j) 0 0 -1))))
     (if (zerop mb-type)
         (decode-i4x4-macroblock ss)
         (decode-i16x16-macroblock ss (1- mb-type)))
     (setf (aref (pic-mb-qps pic) mbi) (ss-qp ss))
     mb-type))
+
+(defun decode-i-macroblock (ss)
+  "Parse and reconstruct one I-slice macroblock."
+  (declare (optimize (speed 3) (safety 1)))
+  (decode-intra-macroblock ss (ue (ss-br ss))))
 
 (defun %chroma-pred-mode (br) 
   (declare (optimize (speed 3) (safety 1)))(ue br))
@@ -438,9 +488,11 @@
     (declare (dynamic-extent planes qps dcs))
     (fill (ss-chroma-dc ss) 0)
     (fill (ss-chroma-dc-v ss) 0)
-    ;; prediction first, for both planes
-    (dotimes (plane 2)
-      (chroma-predict (aref planes plane) (pic-cstride pic) base mode up-p left-p))
+    ;; prediction first, for both planes — but only for an INTRA macroblock.  An inter one was
+    ;; already predicted from its reference picture, and predicting over that would erase it.
+    (when mode
+      (dotimes (plane 2)
+        (chroma-predict (aref planes plane) (pic-cstride pic) base mode up-p left-p)))
     ;; then both DC blocks, in plane order
     (when (plusp cbp-chroma)
       (dotimes (plane 2)
@@ -470,16 +522,200 @@
 
 ;;; ---- the slice ------------------------------------------------------------------------------------
 
-(defun decode-slice (pic sh br)
-  "Decode every macroblock of a slice into PIC."
-  (let ((ss (make-slice-state :pic pic :sh sh :br br :qp (sh-qp sh))))
-    (unless (sh-i-slice-p sh)
-      (%err "only I slices are decoded so far; this is a ~a slice" (slice-type-name (sh-slice-type sh))))
-    (let ((mb (sh-first-mb sh)) (total (* (pic-mb-width pic) (pic-mb-height pic))))
-      (loop while (< mb total) do
-        (setf (ss-mbx ss) (mod mb (pic-mb-width pic))
-              (ss-mby ss) (floor mb (pic-mb-width pic)))
-        (decode-i-macroblock ss)
+
+;;; ---- inter macroblocks ---------------------------------------------------------------------------
+
+(defun %te (br n)
+  "te(v): truncated Exp-Golomb.  With a range of exactly two values it degenerates to one inverted
+   bit, which is the only place in the syntax where a `v\' code is not Exp-Golomb at all."
+  (declare (optimize (speed 3) (safety 1)))
+  (if (= n 2) (- 1 (u1 br)) (ue br)))
+
+(defun %set-partition-motion (ss bx by wb hb mvx mvy ref)
+  "Record one partition's vector on every 4x4 block it covers.
+
+   Per block rather than per partition because that is the granularity everything downstream reads
+   at: the next partition's vector prediction, the next picture's, and the loop filter's boundary
+   strength all ask about 4x4 blocks and do not care how they were grouped."
+  (declare (optimize (speed 3) (safety 1)))
+  (let ((pic (ss-pic ss))
+        (bx0 (* 4 (ss-mbx ss))) (by0 (* 4 (ss-mby ss))))
+    (dotimes (j hb)
+      (dotimes (i wb)
+        (set-blk-mv pic (+ bx i) (+ by j) mvx mvy ref)
+        (let ((lx (- (+ bx i) bx0)) (ly (- (+ by j) by0)))
+          (when (and (<= 0 lx 3) (<= 0 ly 3))
+            (setf (ss-mb-done ss) (logior (ss-mb-done ss) (ash 1 (+ (* 4 ly) lx))))))))))
+
+(defun %ref-picture (ss ref-idx)
+  "List-0 entry REF-IDX.  Compensating from the wrong reference is invisible to the parser — it
+   corrupts the picture and keeps decoding — so this refuses an index it cannot honour."
+  (let ((v (ss-reflist ss)))
+    (if (and (>= ref-idx 0) (< ref-idx (length v)))
+        (aref v ref-idx)
+        (%err "ref_idx ~d, but list 0 holds ~d picture~:p" ref-idx (length v)))))
+
+(defun %mc-partition (ss ref-pic px py w h mvx mvy)
+  "Motion compensate one partition, luma and both chroma planes, into the current picture."
+  (declare (optimize (speed 3) (safety 1)))
+  (let ((pic (ss-pic ss)))
+    (predict-luma (pic-y pic) (pic-ystride pic)
+                  (+ (pic-yoff pic) (* py (pic-ystride pic)) px)
+                  ref-pic px py w h mvx mvy)
+    (let ((cx (ash px -1)) (cy (ash py -1)) (cw (ash w -1)) (ch (ash h -1)))
+      (let ((cbase (+ (pic-coff pic) (* cy (pic-cstride pic)) cx)))
+        (predict-chroma (pic-u pic) (pic-u ref-pic) (pic-cstride pic) cbase
+                        ref-pic cx cy cw ch mvx mvy)
+        (predict-chroma (pic-v pic) (pic-v ref-pic) (pic-cstride pic) cbase
+                        ref-pic cx cy cw ch mvx mvy)))))
+
+(defun %inter-luma-residual (ss cbp)
+  "The luma residual of an inter macroblock: no prediction step, because motion compensation has
+   already written the prediction into the picture."
+  (declare (optimize (speed 3) (safety 1)))
+  (let* ((br (ss-br ss)) (pic (ss-pic ss))
+         (ybase (pic-y-base pic (ss-mbx ss) (ss-mby ss))))
+    (dotimes (blk 16)
+      (let ((base (+ ybase (* (aref +blk-y+ blk) 4 (pic-ystride pic)) (* (aref +blk-x+ blk) 4))))
+        (if (logbitp (ash blk -2) cbp)
+            (multiple-value-bind (n hi) (residual-block br (ss-coeffs ss) (luma-nc ss blk) 16)
+              (declare (type fixnum n hi))
+              (set-luma-nz ss blk n)
+              (when (plusp n)
+                (dequant-4x4 (ss-coeffs ss) (ss-block ss) (ss-qp ss) :end hi)
+                (if (zerop hi)
+                    (idct-4x4-dc (ss-block ss) (aref (ss-block ss) 0))
+                    (idct-4x4 (ss-block ss)))
+                (add-residual-4x4 (pic-y pic) (pic-ystride pic) base (ss-block ss))))
+            (set-luma-nz ss blk 0))))))
+
+(defun decode-skip-macroblock (ss)
+  "A P_Skip macroblock: no bits of its own at all beyond being counted in the skip run.
+
+   Its vector is predicted the ordinary way with one extra rule, and it has no residual, so a run
+   of these is how a still background costs almost nothing."
+  (declare (optimize (speed 3) (safety 1)))
+  (let* ((pic (ss-pic ss)) (mbx (ss-mbx ss)) (mby (ss-mby ss))
+         (mbi (+ (* mby (pic-mb-width pic)) mbx)))
+    (unless (ss-ref0 ss) (%err "a skipped macroblock with no reference picture"))
+    (setf (aref (pic-mb-types pic) mbi) -2)
+    (setf (ss-mb-done ss) 0)
+    (multiple-value-bind (mvx mvy) (skip-mv ss)
+      (%set-partition-motion ss (* 4 mbx) (* 4 mby) 4 4 mvx mvy 0)
+      (%mc-partition ss (ss-ref0 ss) (* 16 mbx) (* 16 mby) 16 16 mvx mvy))
+    (dotimes (blk 16) (set-luma-nz ss blk 0))
+    (dotimes (plane 2) (dotimes (blk 4) (set-chroma-nz ss plane blk 0)))
+    (setf (aref (pic-mb-qps pic) mbi) (ss-qp ss))))
+
+(defun decode-p-macroblock (ss mb-type)
+  "Parse and reconstruct one INTER macroblock of a P slice (mb_type 0..4).
+
+   THE ORDER OF THE SYNTAX IS NOT THE ORDER OF THE WORK.  Every sub_mb_type comes first, then every
+   reference index, then every vector difference — not one partition at a time.  Reading it a
+   partition at a time parses without complaint and produces vectors attached to the wrong
+   partitions, which looks like a motion compensation bug and is not one."
+  (declare (optimize (speed 3) (safety 1)))
+  (let* ((br (ss-br ss)) (pic (ss-pic ss)) (sh (ss-sh ss))
+         (mbx (ss-mbx ss)) (mby (ss-mby ss))
+         (mbi (+ (* mby (pic-mb-width pic)) mbx))
+         (px (* 16 mbx)) (py (* 16 mby))
+         (bx0 (* 4 mbx)) (by0 (* 4 mby))
+         (nref (max 1 (or (sh-num-ref-idx-l0 sh) 1)))
+         (ref-pic (ss-ref0 ss))
+         (p8x8 (>= mb-type 3))
+         (nparts (aref +p-part-count+ mb-type))
+         (pw (aref +p-part-width+ mb-type))
+         (ph (aref +p-part-height+ mb-type))
+         (shape (case mb-type (1 :16x8) (2 :8x16) (t nil)))
+         (subs (make-array 4 :element-type 'fixnum :initial-element 0))
+         (refs (make-array 4 :element-type 'fixnum :initial-element 0)))
+    (declare (dynamic-extent subs refs))
+    (unless ref-pic (%err "a P macroblock with no reference picture"))
+    (setf (aref (pic-mb-types pic) mbi) (- -2 mb-type))
+    (setf (ss-mb-done ss) 0)
+    ;; 1. every sub_mb_type
+    (when p8x8
+      (dotimes (i 4)
+        (let ((st (ue br)))
+          (when (> st 3) (%err "sub_mb_type ~d in a P slice" st))
+          (setf (aref subs i) st))))
+    ;; 2. every reference index.  P_8x8ref0 (mb_type 4) codes none: they are all zero.
+    (when (and (> nref 1) (/= mb-type 4))
+      (dotimes (i nparts) (setf (aref refs i) (%te br nref))))
+    ;; 3. every vector difference, and with it the prediction, the storage and the resampling
+    (if p8x8
+        (dotimes (i 4)
+          (let* ((st (aref subs i))
+                 (nsub (aref +p-sub-count+ st))
+                 (sw (aref +p-sub-width+ st)) (shh (aref +p-sub-height+ st))
+                 (across (floor 8 sw))
+                 (ox (* 8 (mod i 2))) (oy (* 8 (floor i 2)))
+                 (ref (aref refs i)))
+            (dotimes (k nsub)
+              (let* ((sx (+ ox (* sw (mod k across))))
+                     (sy (+ oy (* shh (floor k across))))
+                     (bx (+ bx0 (ash sx -2))) (by (+ by0 (ash sy -2))))
+                (multiple-value-bind (mpx mpy) (predict-mv ss bx by (ash sw -2) ref)
+                  (let ((mvx (+ mpx (se br))) (mvy (+ mpy (se br))))
+                    (%set-partition-motion ss bx by (ash sw -2) (ash shh -2) mvx mvy ref)
+                    (%mc-partition ss (%ref-picture ss ref) (+ px sx) (+ py sy) sw shh mvx mvy)))))))
+        (let ((across (floor 16 pw)))
+          (dotimes (i nparts)
+            (let* ((sx (* pw (mod i across))) (sy (* ph (floor i across)))
+                   (bx (+ bx0 (ash sx -2))) (by (+ by0 (ash sy -2)))
+                   (ref (aref refs i)))
+              (multiple-value-bind (mpx mpy)
+                  (predict-mv ss bx by (ash pw -2) ref :shape shape :part i)
+                (let ((mvx (+ mpx (se br))) (mvy (+ mpy (se br))))
+                  (%set-partition-motion ss bx by (ash pw -2) (ash ph -2) mvx mvy ref)
+                  (%mc-partition ss (%ref-picture ss ref) (+ px sx) (+ py sy) pw ph mvx mvy)))))))
+    ;; 4. the residual, on top of what motion compensation predicted
+    (let* ((cbp-code (ue br))
+           (cbp (if (< cbp-code 48)
+                    (aref +inter-cbp+ cbp-code)
+                    (%err "coded_block_pattern code ~d in a P macroblock" cbp-code))))
+      (when (plusp cbp)
+        (incf (ss-qp ss) (se br))
+        (setf (ss-qp ss) (mod (+ (ss-qp ss) 52) 52)))
+      (%inter-luma-residual ss cbp)
+      (decode-chroma ss nil cbp)
+      (setf (aref (pic-mb-qps pic) mbi) (ss-qp ss))
+      cbp)))
+
+(defun decode-slice (pic sh br &optional refs)
+  "Decode every macroblock of a slice into PIC.  REFS is the list-0 reference picture vector."
+  (let* ((ss (make-slice-state :pic pic :sh sh :br br :qp (sh-qp sh)
+                               :reflist (or refs #())
+                               :ref0 (and refs (plusp (length refs)) (aref refs 0))))
+         (mbw (pic-mb-width pic))
+         (total (* mbw (pic-mb-height pic)))
+         (mb (sh-first-mb sh))
+         (p-slice (sh-p-slice-p sh)))
+    (unless (or (sh-i-slice-p sh) p-slice)
+      (%err "only I and P slices are decoded so far; this is a ~a slice"
+            (slice-type-name (sh-slice-type sh))))
+    (flet ((at (n) (setf (ss-mbx ss) (mod n mbw) (ss-mby ss) (floor n mbw))))
+      (loop
+        (when (>= mb total) (return))
+        ;; a P slice codes a RUN of skipped macroblocks before each coded one, and the run may be
+        ;; the last thing in the slice — so the end-of-data test belongs after it, not before
+        (when p-slice
+          (let ((skip (ue br)))
+            (dotimes (i skip)
+              (when (>= mb total) (return))
+              (at mb)
+              (decode-skip-macroblock ss)
+              (incf mb))
+            (when (>= mb total) (return))
+            (when (and (plusp skip) (not (more-rbsp-data-p br))) (return))))
+        (at mb)
+        (if p-slice
+            (let ((mt (ue br)))
+              ;; in a P slice, mb_type 5 and up is an intra macroblock with 5 subtracted
+              (if (< mt 5)
+                  (decode-p-macroblock ss mt)
+                  (decode-intra-macroblock ss (- mt 5))))
+            (decode-i-macroblock ss))
         (incf mb)
         ;; the slice ends at its stop bit, not at a macroblock count it declares
         (unless (more-rbsp-data-p br) (return))))

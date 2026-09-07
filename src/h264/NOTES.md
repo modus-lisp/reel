@@ -51,12 +51,43 @@ and reports which one the encoder actually chose. It can write the true mode bac
 does not propagate and every later block yields clean data instead of noise. Bind `*oracle*` to
 ffmpeg's luma plane and `*oracle-w*` to its width.
 
+## Inter prediction: P slices
+
+**Done, and bit-exact.** P slices decode with motion compensation, multiple reference pictures,
+every partition size down to 4x4, intra macroblocks inside P slices, skip runs, and the inter
+boundary-strength derivation the loop filter needs. Verified against ffmpeg's ordinary filtered
+output on 180 frames across six fixtures, including 90 frames of real motion with three references
+and every partition size in play.
+
+Reference handling is baseline's sliding window: a reference picture goes on the front of the list
+and the oldest falls off once there are more than the sequence parameter set allows; an IDR empties
+it. List reordering and long-term references are refused rather than ignored.
+
+### The two bugs, both of which parse cleanly and decode wrong
+
+**The reference count defaulted to 1.** The slice header slot for `num_ref_idx_l0` was initialised
+to 1, which made the fall-back to the picture parameter set unreachable — so a stream with three
+references read no reference indices at all and desynchronised. This one at least fails loudly, a
+few macroblocks later, as an impossible mb_type.
+
+**A neighbour that is not yet decoded is NOT AVAILABLE, which is not the same as zero** (6.4.11.7).
+A sub-partition's above-right neighbour can lie inside the current macroblock, in a partition
+decoded later. Reading its uninitialised entry gives a zero vector with reference -1, which is
+exactly what an unavailable neighbour contributes to the median — so it looks equivalent, and it is
+not: an *unavailable* C makes D stand in for it, and a zero C does not. Only partitions smaller
+than 8x8 can hit it. `ss-mb-done` is the fix, a bit per 4x4 block of the current macroblock.
+
+The way both were found is worth keeping: encode fixtures that vary ONE encoder feature at a time
+(`ref=1` against `ref=3`, `partitions=none` against `p8x8` against `p4x4`) and see which one turns
+red. That took the second bug from "somewhere in inter prediction" to "sub-8x8 partitions only" in
+two ffmpeg invocations, and `*skip-loop-filter*` had already ruled out the filter in one.
+
 ## Not started
 
-P slices — they parse, and are refused. Inter prediction, reference lists, quarter-pel motion
-compensation, and the inter boundary-strength derivation the deblocking filter would then need.
-That is the larger half of Constrained Baseline. B slices, CABAC, MBAFF and FMO are outside
-Constrained Baseline and are refused too.
+CABAC — Main profile's entropy coder, refused in `params.lisp`. B slices, which additionally need
+two reference lists, the direct modes and picture order reordering. Weighted prediction. Together
+those are what an ordinary YouTube H.264 file needs; a Baseline file needs none of them and plays
+now.
 
 ## Performance
 

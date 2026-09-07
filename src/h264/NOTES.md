@@ -117,20 +117,51 @@ indices filters edges between blocks that came from the same place. It showed as
 samples of magnitude two, and was only findable because it appeared identically under both entropy
 coders, which ruled out everything above the reconstruction.
 
-## Not started: B slices
+## B slices
 
-The last thing between this and an ordinary YouTube file. Fixtures are built and waiting —
-`b-spat`, `b-temp`, `b-cabac`, covering both direct modes and both entropy coders.
+**Done, and bit-exact** on seven fixtures: both direct modes, both entropy coders, three
+references, every partition size, implicit weighted bi-prediction, and a scene cut that puts intra
+macroblocks inside B slices and gives one macroblock four differently-predicted 8x8 partitions.
 
-What it needs, roughly in dependency order: picture order count, which drives everything else; an
-output reorder buffer, because B pictures are decoded out of display order and `feed-nal` currently
-hands back a picture the moment it is finished; list 1 and the POC-based ordering of both lists;
-the B macroblock type tables for both entropy coders; bi-prediction averaging and weighted
-bi-prediction; the spatial and temporal direct modes, which are the intricate part; and a boundary
-strength derivation that copes with two references and two vectors per block.
+Four things arrived together. Picture order count and an **output reorder buffer**, because a B
+picture is decoded after the picture it is displayed before — `feed-nal` now returns whichever
+picture's turn it is, which is usually not the one just decoded, and `flush-decoder` is not
+optional: without it the last few pictures of every file stay in the buffer. Two reference lists
+ordered by where pictures sit on screen rather than when they were coded. Bi-prediction, which is
+the mean of two whole predictions rather than a blend made as they are computed, so that it rounds
+once. And the two direct modes, where spatial asks the neighbours what is going on and temporal
+asks the future picture what happened and interpolates backwards through it.
 
-Also not started: High profile (the 8x8 transform and scaling matrices), 4:2:2 and 4:4:4, more than
-eight bits per sample, MBAFF, FMO, and long-term reference pictures. All are refused explicitly.
+### The bugs, which are all one bug
+
+Every one was a neighbour that had been decoded but did not look decoded, or the reverse:
+
+- A partition counts as decoded **once it is reached**, whichever lists it uses. Marking it only
+  when a vector was stored made a list-1-only partition look undecoded during the list-0 pass. An
+  unavailable neighbour is not the same as one with no reference in that list, because
+  unavailability is what makes the above-left neighbour stand in for the above-right one.
+- The **directional** cases of 8.4.1.3 apply to a B slice's two-partition types exactly as to a P
+  slice's. Leaving them out takes the median where the specification takes one named neighbour.
+- **Direct partitions must be derived before any vector difference is read**, because a later
+  partition predicts from them and they need no bits of their own.
+- The loop filter compares the **sets of reference pictures**, and a block using one picture twice
+  can be matched to its neighbour's two either way round.
+
+`%ref-idx-ctx-inc` excluding skipped neighbours is load-bearing rather than an optimisation
+(9.3.3.1.1.6): a skipped B macroblock does have a direct-derived reference index, and counting it
+desynchronises within a couple of dozen slices. That was verified by breaking it on purpose.
+
+## Known gap
+
+An ordinary YouTube file (Main profile, CABAC, B slices, implicit weighted bi-prediction) decodes
+**236 slices of about 400** and then desynchronises inside a B slice. The header parses correctly
+there — the quantisers are low but stable across hundreds of slices — so it is content-dependent
+and mid-slice. None of the fixtures reproduce it.
+
+Coverage says what is still untested: **B sub_mb_types 4 through 12**, the 8x4, 4x8 and 4x4
+sub-partitions of a B_8x8. x264 does not appear to emit them, so no x264-encoded fixture will cover
+them; reproducing that path needs a different encoder or a hand-built stream. That is the first
+place to look.
 
 ## Performance
 

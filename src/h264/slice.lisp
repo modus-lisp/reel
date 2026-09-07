@@ -56,6 +56,10 @@
 
 (defconstant +pad+ 16 "Border samples around each plane, so a neighbour read at -1 is in bounds.")
 
+(defconstant +no-ref-poc+ most-negative-fixnum
+  "Stands in the reference-picture array for `this list predicts nothing here'.  A real picture
+order count can be negative, so absence needs a value no picture can hold.")
+
 (deftype fixnums () '(simple-array fixnum (*)))
 
 (declaim (inline %empty8 %emptyfx))
@@ -81,8 +85,12 @@
   (mb-types (%emptyfx) :type fixnums)
   (mb-qps (%emptyfx) :type fixnums)
   (frame-num 0 :type fixnum)            ; this picture's frame_num, which is its PicNum for a frame
-  ;; motion, per 4x4 block: two components each, in quarter-pel units, and the reference index
-  ;; (-1 where the block is intra).  The loop filter reads both, and so does the next picture.
+  (poc 0 :type fixnum)                  ; picture order count: where it goes on SCREEN, not in the stream
+  (ref-p nil)                           ; was it kept as a reference picture
+  ;; Motion, per 4x4 block, for BOTH reference lists.  A B slice can predict a block from two
+  ;; pictures at once, so every one of these is two deep: mvs holds l0x l0y l1x l1y, refs and
+  ;; ref-pics hold one entry per list, and -1 in refs means that list is unused for this block.
+  ;; A P slice only ever touches list 0 and reads exactly as it did before.
   (mvs (%emptyfx) :type fixnums)
   (refs (%emptyfx) :type fixnums)
   ;; the coded DIFFERENCES, which only CABAC needs: the context for a vector difference is chosen
@@ -117,10 +125,11 @@
      :modes (make-array (* mbw 4 mbh 4) :element-type 'fixnum :initial-element 2)
      :mb-types (make-array (* mbw mbh) :element-type 'fixnum :initial-element -1)
      :mb-qps (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0)
-     :mvs (make-array (* mbw 4 mbh 4 2) :element-type 'fixnum :initial-element 0)
-     :refs (make-array (* mbw 4 mbh 4) :element-type 'fixnum :initial-element -1)
-     :mvds (make-array (* mbw 4 mbh 4 2) :element-type 'fixnum :initial-element 0)
-     :ref-pics (make-array (* mbw 4 mbh 4) :element-type 'fixnum :initial-element -1)
+     :mvs (make-array (* mbw 4 mbh 4 4) :element-type 'fixnum :initial-element 0)
+     :refs (make-array (* mbw 4 mbh 4 2) :element-type 'fixnum :initial-element -1)
+     :mvds (make-array (* mbw 4 mbh 4 4) :element-type 'fixnum :initial-element 0)
+     :ref-pics (make-array (* mbw 4 mbh 4 2) :element-type 'fixnum
+                           :initial-element +no-ref-poc+)
      :mb-cbp (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0)
      :mb-chroma-mode (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0)
      :mb-dc-cbf (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0))))
@@ -158,7 +167,14 @@
   (chroma-dc-v (make-array 4 :element-type 'fixnum) :type fixnums)
   (pred (make-array 16 :element-type '(unsigned-byte 8)) :type octets)
   (pt (make-array 9 :element-type '(unsigned-byte 8)) :type octets)
-  (pl (make-array 4 :element-type '(unsigned-byte 8)) :type octets))
+  (pl (make-array 4 :element-type '(unsigned-byte 8)) :type octets)
+  ;; somewhere to put the second prediction while the two are averaged: a bi-predicted partition
+  ;; is the mean of a list-0 and a list-1 prediction, and neither may be written over the other
+  (bi-y (make-array 256 :element-type '(unsigned-byte 8)) :type octets)
+  (bi-u (make-array 64 :element-type '(unsigned-byte 8)) :type octets)
+  (bi-v (make-array 64 :element-type '(unsigned-byte 8)) :type octets)
+  reflist1                                      ; list 1, for a B slice
+  (direct-spatial t))
 
 (defun mb-available-p (ss dx dy)
   "Is the macroblock at (mbx+DX, mby+DY) decoded and in this slice?
@@ -182,16 +198,29 @@
   "Index of the 4x4 block at picture block coordinates BX,BY in the motion arrays."
   (+ (* by (* 4 (pic-mb-width pic))) bx))
 
-(defun blk-mv (pic bx by)
-  "(values mvx mvy ref) for the 4x4 block at BX,BY, all in quarter-pel units."
+(defun blk-mv (pic bx by &optional (lx 0))
+  "(values mvx mvy ref) for list LX of the 4x4 block at BX,BY, in quarter-pel units."
   (let ((i (%mv-index pic bx by)))
-    (values (aref (pic-mvs pic) (* 2 i)) (aref (pic-mvs pic) (1+ (* 2 i))) (aref (pic-refs pic) i))))
+    (values (aref (pic-mvs pic) (+ (* 4 i) (* 2 lx)))
+            (aref (pic-mvs pic) (+ (* 4 i) (* 2 lx) 1))
+            (aref (pic-refs pic) (+ (* 2 i) lx)))))
 
-(defun set-blk-mv (pic bx by mvx mvy ref)
+(defun blk-ref-poc (pic bx by &optional (lx 0))
+  "Which picture list LX of this block came from, as its order count, or +NO-REF-POC+."
+  (aref (pic-ref-pics pic) (+ (* 2 (%mv-index pic bx by)) lx)))
+
+(defun set-blk-mv (pic bx by mvx mvy ref &optional (lx 0) (poc +no-ref-poc+))
   (let ((i (%mv-index pic bx by)))
-    (setf (aref (pic-mvs pic) (* 2 i)) mvx
-          (aref (pic-mvs pic) (1+ (* 2 i))) mvy
-          (aref (pic-refs pic) i) ref)))
+    (setf (aref (pic-mvs pic) (+ (* 4 i) (* 2 lx))) mvx
+          (aref (pic-mvs pic) (+ (* 4 i) (* 2 lx) 1)) mvy
+          (aref (pic-refs pic) (+ (* 2 i) lx)) ref
+          (aref (pic-ref-pics pic) (+ (* 2 i) lx)) poc)))
+
+(defun clear-blk-motion (pic bx by)
+  "Mark a block as predicting from nothing, which is what an intra block does."
+  (dotimes (lx 2) (set-blk-mv pic bx by 0 0 -1 lx +no-ref-poc+))
+  (let ((i (%mv-index pic bx by)))
+    (dotimes (k 4) (setf (aref (pic-mvds pic) (+ (* 4 i) k)) 0))))
 
 (declaim (inline mb-skipped-p blk-mvd))
 (defun mb-skipped-p (pic mbx mby)
@@ -199,14 +228,15 @@
    the two are distinguishable, which the skip-flag context needs and nothing else does."
   (= -2 (aref (pic-mb-types pic) (+ (* mby (pic-mb-width pic)) mbx))))
 
-(defun blk-mvd (pic bx by)
+(defun blk-mvd (pic bx by &optional (lx 0))
   (let ((i (%mv-index pic bx by)))
-    (values (aref (pic-mvds pic) (* 2 i)) (aref (pic-mvds pic) (1+ (* 2 i))))))
+    (values (aref (pic-mvds pic) (+ (* 4 i) (* 2 lx)))
+            (aref (pic-mvds pic) (+ (* 4 i) (* 2 lx) 1)))))
 
-(defun set-blk-mvd (pic bx by dx dy)
+(defun set-blk-mvd (pic bx by dx dy &optional (lx 0))
   (let ((i (%mv-index pic bx by)))
-    (setf (aref (pic-mvds pic) (* 2 i)) dx
-          (aref (pic-mvds pic) (1+ (* 2 i))) dy)))
+    (setf (aref (pic-mvds pic) (+ (* 4 i) (* 2 lx))) dx
+          (aref (pic-mvds pic) (+ (* 4 i) (* 2 lx) 1)) dy)))
 
 ;;; ---- nC: the coefficient-count context ------------------------------------------------------------
 
@@ -392,6 +422,7 @@
       (t (< (aref +blk-index+ ny nx) blk)))))
 
 (defvar *debug-blk* nil "When (mb . blk), print that block's decode in detail.")
+(defvar *debug-mb* nil "When (mbx . mby), print that macroblock's inter decisions.")
 
 (defmacro when-debug-blk ((mb blk) &body body)
   "BODY runs only when *DEBUG-BLK* names this block.
@@ -422,10 +453,7 @@
     (when (> mb-type 25) (%err "mb_type ~d in an I slice" mb-type))
     (setf (aref (pic-mb-types pic) mbi) mb-type)
     (let ((bx (* 4 (ss-mbx ss))) (by (* 4 (ss-mby ss))))
-      (dotimes (j 4) (dotimes (i 4)
-                       (set-blk-mv pic (+ bx i) (+ by j) 0 0 -1)
-                       (setf (aref (pic-ref-pics pic) (%mv-index pic (+ bx i) (+ by j))) -1)
-                       (set-blk-mvd pic (+ bx i) (+ by j) 0 0))))
+      (dotimes (j 4) (dotimes (i 4) (clear-blk-motion pic (+ bx i) (+ by j)))))
     (if (zerop mb-type)
         (decode-i4x4-macroblock ss)
         (decode-i16x16-macroblock ss (1- mb-type)))
@@ -637,9 +665,9 @@
   (declare (optimize (speed 3) (safety 1)))
   (if (= n 2) (- 1 (u1 br)) (ue br)))
 
-(defun %set-partition-mvd (ss bx by wb hb dx dy)
+(defun %set-partition-mvd (ss bx by wb hb dx dy &optional (lx 0))
   (let ((pic (ss-pic ss)))
-    (dotimes (j hb) (dotimes (i wb) (set-blk-mvd pic (+ bx i) (+ by j) dx dy)))))
+    (dotimes (j hb) (dotimes (i wb) (set-blk-mvd pic (+ bx i) (+ by j) dx dy lx)))))
 
 (defun %ref-picture-id (ss ref)
   "A stable identity for the picture at list index REF: its frame_num, which is unique among the
@@ -659,21 +687,25 @@
         (bx0 (* 4 (ss-mbx ss))) (by0 (* 4 (ss-mby ss))))
     (dotimes (j hb)
       (dotimes (i wb)
-        (set-blk-mv pic (+ bx i) (+ by j) mvx mvy ref)
-        (setf (aref (pic-ref-pics pic) (%mv-index pic (+ bx i) (+ by j))) rid)
+        (set-blk-mv pic (+ bx i) (+ by j) mvx mvy ref 0 rid)
+        (set-blk-mv pic (+ bx i) (+ by j) 0 0 -1 1 +no-ref-poc+)
         (let ((lx (- (+ bx i) bx0)) (ly (- (+ by j) by0)))
           (when (and (<= 0 lx 3) (<= 0 ly 3))
             (setf (ss-mb-done ss) (logior (ss-mb-done ss) (ash 1 (+ (* 4 ly) lx))))))))))
 
-(defun %ref-picture (ss ref-idx)
-  "List-0 entry REF-IDX.  Compensating from the wrong reference is invisible to the parser — it
+(defun %ref-picture (ss ref-idx &optional (lx 0))
+  "Entry REF-IDX of list LX.  Compensating from the wrong reference is invisible to the parser — it
    corrupts the picture and keeps decoding — so this refuses an index it cannot honour."
-  (let ((v (ss-reflist ss)))
+  (let ((v (if (zerop lx) (ss-reflist ss) (or (ss-reflist1 ss) #()))))
     (if (and (>= ref-idx 0) (< ref-idx (length v)))
         (aref v ref-idx)
-        (%err "ref_idx ~d, but list 0 holds ~d picture~:p" ref-idx (length v)))))
+        (%err "ref_idx ~d, but list ~d holds ~d picture~:p" ref-idx lx (length v)))))
 
-(defun %mc-partition (ss ref-pic px py w h mvx mvy &optional (ref 0))
+(defun %ref-picture-poc (ss ref-idx lx)
+  (let ((v (if (zerop lx) (ss-reflist ss) (or (ss-reflist1 ss) #()))))
+    (if (and (>= ref-idx 0) (< ref-idx (length v))) (pic-poc (aref v ref-idx)) +no-ref-poc+)))
+
+(defun %mc-partition (ss ref-pic px py w h mvx mvy &optional (ref 0) (lx 0) skip-weight)
   "Motion compensate one partition, luma and both chroma planes, into the current picture, and
    apply this reference's weight if the slice carries a prediction weight table."
   (declare (optimize (speed 3) (safety 1)))
@@ -686,8 +718,10 @@
                     ref-pic cx cy cw ch mvx mvy)
     (predict-chroma (pic-v pic) (pic-v ref-pic) (pic-cstride pic) cbase
                     ref-pic cx cy cw ch mvx mvy)
-    (when (sh-weighted-p sh)
-      (let ((lw (sh-luma-weights sh)) (cwt (sh-chroma-weights sh)))
+    (when (and (sh-weighted-p sh) (not skip-weight))
+      (let ((lw (if (zerop lx) (sh-luma-weights sh) (or (sh-luma-weights-l1 sh) (sh-luma-weights sh))))
+            (cwt (if (zerop lx) (sh-chroma-weights sh)
+                     (or (sh-chroma-weights-l1 sh) (sh-chroma-weights sh)))))
         (when (and lw (< ref (array-dimension lw 0)))
           (apply-weight (pic-y pic) (pic-ystride pic) ybase w h
                         (aref lw ref 0) (aref lw ref 1) (sh-luma-log2-denom sh))
@@ -792,7 +826,8 @@
             ;; a stale context, and with CABAC that loses the rest of the slice.
             (dotimes (jj (ash sh* -2))
               (dotimes (ii (ash sw -2))
-                (setf (aref (pic-refs pic) (%mv-index pic (+ bx ii) (+ by jj))) (aref refs i))))))))
+                (setf (aref (pic-refs pic) (* 2 (%mv-index pic (+ bx ii) (+ by jj))))
+                      (aref refs i))))))))
     ;; 3. every vector difference, and with it the prediction, the storage and the resampling
     (if p8x8
         (dotimes (i 4)
@@ -838,61 +873,65 @@
       (setf (aref (pic-mb-qps pic) mbi) (ss-qp ss))
       cbp)))
 
-(defun decode-slice (pic sh br &optional refs)
-  "Decode every macroblock of a slice into PIC.  REFS is the list-0 reference picture vector."
+(defun decode-slice (pic sh br &optional refs refs1)
+  "Decode every macroblock of a slice into PIC.  REFS and REFS1 are the two reference lists."
   (let* ((cabac-p (pps-cabac (sh-pps sh)))
+         (b-slice (sh-b-slice-p sh))
+         (p-slice (sh-p-slice-p sh))
          (ss (make-slice-state :pic pic :sh sh :br br :qp (sh-qp sh)
                                :reflist (or refs #())
+                               :reflist1 (or refs1 #())
                                :ref0 (and refs (plusp (length refs)) (aref refs 0))
+                               :direct-spatial (sh-direct-spatial sh)
                                :cabac (when cabac-p
                                         (init-cabac br (sh-qp sh) (sh-i-slice-p sh)
                                                     (sh-cabac-init-idc sh)))))
          (mbw (pic-mb-width pic))
          (total (* mbw (pic-mb-height pic)))
          (mb (sh-first-mb sh))
-         (p-slice (sh-p-slice-p sh)))
-    (unless (or (sh-i-slice-p sh) p-slice)
-      (%err "only I and P slices are decoded so far; this is a ~a slice"
-            (slice-type-name (sh-slice-type sh))))
+         (inter (or p-slice b-slice)))
+    (unless (or (sh-i-slice-p sh) inter)
+      (%err "slice_type ~a is not supported" (slice-type-name (sh-slice-type sh))))
     (flet ((at (n) (setf (ss-mbx ss) (mod n mbw) (ss-mby ss) (floor n mbw)))
+           (skip-one ()
+             (if b-slice (decode-b-skip-macroblock ss) (decode-skip-macroblock ss)))
+           (coded-one ()
+             (if b-slice
+                 (let ((mt (if cabac-p (cabac-mb-type-b ss) (ue br))))
+                   (if (< mt 23)
+                       (decode-b-macroblock ss mt)
+                       (decode-intra-macroblock ss (- mt 23))))
+                 (let ((mt (if cabac-p (cabac-mb-type-p ss) (ue br))))
+                   (if (< mt 5)
+                       (decode-p-macroblock ss mt)
+                       (decode-intra-macroblock ss (- mt 5))))))
            (more-p ()
-             ;; CABAC ends a slice with an explicit decision, not by running out of bits: the
-             ;; arithmetic decoder has no "am I at the end" to consult, so the encoder says so
+             ;; CABAC ends a slice with an explicit decision, not by running out of bits
              (if cabac-p
                  (zerop (decode-terminate (ss-cabac ss)))
                  (more-rbsp-data-p br))))
       (loop
         (when (>= mb total) (return))
         (cond
-          ;; CABAC: every macroblock carries its own skip flag, so there is no run to unroll and
-          ;; the end-of-slice decision comes after skipped macroblocks too
-          ((and p-slice cabac-p)
+          ;; CABAC: every macroblock carries its own skip flag, so there is no run to unroll
+          ((and inter cabac-p)
            (at mb)
-           (if (cabac-mb-skip-flag ss)
-               (decode-skip-macroblock ss)
-               (let ((mt (cabac-mb-type-p ss)))
-                 (if (< mt 5)
-                     (decode-p-macroblock ss mt)
-                     (decode-intra-macroblock ss (- mt 5)))))
+           (if (cabac-mb-skip-flag ss b-slice) (skip-one) (coded-one))
            (incf mb))
           ;; CAVLC: a RUN of skipped macroblocks precedes each coded one, and the run may be the
           ;; last thing in the slice — so the end-of-data test belongs after it
-          (p-slice
+          (inter
            (let ((skip (ue br)) (ran-out nil))
              (dotimes (i skip)
                (when (>= mb total) (return))
                (at mb)
-               (decode-skip-macroblock ss)
+               (skip-one)
                (incf mb))
              (when (>= mb total) (return))
              (when (and (plusp skip) (not (more-rbsp-data-p br))) (setf ran-out t))
              (unless ran-out
                (at mb)
-               (let ((mt (ue br)))
-                 ;; in a P slice, mb_type 5 and up is an intra macroblock with 5 subtracted
-                 (if (< mt 5)
-                     (decode-p-macroblock ss mt)
-                     (decode-intra-macroblock ss (- mt 5))))
+               (coded-one)
                (incf mb))
              (when ran-out (return))))
           (t
@@ -901,3 +940,383 @@
            (incf mb)))
         (unless (more-p) (return))))
     ss))
+
+;;; ---- B macroblocks -------------------------------------------------------------------------------
+
+(defun %mc-b (ss px py w h mode r0 mv0x mv0y r1 mv1x mv1y)
+  "Motion compensate one B partition, from one list or from both.
+
+   Bi-prediction is the mean of two whole predictions, not a blend done sample by sample as they
+   are made: list 0 goes into the picture, list 1 into scratch, and the two are averaged.  Doing it
+   any other way rounds twice."
+  (declare (optimize (speed 3) (safety 1)))
+  (let* ((pic (ss-pic ss))
+         (ybase (+ (pic-yoff pic) (* py (pic-ystride pic)) px))
+         (cx (ash px -1)) (cy (ash py -1)) (cw (ash w -1)) (ch (ash h -1))
+         (cbase (+ (pic-coff pic) (* cy (pic-cstride pic)) cx)))
+    (flet ((one (lx ref mvx mvy)
+             (%mc-partition ss (%ref-picture ss ref lx) px py w h mvx mvy ref lx)))
+      (cond
+        ((= mode +pred-l0+) (one 0 r0 mv0x mv0y))
+        ((= mode +pred-l1+) (one 1 r1 mv1x mv1y))
+        (t
+         ;; list 0 straight into the picture, list 1 into scratch, then the mean
+         (%mc-partition ss (%ref-picture ss r0 0) px py w h mv0x mv0y r0 0 t)
+         (let ((rp (%ref-picture ss r1 1)))
+           (predict-luma (ss-bi-y ss) w 0 rp px py w h mv1x mv1y)
+           (predict-chroma (ss-bi-u ss) (pic-u rp) cw 0 rp cx cy cw ch mv1x mv1y)
+           (predict-chroma (ss-bi-v ss) (pic-v rp) cw 0 rp cx cy cw ch mv1x mv1y))
+         (let ((idc (pps-weighted-bipred (sh-pps (ss-sh ss)))))
+           (case idc
+             (2 ;; implicit: the weights come from the order counts, nothing is transmitted
+              (multiple-value-bind (w0 w1)
+                  (implicit-bi-weights (pic-poc pic) (%ref-picture-poc ss r0 0)
+                                       (%ref-picture-poc ss r1 1))
+                (weighted-average-into (pic-y pic) (pic-ystride pic) ybase (ss-bi-y ss) w 0 w h
+                                       w0 w1 5 0 0)
+                (weighted-average-into (pic-u pic) (pic-cstride pic) cbase (ss-bi-u ss) cw 0 cw ch
+                                       w0 w1 5 0 0)
+                (weighted-average-into (pic-v pic) (pic-cstride pic) cbase (ss-bi-v ss) cw 0 cw ch
+                                       w0 w1 5 0 0)))
+             (1 ;; explicit: a weight per reference, from the slice header
+              (let* ((sh (ss-sh ss))
+                     (l0 (sh-luma-weights sh)) (l1 (sh-luma-weights-l1 sh))
+                     (c0 (sh-chroma-weights sh)) (c1 (sh-chroma-weights-l1 sh))
+                     (ld (sh-luma-log2-denom sh)) (cd (sh-chroma-log2-denom sh)))
+                (weighted-average-into (pic-y pic) (pic-ystride pic) ybase (ss-bi-y ss) w 0 w h
+                                       (aref l0 r0 0) (aref l1 r1 0) ld
+                                       (aref l0 r0 1) (aref l1 r1 1))
+                (weighted-average-into (pic-u pic) (pic-cstride pic) cbase (ss-bi-u ss) cw 0 cw ch
+                                       (aref c0 r0 0 0) (aref c1 r1 0 0) cd
+                                       (aref c0 r0 0 1) (aref c1 r1 0 1))
+                (weighted-average-into (pic-v pic) (pic-cstride pic) cbase (ss-bi-v ss) cw 0 cw ch
+                                       (aref c0 r0 1 0) (aref c1 r1 1 0) cd
+                                       (aref c0 r0 1 1) (aref c1 r1 1 1))))
+             (t
+              (average-into (pic-y pic) (pic-ystride pic) ybase (ss-bi-y ss) w 0 w h)
+              (average-into (pic-u pic) (pic-cstride pic) cbase (ss-bi-u ss) cw 0 cw ch)
+              (average-into (pic-v pic) (pic-cstride pic) cbase (ss-bi-v ss) cw 0 cw ch)))))))))
+
+(defun %set-b-motion (ss bx by wb hb mode r0 mv0x mv0y r1 mv1x mv1y)
+  "Record a B partition's motion for both lists on every 4x4 block it covers."
+  (let ((pic (ss-pic ss)))
+    (dotimes (j hb)
+      (dotimes (i wb)
+        (if (pred-uses-l0-p mode)
+            (set-blk-mv pic (+ bx i) (+ by j) mv0x mv0y r0 0 (%ref-picture-poc ss r0 0))
+            (set-blk-mv pic (+ bx i) (+ by j) 0 0 -1 0 +no-ref-poc+))
+        (if (pred-uses-l1-p mode)
+            (set-blk-mv pic (+ bx i) (+ by j) mv1x mv1y r1 1 (%ref-picture-poc ss r1 1))
+            (set-blk-mv pic (+ bx i) (+ by j) 0 0 -1 1 +no-ref-poc+))))
+    (let ((bx0 (* 4 (ss-mbx ss))) (by0 (* 4 (ss-mby ss))))
+      (dotimes (j hb)
+        (dotimes (i wb)
+          (let ((lx (- (+ bx i) bx0)) (ly (- (+ by j) by0)))
+            (when (and (<= 0 lx 3) (<= 0 ly 3))
+              (setf (ss-mb-done ss) (logior (ss-mb-done ss) (ash 1 (+ (* 4 ly) lx)))))))))))
+
+(defun %min-positive (a b)
+  "MinPositive of 8.4.1.2.2: the smaller of two reference indices when both exist, and whichever
+   one exists when only one does.  -1 means `no reference', and -1 must lose to a real index."
+  (if (and (>= a 0) (>= b 0)) (min a b) (max a b)))
+
+(defun %colocated (ss bx by)
+  "(values mvx mvy ref-idx) of the block in the co-located picture — list 1's first entry — that
+   sits where this one does.  A co-located block that predicted forwards is read from its list 0,
+   and one that did not is read from its list 1."
+  (let ((col (and (ss-reflist1 ss) (plusp (length (ss-reflist1 ss))) (aref (ss-reflist1 ss) 0))))
+    (if (null col)
+        (values 0 0 -1)
+        (multiple-value-bind (mx my r) (blk-mv col bx by 0)
+          (if (>= r 0)
+              (values mx my r)
+              (blk-mv col bx by 1))))))
+
+(defun %direct-spatial (ss)
+  "B_Direct with spatial prediction (8.4.1.2.2), for the whole macroblock.
+
+   The references come from the neighbours — the smallest index either side used — and the vectors
+   from the ordinary median prediction.  Then each 4x4 block is checked against the CO-LOCATED
+   block in list 1's first picture: where that block barely moved against its own first reference,
+   this one is held at zero rather than given the macroblock's vector.  That is what keeps a still
+   background still through a run of B pictures instead of letting it drift with its neighbours."
+  (let* ((bx0 (* 4 (ss-mbx ss))) (by0 (* 4 (ss-mby ss))))
+    (flet ((nbr-ref (lx)
+             (multiple-value-bind (ax ay ar) (%neighbour-motion ss (1- bx0) by0 lx)
+               (declare (ignore ax ay))
+               (multiple-value-bind (bxv byv brf) (%neighbour-motion ss bx0 (1- by0) lx)
+                 (declare (ignore bxv byv))
+                 (multiple-value-bind (cx cy cr ok) (%neighbour-motion ss (+ bx0 4) (1- by0) lx)
+                   (declare (ignore cx cy))
+                   (unless ok
+                     (multiple-value-bind (dx dy dr) (%neighbour-motion ss (1- bx0) (1- by0) lx)
+                       (declare (ignore dx dy))
+                       (setf cr dr)))
+                   (%min-positive ar (%min-positive brf cr)))))))
+      (let ((r0 (nbr-ref 0)) (r1 (nbr-ref 1)) (zero-p nil))
+        (when (and (minusp r0) (minusp r1))
+          (setf r0 0 r1 0 zero-p t))
+        (multiple-value-bind (m0x m0y) (if (minusp r0) (values 0 0) (predict-mv ss bx0 by0 4 r0 :lx 0))
+          (multiple-value-bind (m1x m1y) (if (minusp r1) (values 0 0) (predict-mv ss bx0 by0 4 r1 :lx 1))
+            (values r0 r1 m0x m0y m1x m1y zero-p)))))))
+
+(defun %col-zero-p (ss bx by)
+  "colZeroFlag: did the co-located block sit still, against a picture that is itself a short-term
+   reference?  Only then may a direct block be pinned to zero."
+  (multiple-value-bind (mx my r) (%colocated ss bx by)
+    (and (= r 0) (<= -1 mx 1) (<= -1 my 1))))
+
+(defun %direct-temporal (ss bx by)
+  "B_Direct with temporal prediction (8.4.1.2.1): take the co-located block's vector and SPLIT it
+   between the two references in proportion to how far each one is away in display order.
+
+   Where spatial direct asks the neighbours what is going on, temporal direct asks the future
+   picture what happened and interpolates backwards through it."
+  (let* ((pic (ss-pic ss))
+         (col (and (ss-reflist1 ss) (plusp (length (ss-reflist1 ss))) (aref (ss-reflist1 ss) 0))))
+    (multiple-value-bind (mx my r) (%colocated ss bx by)
+      (if (or (null col) (minusp r))
+          (values 0 0 0 0 0 0)
+          ;; the co-located block's reference, found in OUR list 0 by matching order counts
+          (let* ((col-ref-poc (blk-ref-poc col bx by (if (>= (nth-value 2 (blk-mv col bx by 0)) 0) 0 1)))
+                 (l0 (ss-reflist ss))
+                 (idx (or (position col-ref-poc l0 :key #'pic-poc :test #'=) 0))
+                 (poc0 (pic-poc (aref l0 idx)))
+                 (poc1 (pic-poc col))
+                 (curr (pic-poc pic))
+                 (td (max -128 (min 127 (- poc1 poc0))))
+                 (tb (max -128 (min 127 (- curr poc0)))))
+            (if (zerop td)
+                (values idx 0 mx my 0 0)
+                (let* ((tx (floor (+ 16384 (abs (floor td 2))) td))
+                       (scale (max -1024 (min 1023 (ash (+ (* tb tx) 32) -6))))
+                       (m0x (ash (+ (* scale mx) 128) -8))
+                       (m0y (ash (+ (* scale my) 128) -8)))
+                  (values idx 0 m0x m0y (- m0x mx) (- m0y my)))))))))
+
+(defun %direct-col-xy (ss bx by)
+  "Which block of the co-located picture a direct 4x4 block reads.
+
+   With direct_8x8_inference_flag set — which every ordinary stream sets — all four 4x4 blocks of
+   an 8x8 read the SAME co-located block, the one at the 8x8's outer corner.  It exists so that a
+   decoder need only keep motion at 8x8 granularity for reference pictures."
+  (let ((pic (ss-pic ss)) (sps (sh-sps (ss-sh ss))))
+    (declare (ignorable pic))
+    (if (sps-direct-8x8 sps)
+        (let* ((bx0 (* 4 (ss-mbx ss))) (by0 (* 4 (ss-mby ss)))
+               (lx (- bx bx0)) (ly (- by by0)))
+          (values (+ bx0 (if (< lx 2) 0 3)) (+ by0 (if (< ly 2) 0 3))))
+        (values bx by))))
+
+(defun %apply-direct (ss bx by)
+  "Predict and record one 4x4 direct block, by whichever direct method the slice chose."
+  (let ((px (* 4 bx)) (py (* 4 by)))
+    (multiple-value-bind (cbx cby) (%direct-col-xy ss bx by)
+      (if (ss-direct-spatial ss)
+          (multiple-value-bind (r0 r1 m0x m0y m1x m1y zero-p) (%direct-spatial ss)
+            (let ((z (and (not zero-p) (%col-zero-p ss cbx cby))))
+              (when (or zero-p (and z (= r0 0))) (setf m0x 0 m0y 0))
+              (when (or zero-p (and z (= r1 0))) (setf m1x 0 m1y 0))
+              (let ((mode (cond ((and (>= r0 0) (>= r1 0)) +pred-bi+)
+                                ((>= r0 0) +pred-l0+)
+                                (t +pred-l1+))))
+                (%set-b-motion ss bx by 1 1 mode r0 m0x m0y r1 m1x m1y)
+                (%mc-b ss px py 4 4 mode r0 m0x m0y r1 m1x m1y))))
+          (multiple-value-bind (r0 r1 m0x m0y m1x m1y) (%direct-temporal ss cbx cby)
+            (%set-b-motion ss bx by 1 1 +pred-bi+ r0 m0x m0y r1 m1x m1y)
+            (%mc-b ss px py 4 4 +pred-bi+ r0 m0x m0y r1 m1x m1y))))))
+
+(defun %direct-16x16 (ss)
+  "A whole macroblock of direct blocks."
+  (let ((bx0 (* 4 (ss-mbx ss))) (by0 (* 4 (ss-mby ss))))
+    (dotimes (j 4) (dotimes (i 4) (%apply-direct ss (+ bx0 i) (+ by0 j))))))
+
+(defun decode-b-skip-macroblock (ss)
+  "B_Skip: direct prediction and no residual at all."
+  (let* ((pic (ss-pic ss)) (mbi (%mb-index ss)))
+    (setf (aref (pic-mb-types pic) mbi) -2
+          (ss-mb-done ss) 0)
+    (%direct-16x16 ss)
+    (dotimes (blk 16) (set-luma-nz ss blk 0))
+    (dotimes (plane 2) (dotimes (blk 4) (set-chroma-nz ss plane blk 0)))
+    (setf (aref (pic-mb-cbp pic) mbi) 0
+          (aref (pic-mb-dc-cbf pic) mbi) 0)
+    (%no-qp-delta ss)
+    (setf (aref (pic-mb-qps pic) mbi) (ss-qp ss))))
+
+(defun decode-b-macroblock (ss mb-type)
+  "One inter macroblock of a B slice (mb_type 0..22).
+
+   THE SYNTAX INTERLEAVES BY LIST, NOT BY PARTITION: every list-0 reference index, then every
+   list-1 one, then every list-0 vector difference, then every list-1 one.  Reading it a partition
+   at a time parses without complaint and attaches the values to the wrong partitions."
+  (declare (optimize (speed 3) (safety 1)))
+  (let* ((br (ss-br ss)) (pic (ss-pic ss)) (sh (ss-sh ss))
+         (mbi (%mb-index ss))
+         (px (* 16 (ss-mbx ss))) (py (* 16 (ss-mby ss)))
+         (bx0 (* 4 (ss-mbx ss))) (by0 (* 4 (ss-mby ss)))
+         (n0 (max 1 (or (sh-num-ref-idx-l0 sh) 1)))
+         (n1 (max 1 (or (sh-num-ref-idx-l1 sh) 1)))
+         (b8x8 (= mb-type 22))
+         (nparts (aref +b-part+ mb-type 0))
+         (pw (aref +b-part+ mb-type 1))
+         (ph (aref +b-part+ mb-type 2))
+         (subs (make-array 4 :element-type 'fixnum :initial-element 0))
+         (modes (make-array 4 :element-type 'fixnum :initial-element 0))
+         (r0s (make-array 4 :element-type 'fixnum :initial-element 0))
+         (r1s (make-array 4 :element-type 'fixnum :initial-element 0)))
+    (declare (dynamic-extent subs modes r0s r1s))
+    (setf (aref (pic-mb-types pic) mbi) (- -3 mb-type)
+          (ss-mb-done ss) 0)
+    (cond
+      ((zerop mb-type) (%direct-16x16 ss))              ; B_Direct_16x16
+      (t
+       (if b8x8
+           (dotimes (i 4)
+             (let ((st (if (ss-cabac ss) (cabac-sub-mb-type-b ss) (ue br))))
+               (when (> st 12) (%err "sub_mb_type ~d in a B slice" st))
+               (setf (aref subs i) st (aref modes i) (aref +b-sub+ st 3))))
+           (dotimes (i nparts)
+             (setf (aref modes i) (aref +b-part+ mb-type (+ 3 i)))))
+       (when (equal *debug-mb* (cons (ss-mbx ss) (ss-mby ss)))
+         (format t "~&  B mb(~d,~d) type=~d subs=~a modes=~a~%"
+                 (ss-mbx ss) (ss-mby ss) mb-type (coerce subs 'list) (coerce modes 'list)))
+       ;; the reference indices, list 0 for every partition and then list 1 for every partition
+       (dotimes (lx 2)
+         (dotimes (i nparts)
+           (let ((m (aref modes i))
+                 (n (if (zerop lx) n0 n1)))
+             (when (and (/= m +pred-direct+)
+                        (if (zerop lx) (pred-uses-l0-p m) (pred-uses-l1-p m))
+                        (> n 1))
+               (multiple-value-bind (sx sy sw sh*)
+                   (if b8x8
+                       (values (* 8 (mod i 2)) (* 8 (floor i 2)) 8 8)
+                       (let ((across (floor 16 pw)))
+                         (values (* pw (mod i across)) (* ph (floor i across)) pw ph)))
+                 (let ((bx (+ bx0 (ash sx -2))) (by (+ by0 (ash sy -2))))
+                   (setf (aref (if (zerop lx) r0s r1s) i)
+                         (if (ss-cabac ss) (cabac-ref-idx ss bx by lx) (%te br n)))
+                   ;; recorded at once, because the next partition's context asks what this one chose
+                   (dotimes (jj (ash sh* -2))
+                     (dotimes (ii (ash sw -2))
+                       (setf (aref (pic-refs pic)
+                                   (+ (* 2 (%mv-index pic (+ bx ii) (+ by jj))) lx))
+                             (aref (if (zerop lx) r0s r1s) i))))))))))
+       ;; DIRECT PARTITIONS FIRST, before any vector difference is read.  A direct partition needs
+       ;; no bits — its motion comes from the macroblock's neighbours and the co-located picture —
+       ;; but a LATER partition predicts its own vector from the ones beside it, and that includes
+       ;; a direct one.  Deriving them after the vector differences leaves those predictions
+       ;; reading an unwritten entry, which is the same mistake as reading a neighbour before it is
+       ;; recorded, and it shows as a handful of wrong samples rather than anything obvious.
+       (when b8x8
+         (dotimes (i 4)
+           (when (= (aref modes i) +pred-direct+)
+             (let ((sx (* 8 (mod i 2))) (sy (* 8 (floor i 2))))
+               (dotimes (j 2)
+                 (dotimes (ii 2)
+                   (%apply-direct ss (+ bx0 (ash sx -2) ii) (+ by0 (ash sy -2) j))))))))
+       ;; then the vector differences, in the same order, predicting as we go
+       (let ((mv (make-array '(4 4 2 2) :element-type 'fixnum :initial-element 0)))
+         (declare (dynamic-extent mv))
+         (dotimes (lx 2)
+           (dotimes (i nparts)
+             (let* ((m (aref modes i))
+                    (uses (if (zerop lx) (pred-uses-l0-p m) (pred-uses-l1-p m))))
+               ;; A partition counts as DECODED once it is reached, whichever lists it happens to
+               ;; use.  Marking it only when a vector is stored for it makes a list-1-only
+               ;; partition look undecoded during the list-0 pass — and an unavailable neighbour is
+               ;; not the same as one with no reference in that list, because unavailability is
+               ;; what makes the above-left neighbour stand in for the above-right one.
+               (when (and (zerop lx) (/= m +pred-direct+))
+                 (multiple-value-bind (sx sy sw sh*)
+                     (if b8x8
+                         (values (* 8 (mod i 2)) (* 8 (floor i 2)) 8 8)
+                         (let ((across (floor 16 pw)))
+                           (values (* pw (mod i across)) (* ph (floor i across)) pw ph)))
+                   (declare (ignorable sw))
+                   (let ((bx (+ bx0 (ash sx -2))) (by (+ by0 (ash sy -2))))
+                     (dotimes (jj (ash sh* -2))
+                       (dotimes (ii (ash sw -2))
+                         (let ((llx (- (+ bx ii) bx0)) (lly (- (+ by jj) by0)))
+                           (when (and (<= 0 llx 3) (<= 0 lly 3))
+                             (setf (ss-mb-done ss)
+                                   (logior (ss-mb-done ss) (ash 1 (+ (* 4 lly) llx)))))))))))
+               (when (and (/= m +pred-direct+) uses)
+                 (multiple-value-bind (sx sy sw sh*)
+                     (if b8x8
+                         (values (* 8 (mod i 2)) (* 8 (floor i 2))
+                                 (aref +b-sub+ (aref subs i) 1) (aref +b-sub+ (aref subs i) 2))
+                         (let ((across (floor 16 pw)))
+                           (values (* pw (mod i across)) (* ph (floor i across)) pw ph)))
+                   (let ((nsub (if b8x8 (aref +b-sub+ (aref subs i) 0) 1))
+                         (across (if b8x8 (floor 8 sw) 1)))
+                     (dotimes (k nsub)
+                       (let* ((ox (if b8x8 (* sw (mod k across)) 0))
+                              (oy (if b8x8 (* sh* (floor k across)) 0))
+                              (bx (+ bx0 (ash (+ sx ox) -2))) (by (+ by0 (ash (+ sy oy) -2)))
+                              (ref (aref (if (zerop lx) r0s r1s) i)))
+                         (multiple-value-bind (mpx mpy)
+                             ;; The DIRECTIONAL cases of 8.4.1.3 apply to a B slice's two-partition
+                             ;; types exactly as they do to a P slice's, and leaving them out takes
+                             ;; the median where the specification takes one particular neighbour.
+                             ;; That is a wrong prediction and not a desynchronisation, so it shows
+                             ;; up as one macroblock here and there rather than as a broken picture.
+                             (predict-mv ss bx by (ash sw -2) ref :lx lx
+                                         :shape (and (not b8x8)
+                                                     (cond ((and (= pw 16) (= ph 8)) :16x8)
+                                                           ((and (= pw 8) (= ph 16)) :8x16)))
+                                         :part i)
+                           (let* ((dx (if (ss-cabac ss) (cabac-mvd ss bx by 0 lx) (se br)))
+                                  (dy (if (ss-cabac ss) (cabac-mvd ss bx by 1 lx) (se br))))
+                             (setf (aref mv i k lx 0) (+ mpx dx)
+                                   (aref mv i k lx 1) (+ mpy dy))
+                             (%set-partition-mvd ss bx by (ash sw -2) (ash sh* -2) dx dy lx)
+                             ;; The vector has to be visible to the next partition's prediction,
+                             ;; and so does the fact that this block HAS one: a neighbour that is
+                             ;; decoded but unmarked reads as unavailable, which makes the
+                             ;; above-left neighbour stand in for the above-right one and quietly
+                             ;; changes the median.  Marking it is what SS-MB-DONE is for.
+                             (dotimes (jj (ash sh* -2))
+                               (dotimes (ii (ash sw -2))
+                                 (set-blk-mv pic (+ bx ii) (+ by jj)
+                                             (aref mv i k lx 0) (aref mv i k lx 1) ref lx
+                                             (%ref-picture-poc ss ref lx))
+                                 (let ((llx (- (+ bx ii) bx0)) (lly (- (+ by jj) by0)))
+                                   (when (and (<= 0 llx 3) (<= 0 lly 3))
+                                     (setf (ss-mb-done ss)
+                                           (logior (ss-mb-done ss)
+                                                   (ash 1 (+ (* 4 lly) llx))))))))))))))))))
+         ;; and now the pictures themselves, once every vector of the macroblock is known
+         (dotimes (i nparts)
+           (let ((m (aref modes i)))
+             (multiple-value-bind (sx sy sw sh*)
+                 (if b8x8
+                     (values (* 8 (mod i 2)) (* 8 (floor i 2))
+                             (aref +b-sub+ (aref subs i) 1) (aref +b-sub+ (aref subs i) 2))
+                     (let ((across (floor 16 pw)))
+                       (values (* pw (mod i across)) (* ph (floor i across)) pw ph)))
+               (unless (= m +pred-direct+)     ; already done, above
+                   (let ((nsub (if b8x8 (aref +b-sub+ (aref subs i) 0) 1))
+                         (across (if b8x8 (floor 8 sw) 1)))
+                     (dotimes (k nsub)
+                       (let* ((ox (if b8x8 (* sw (mod k across)) 0))
+                              (oy (if b8x8 (* sh* (floor k across)) 0))
+                              (bx (+ bx0 (ash (+ sx ox) -2))) (by (+ by0 (ash (+ sy oy) -2))))
+                         (%set-b-motion ss bx by (ash sw -2) (ash sh* -2) m
+                                        (aref r0s i) (aref mv i k 0 0) (aref mv i k 0 1)
+                                        (aref r1s i) (aref mv i k 1 0) (aref mv i k 1 1))
+                         (%mc-b ss (+ px sx ox) (+ py sy oy) sw sh* m
+                                (aref r0s i) (aref mv i k 0 0) (aref mv i k 0 1)
+                                (aref r1s i) (aref mv i k 1 0) (aref mv i k 1 1))))))))))))
+    ;; the residual, on top of whatever was predicted
+    (let ((cbp (%read-cbp ss nil)))
+      (setf (aref (pic-mb-cbp pic) mbi) cbp)
+      (if (plusp cbp)
+          (progn (incf (ss-qp ss) (%read-qp-delta ss))
+                 (setf (ss-qp ss) (mod (+ (ss-qp ss) 52) 52)))
+          (%no-qp-delta ss))
+      (%inter-luma-residual ss cbp)
+      (decode-chroma ss nil cbp)
+      (setf (aref (pic-mb-qps pic) mbi) (ss-qp ss))
+      cbp)))

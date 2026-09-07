@@ -124,6 +124,27 @@ negative slice offset still lands inside the array instead of before it.")
 
 ;;; ---- how hard: the boundary strength (8.7.2.1) ----------------------------------------------------
 
+(declaim (inline %far-apart))
+(defun %far-apart (ax ay bx by)
+  "Did these two vectors part company by a whole sample or more?  Quarter-pel units, so four."
+  (declare (type fixnum ax ay bx by))
+  (or (>= (abs (- ax bx)) 4) (>= (abs (- ay by)) 4)))
+
+(defun %block-motion (pic bx by)
+  "(values n pocA mvAx mvAy pocB mvBx mvBy) for one block: how many predictions it used, and each
+   one's picture and vector.  A block predicting only from list 1 answers with that in the A slot,
+   because what matters downstream is the SET of predictions, not which list held them."
+  (let ((n 0) (pa +no-ref-poc+) (ax 0) (ay 0) (pb +no-ref-poc+) (bx* 0) (by* 0))
+    (dotimes (lx 2)
+      (let ((poc (blk-ref-poc pic bx by lx)))
+        (unless (= poc +no-ref-poc+)
+          (multiple-value-bind (mx my) (blk-mv pic bx by lx)
+            (if (zerop n)
+                (setf pa poc ax mx ay my)
+                (setf pb poc bx* mx by* my))
+            (incf n)))))
+    (values n pa ax ay pb bx* by*)))
+
 (defun %boundary-strength (pic pbx pby qbx qby mb-edge-p)
   "bS for the pair of 4x4 blocks either side of an edge, P before Q in decoding order.
 
@@ -131,7 +152,12 @@ negative slice offset still lands inside the array instead of before it.")
    has no motion to compare and its block structure is the thing the filter exists to remove.  For
    inter content the strength is EARNED: 2 where either side carries residual coefficients, 1 where
    the two sides genuinely came from different places, and 0 where they came from the same place
-   with the same vector, in which case there is no seam to soften and filtering would only blur."
+   with the same motion, in which case there is no seam to soften and filtering would only blur.
+
+   `The same place' means the same PICTURES, compared as a set and without regard to which list
+   held them or at what index (8.7.2.1).  A bi-predicted block that used one picture TWICE is the
+   awkward case: the two vectors can be matched to the other block's two either way round, and the
+   edge is only left alone if some pairing works."
   (declare (optimize (speed 3) (safety 1)))
   (let ((p-intra (mb-intra-p pic (floor pbx 4) (floor pby 4)))
         (q-intra (mb-intra-p pic (floor qbx 4) (floor qby 4))))
@@ -142,23 +168,26 @@ negative slice offset still lands inside the array instead of before it.")
          (if (or (plusp (aref (pic-nz-y pic) (+ (* pby gw) pbx)))
                  (plusp (aref (pic-nz-y pic) (+ (* qby gw) qbx))))
              2
-             (multiple-value-bind (pmx pmy pref) (blk-mv pic pbx pby)
-               (declare (ignore pref))
-               (multiple-value-bind (qmx qmy qref) (blk-mv pic qbx qby)
-                 (declare (ignore qref))
-                 ;; THE PICTURES, not the indices.  8.7.2.1 compares which picture each side came
-                 ;; from "without regard to the index position within a reference picture list" —
-                 ;; and a list reordered for weighted prediction holds the same picture at two
-                 ;; indices, so comparing indices filters edges that have no seam.
-                 ;;
-                 ;; A quarter-pel difference of 4 is one whole sample, which is the threshold for
-                 ;; "these two blocks did not move together".
-                 (if (or (/= (aref (pic-ref-pics pic) (+ (* pby gw) pbx))
-                             (aref (pic-ref-pics pic) (+ (* qby gw) qbx)))
-                         (>= (abs (- pmx qmx)) 4)
-                         (>= (abs (- pmy qmy)) 4))
-                     1
-                     0)))))))))
+             (multiple-value-bind (pn pa pax pay pb pbx* pby*) (%block-motion pic pbx pby)
+               (multiple-value-bind (qn qa qax qay qb qbx* qby*) (%block-motion pic qbx qby)
+                 (cond
+                   ((/= pn qn) 1)
+                   ((zerop pn) 0)
+                   ((= pn 1) (if (or (/= pa qa) (%far-apart pax pay qax qay)) 1 0))
+                   ;; two predictions each: the sets of pictures must match first
+                   ((not (or (and (= pa qa) (= pb qb)) (and (= pa qb) (= pb qa)))) 1)
+                   ((= pa pb)
+                    ;; the same picture twice, so either pairing is legitimate and the edge is
+                    ;; only spared when one of them holds
+                    (if (and (or (%far-apart pax pay qax qay) (%far-apart pbx* pby* qbx* qby*))
+                             (or (%far-apart pax pay qbx* qby*) (%far-apart pbx* pby* qax qay)))
+                        1 0))
+                   (t
+                    ;; two different pictures: each vector is compared with the one for its own
+                    (if (= pa qa)
+                        (if (or (%far-apart pax pay qax qay) (%far-apart pbx* pby* qbx* qby*)) 1 0)
+                        (if (or (%far-apart pax pay qbx* qby*) (%far-apart pbx* pby* qax qay))
+                            1 0))))))))))))
 
 (defvar *skip-loop-filter* nil
   "Bind true to reconstruct without filtering, matching `ffmpeg -skip_loop_filter all\'.

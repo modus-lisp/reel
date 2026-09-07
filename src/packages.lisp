@@ -54,14 +54,14 @@
    #:sps-crop-left #:sps-crop-right #:sps-crop-top #:sps-crop-bottom
    #:pps #:parse-pps #:pps-id #:pps-sps-id #:pps-cabac #:pps-init-qp #:pps-chroma-qp-offset
    #:pps-deblocking-control #:pps-constrained-intra #:pps-chroma-qp-offset-for
-   #:slice-header #:parse-slice-header #:slice-type-name #:sh-i-slice-p #:sh-p-slice-p
+   #:slice-header #:parse-slice-header #:slice-type-name #:sh-i-slice-p #:sh-p-slice-p #:sh-b-slice-p
    #:sh-first-mb #:sh-slice-type #:sh-frame-num #:sh-qp #:sh-sps #:sh-pps #:sh-nal
    #:sh-disable-deblocking #:sh-alpha-offset #:sh-beta-offset
    ;; residual decoding
    #:residual-block #:+zigzag-4x4+ #:+dequant-coeff+ #:+dequant-class+ #:+qpc-from-qpy+
    ;; the decoder
    #:decoder #:make-decoder #:feed-nal #:decode-picture #:decode-annex-b
-   #:decode-independent #:split-access-units #:access-units-independent-p #:default-decode-threads
+   #:flush-decoder #:pending-pictures #:pic-poc #:decode-independent #:split-access-units #:access-units-independent-p #:default-decode-threads
    #:decoder-width #:decoder-height
    #:picture #:pic-width #:pic-height #:pic-y #:pic-u #:pic-v #:picture->yuv420
    #:deblock-picture #:as-picture))

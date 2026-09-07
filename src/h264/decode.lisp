@@ -19,6 +19,15 @@
   ;; window: a new reference picture goes on the front and the oldest falls off the back once
   ;; there are more than the sequence parameter set allows.  An IDR empties it.
   (refs '() :type list)
+  ;; Decoded but not yet handed out, newest first.  B pictures are decoded AFTER the picture they
+  ;; are displayed before, so a decoder that hands each picture over as it finishes shows them in
+  ;; the wrong order.  See %BUMP.
+  (pending '() :type list)
+  (out '() :type list)                  ; bumped and ready, oldest first
+  (reorder 0 :type fixnum)
+  ;; the running predictors the order count is derived from
+  (prev-poc-msb 0 :type fixnum) (prev-poc-lsb 0 :type fixnum)
+  (prev-frame-num 0 :type fixnum) (prev-frame-num-offset 0 :type fixnum)
   (frames 0 :type fixnum))
 
 (defun make-decoder () (%make-decoder))
@@ -26,69 +35,155 @@
 (defun decoder-width (d) (let ((p (h264-picture d))) (and p (pic-width p))))
 (defun decoder-height (d) (let ((p (h264-picture d))) (and p (pic-height p))))
 
+(defun %picture-order-count (d sh nal)
+  "PicOrderCnt for this picture (8.2.1): where it belongs on screen.
+
+   Only a REFERENCE picture updates the predictors, because a non-reference picture is not in the
+   chain the next one measures itself against."
+  (let ((sps (sh-sps sh)))
+    (case (sps-poc-type sps)
+      (0
+       (let* ((max-lsb (ash 1 (sps-log2-max-poc-lsb sps)))
+              (half (ash max-lsb -1))
+              (lsb (sh-poc-lsb sh))
+              (prev-msb (if (nal-idr-p nal) 0 (h264-prev-poc-msb d)))
+              (prev-lsb (if (nal-idr-p nal) 0 (h264-prev-poc-lsb d)))
+              (msb (cond ((and (< lsb prev-lsb) (>= (- prev-lsb lsb) half)) (+ prev-msb max-lsb))
+                         ((and (> lsb prev-lsb) (> (- lsb prev-lsb) half)) (- prev-msb max-lsb))
+                         (t prev-msb))))
+         (when (plusp (nal-ref-idc nal))
+           (setf (h264-prev-poc-msb d) msb (h264-prev-poc-lsb d) lsb))
+         (+ msb lsb)))
+      (2
+       ;; type 2 asserts that decoding order IS display order, so there is nothing to reorder
+       (let* ((max-fn (ash 1 (sps-log2-max-frame-num sps)))
+              (fn (sh-frame-num sh))
+              (offset (cond ((nal-idr-p nal) 0)
+                            ((> (h264-prev-frame-num d) fn) (+ (h264-prev-frame-num-offset d) max-fn))
+                            (t (h264-prev-frame-num-offset d)))))
+         (setf (h264-prev-frame-num-offset d) offset (h264-prev-frame-num d) fn)
+         (cond ((nal-idr-p nal) 0)
+               ((zerop (nal-ref-idc nal)) (1- (* 2 (+ offset fn))))
+               (t (* 2 (+ offset fn))))))
+      (t (%err "pic_order_cnt_type ~d is not supported" (sps-poc-type sps))))))
+
+(defun %bump (d &optional flush)
+  "Hand out the pending picture with the smallest order count, if it is time.
+
+   Time is when more pictures are held than the sequence says display order can ever run behind
+   decoding order by.  With that many in hand, the smallest order count present cannot be beaten
+   by anything still to arrive, so it is safe to show.  FLUSH empties the buffer at the end of a
+   stream or before an IDR resets the counts."
+  (let ((n (length (h264-pending d))))
+    (when (or (and flush (plusp n)) (> n (h264-reorder d)))
+      (let ((best (first (h264-pending d))))
+        (dolist (p (h264-pending d))
+          (when (< (pic-poc p) (pic-poc best)) (setf best p)))
+        (setf (h264-pending d) (remove best (h264-pending d)))
+        best))))
+
+(defun %drain (d &optional flush)
+  "Move whatever is ready from the reorder buffer onto the output queue."
+  (loop for p = (%bump d flush) while p do (setf (h264-out d) (append (h264-out d) (list p)))))
+
+(defun flush-decoder (d)
+  "Every picture still held, in display order.  Call at the end of a stream: without it the last
+   few pictures of every file stay in the reorder buffer, which is a real bug and an easy one to
+   not notice, because it only ever loses the ending."
+  (%drain d t)
+  (prog1 (h264-out d) (setf (h264-out d) '())))
+
+(defun pending-pictures (d)
+  "How many decoded pictures are waiting to be handed out."
+  (+ (length (h264-out d)) (length (h264-pending d))))
+
+(defun %pic-num-entries (d sh)
+  "Every short-term reference as (PicNum . picture).  PicNum is frame_num made monotonic: it wraps,
+   and a reference coded before the wrap has to compare as older than one coded after it."
+  (let ((max-pic-num (ash 1 (sps-log2-max-frame-num (sh-sps sh))))
+        (curr (sh-frame-num sh)))
+    (mapcar (lambda (p)
+              (let ((fn (pic-frame-num p)))
+                (cons (if (> fn curr) (- fn max-pic-num) fn) p)))
+            (h264-refs d))))
+
+(defun %apply-list-modification (init ops entries curr max-pic-num n-active)
+  "The reordering of 8.2.4.3.1, shared by both lists and both slice types.
+
+   THE RESULT CAN BE LONGER THAN THE NUMBER OF PICTURES IN IT.  Each operation inserts at a
+   position and shifts the rest along, then drops only the copy that comes AFTER the insertion
+   point — so an earlier copy survives and the same picture legitimately appears at two indices.
+   That is how weighted prediction gets two weights from one reference, and treating the list as a
+   set decodes most streams and then fails on ordinary ones.
+
+   The running predictor and the current picture's number are two different things: the predictor
+   moves with each operation, the current number does not."
+  (if (null ops)
+      (coerce (subseq init 0 (min n-active (length init))) 'vector)
+      (let ((work (make-array (1+ n-active) :initial-element nil))
+            (refidx 0)
+            (pred curr))
+        (loop for p in init for i from 0 while (<= i n-active) do (setf (aref work i) p))
+        (dolist (op ops)
+          (let ((kind (car op)) (delta (1+ (cdr op))))
+            (unless (or (= kind 0) (= kind 1))
+              (%err "long-term reference pictures are not supported"))
+            (let* ((nowrap (if (zerop kind)
+                               (let ((x (- pred delta))) (if (< x 0) (+ x max-pic-num) x))
+                               (let ((x (+ pred delta))) (if (>= x max-pic-num) (- x max-pic-num) x))))
+                   (picnum (if (> nowrap curr) (- nowrap max-pic-num) nowrap))
+                   (hit (cdr (assoc picnum entries :test #'=))))
+              (setf pred nowrap)
+              (unless hit
+                (%err "the reference list names PicNum ~d, which is not in the buffer" picnum))
+              (loop for c of-type fixnum from n-active downto (1+ refidx)
+                    do (setf (aref work c) (aref work (1- c))))
+              (setf (aref work refidx) hit)
+              (incf refidx)
+              (let ((n refidx))
+                (loop for c of-type fixnum from refidx to n-active
+                      do (let ((e (aref work c)))
+                           (unless (eq e hit) (setf (aref work n) e) (incf n))))
+                (loop for c of-type fixnum from n to n-active do (setf (aref work c) nil))))))
+        (coerce (remove nil (subseq work 0 n-active)) 'vector))))
+
 (defun build-ref-list-0 (d sh)
-  "List 0 for a P slice (8.2.4.2.1 and 8.2.4.3.1), as a vector of PICTUREs.
-
-   The list starts as the short-term references ordered by DESCENDING PicNum — most recently coded
-   first — and the slice may then move particular pictures around inside it.
-
-   THE LIST CAN BE LONGER THAN THE NUMBER OF PICTURES IN IT.  The reordering inserts at a position
-   and shifts the rest along, dropping only the copy that comes AFTER the insertion point, so an
-   earlier copy survives and the same picture legitimately appears twice.  That is not a curiosity:
-   it is how weighted prediction gets two different weights out of one reference picture, and it is
-   what an ordinary x264 file does. A decoder that treats the list as a set decodes most streams and
-   then fails on ones with weighting turned on.
-
-   PicNum is frame_num made monotonic: frame_num wraps, and a reference coded before the wrap has
-   to compare as older than one coded after it. Note also that the running predictor and the
-   current picture's number are two different things — the predictor moves with each operation,
-   the current number does not."
-  (let* ((sps (sh-sps sh))
-         (max-pic-num (ash 1 (sps-log2-max-frame-num sps)))
-         (curr (sh-frame-num sh))
-         (n-active (max 1 (or (sh-num-ref-idx-l0 sh) 1)))
-         (entries (mapcar (lambda (p)
-                            (let ((fn (pic-frame-num p)))
-                              (cons (if (> fn curr) (- fn max-pic-num) fn) p)))
-                          (h264-refs d)))
+  "List 0 for a P slice: the short-term references by DESCENDING PicNum, most recently coded first,
+   then whatever the slice reorders."
+  (let* ((entries (%pic-num-entries d sh))
          (init (mapcar #'cdr (sort (copy-list entries) #'> :key #'car))))
-    (when (null (sh-ref-list-reordering sh))
-      (return-from build-ref-list-0
-        (coerce (subseq init 0 (min n-active (length init))) 'vector)))
-    (let ((work (make-array (1+ n-active) :initial-element nil))
-          (refidx 0)
-          (pred curr))
-      (loop for p in init
-            for i from 0
-            while (<= i n-active)
-            do (setf (aref work i) p))
-      (dolist (op (sh-ref-list-reordering sh))
-        (let ((kind (car op)) (delta (1+ (cdr op))))
-          (unless (or (= kind 0) (= kind 1))
-            (%err "long-term reference pictures are not supported"))
-          (let* ((nowrap (if (zerop kind)
-                             (let ((x (- pred delta))) (if (< x 0) (+ x max-pic-num) x))
-                             (let ((x (+ pred delta))) (if (>= x max-pic-num) (- x max-pic-num) x))))
-                 (picnum (if (> nowrap curr) (- nowrap max-pic-num) nowrap))
-                 (hit (cdr (assoc picnum entries :test #'=))))
-            (setf pred nowrap)
-            (unless hit
-              (%err "the reference list names PicNum ~d, which is not in the buffer" picnum))
-            ;; shift everything at and after REFIDX one place along, then plant the picture
-            (loop for c of-type fixnum from n-active downto (1+ refidx)
-                  do (setf (aref work c) (aref work (1- c))))
-            (setf (aref work refidx) hit)
-            (incf refidx)
-            ;; and close the gap by dropping this picture's LATER copy only
-            (let ((n refidx))
-              (loop for c of-type fixnum from refidx to n-active
-                    do (let ((e (aref work c)))
-                         (unless (eq e hit)
-                           (setf (aref work n) e)
-                           (incf n))))
-              (loop for c of-type fixnum from n to n-active do (setf (aref work c) nil))))))
-      (let ((out (subseq work 0 n-active)))
-        (coerce (remove nil out) 'vector)))))
+    (%apply-list-modification init (sh-ref-list-reordering sh) entries
+                              (sh-frame-num sh) (ash 1 (sps-log2-max-frame-num (sh-sps sh)))
+                              (max 1 (or (sh-num-ref-idx-l0 sh) 1)))))
+
+(defun build-ref-lists-b (d sh)
+  "(values list0 list1) for a B slice (8.2.4.2.3).
+
+   A B slice orders its references by WHERE THEY SIT ON SCREEN, not by when they were coded, which
+   is the whole difference from a P slice.  List 0 counts backwards from the current picture and
+   then forwards; list 1 counts forwards and then backwards.  So index 0 of each list is the
+   nearest picture in that direction, which is what makes the cheapest index the most useful one.
+
+   When the two lists come out identical and there is more than one entry, list 1's first two are
+   swapped — otherwise both lists would name the same picture and bi-prediction would average a
+   picture with itself."
+  (let* ((entries (%pic-num-entries d sh))
+         (curr (pic-poc (h264-picture d)))
+         (refs (h264-refs d))
+         (before (sort (remove-if-not (lambda (p) (< (pic-poc p) curr)) (copy-list refs))
+                       #'> :key #'pic-poc))
+         (after (sort (remove-if-not (lambda (p) (>= (pic-poc p) curr)) (copy-list refs))
+                      #'< :key #'pic-poc))
+         (init0 (append before after))
+         (init1 (append after before)))
+    (when (and (> (length init1) 1) (equal init0 init1))
+      (setf init1 (list* (second init1) (first init1) (cddr init1))))
+    (let ((max-pic-num (ash 1 (sps-log2-max-frame-num (sh-sps sh))))
+          (fn (sh-frame-num sh)))
+      (values (%apply-list-modification init0 (sh-ref-list-reordering sh) entries fn max-pic-num
+                                        (max 1 (or (sh-num-ref-idx-l0 sh) 1)))
+              (%apply-list-modification init1 (sh-ref-list-reordering-l1 sh) entries fn max-pic-num
+                                        (max 1 (or (sh-num-ref-idx-l1 sh) 1)))))))
 
 (defun feed-nal (d nal)
   "Give one NAL unit to the decoder.  Returns a PICTURE when this NAL completed one, else NIL."
@@ -108,10 +203,21 @@
        ;; a new picture starts at first_mb_in_slice 0; with one slice per picture that is every
        ;; slice, but the test is the right one for a stream that splits pictures into several
        (when (zerop (sh-first-mb sh))
-         (setf (h264-picture d) (make-picture-for sps)))
+         ;; an IDR restarts the order counts from zero, so everything already decoded has to be
+         ;; handed out before it, or the two sequences interleave by number and come out shuffled
+         (when (nal-idr-p nal) (%drain d t))
+         (setf (h264-picture d) (make-picture-for sps))
+         (setf (pic-poc (h264-picture d)) (%picture-order-count d sh nal)
+               (pic-frame-num (h264-picture d)) (sh-frame-num sh)
+               (pic-ref-p (h264-picture d)) (plusp (nal-ref-idc nal)))
+         (setf (h264-reorder d)
+               ;; what the sequence says, or a delay wide enough for anything without B pyramids
+               (or (sps-num-reorder-frames sps) (if (sh-b-slice-p sh) 2 0))))
        (unless (h264-picture d) (%err "a slice arrived before any picture was started"))
-       (setf (pic-frame-num (h264-picture d)) (sh-frame-num sh))
-       (decode-slice (h264-picture d) sh br (build-ref-list-0 d sh))
+       (if (sh-b-slice-p sh)
+           (multiple-value-bind (l0 l1) (build-ref-lists-b d sh)
+             (decode-slice (h264-picture d) sh br l0 l1))
+           (decode-slice (h264-picture d) sh br (build-ref-list-0 d sh)))
        ;; the loop filter runs over the whole picture once its macroblocks are reconstructed, and
        ;; never during: intra prediction reads UNFILTERED neighbours (8.3), so filtering as we go
        ;; would feed the next macroblock samples the encoder never predicted from
@@ -125,7 +231,11 @@
          (let ((limit (max 1 (sps-max-ref-frames sps))))
            (when (> (length (h264-refs d)) limit)
              (setf (h264-refs d) (subseq (h264-refs d) 0 limit)))))
-       (h264-picture d)))
+       ;; into the reorder buffer, and out comes whichever picture's turn it now is — which is
+       ;; usually not this one
+       (push (h264-picture d) (h264-pending d))
+       (%drain d)
+       (pop (h264-out d))))
     (t nil)))                                   ; SEI, AUD, and everything else: not our business
 
 (defun decode-picture (d nals)
@@ -162,9 +272,12 @@
       (dolist (n params) (feed-nal d n))
       (or (and (> threads 1) (decode-independent d aus :threads threads))
           (let ((out (list)))
-            (dolist (au aus (nreverse out))
+            (dolist (au aus)
               (dolist (n au)
-                (let ((p (feed-nal d n))) (when p (push p out))))))))))
+                (let ((p (feed-nal d n))) (when p (push p out)))))
+            ;; and the tail the reorder buffer is still holding
+            (dolist (p (flush-decoder d)) (push p out))
+            (nreverse out))))))
 
 ;;; ---- getting the samples out --------------------------------------------------------------------
 

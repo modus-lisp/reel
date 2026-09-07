@@ -212,3 +212,66 @@
 (declaim (type (simple-array (unsigned-byte 8) (*))
                +inter-cbp+ +p-part-width+ +p-part-height+ +p-part-count+
                +p-sub-width+ +p-sub-height+ +p-sub-count+))
+
+;;; ---- B macroblocks ----------------------------------------------------------------------------
+;;;
+;;; A prediction mode here is 0 = from list 0, 1 = from list 1, 2 = from both, 3 = direct (inferred
+;;; from the neighbours and the co-located picture, with nothing coded at all).
+
+(defconstant +pred-l0+ 0)
+(defconstant +pred-l1+ 1)
+(defconstant +pred-bi+ 2)
+(defconstant +pred-direct+ 3)
+
+(defparameter +b-part+
+  ;; Table 7-14, mb_type 0..22: (partition-count width height mode0 mode1).  Type 22 is B_8x8,
+  ;; whose four partitions carry their own sub types.  Anything above 22 is an intra macroblock
+  ;; with 23 subtracted.
+  (make-array '(23 5) :element-type 'fixnum :initial-contents
+   '((1 16 16 3 3)      ; B_Direct_16x16
+     (1 16 16 0 0)      ; B_L0_16x16
+     (1 16 16 1 1)      ; B_L1_16x16
+     (1 16 16 2 2)      ; B_Bi_16x16
+     (2 16  8 0 0)      ; B_L0_L0_16x8
+     (2  8 16 0 0)      ; B_L0_L0_8x16
+     (2 16  8 1 1)      ; B_L1_L1_16x8
+     (2  8 16 1 1)      ; B_L1_L1_8x16
+     (2 16  8 0 1)      ; B_L0_L1_16x8
+     (2  8 16 0 1)      ; B_L0_L1_8x16
+     (2 16  8 1 0)      ; B_L1_L0_16x8
+     (2  8 16 1 0)      ; B_L1_L0_8x16
+     (2 16  8 0 2)      ; B_L0_Bi_16x8
+     (2  8 16 0 2)      ; B_L0_Bi_8x16
+     (2 16  8 1 2)      ; B_L1_Bi_16x8
+     (2  8 16 1 2)      ; B_L1_Bi_8x16
+     (2 16  8 2 0)      ; B_Bi_L0_16x8
+     (2  8 16 2 0)      ; B_Bi_L0_8x16
+     (2 16  8 2 1)      ; B_Bi_L1_16x8
+     (2  8 16 2 1)      ; B_Bi_L1_8x16
+     (2 16  8 2 2)      ; B_Bi_Bi_16x8
+     (2  8 16 2 2)      ; B_Bi_Bi_8x16
+     (4  8  8 9 9))))   ; B_8x8: the modes come from sub_mb_type
+
+(defparameter +b-sub+
+  ;; Table 7-18, sub_mb_type 0..12: (sub-partition-count width height mode).
+  (make-array '(13 4) :element-type 'fixnum :initial-contents
+   '((4 4 4 3)          ; B_Direct_8x8 — four 4x4 blocks, each inferred
+     (1 8 8 0)          ; B_L0_8x8
+     (1 8 8 1)          ; B_L1_8x8
+     (1 8 8 2)          ; B_Bi_8x8
+     (2 8 4 0)          ; B_L0_8x4
+     (2 4 8 0)          ; B_L0_4x8
+     (2 8 4 1)          ; B_L1_8x4
+     (2 4 8 1)          ; B_L1_4x8
+     (2 8 4 2)          ; B_Bi_8x4
+     (2 4 8 2)          ; B_Bi_4x8
+     (4 4 4 0)          ; B_L0_4x4
+     (4 4 4 1)          ; B_L1_4x4
+     (4 4 4 2))))       ; B_Bi_4x4
+
+(declaim (type (simple-array fixnum (23 5)) +b-part+))
+(declaim (type (simple-array fixnum (13 4)) +b-sub+))
+
+(declaim (inline pred-uses-l0-p pred-uses-l1-p))
+(defun pred-uses-l0-p (m) (or (= m +pred-l0+) (= m +pred-bi+)))
+(defun pred-uses-l1-p (m) (or (= m +pred-l1+) (= m +pred-bi+)))

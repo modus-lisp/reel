@@ -24,6 +24,7 @@
   (poc-cycle '())
   (max-ref-frames 1)
   (gaps-allowed nil)
+  (num-reorder-frames nil)              ; from the VUI, when it says; NIL when it does not
   (mb-width 0) (mb-height 0)            ; in macroblocks
   (frame-mbs-only t) (mb-adaptive nil)
   (direct-8x8 nil)
@@ -86,7 +87,13 @@
     (when (= 1 (u1 br))                                ; frame_cropping_flag
       (setf (sps-crop-left s) (ue br) (sps-crop-right s) (ue br)
             (sps-crop-top s) (ue br) (sps-crop-bottom s) (ue br)))
-    ;; the VUI is not read: nothing below it changes how a sample decodes
+    ;; The VUI used to be skipped, on the grounds that nothing below it changes how a sample
+    ;; decodes.  That stopped being true with B slices: max_num_reorder_frames says how far
+    ;; display order can run behind decoding order, and guessing it wrong shows pictures in the
+    ;; wrong sequence.  Nothing else in there is read, and a VUI we cannot parse is not an error —
+    ;; the caller falls back to a conservative delay.
+    (when (= 1 (u1 br))
+      (ignore-errors (parse-vui br s)))
     (unless (= 1 (sps-chroma-format s))
       (%err "chroma_format_idc ~d is not supported (4:2:0 only)" (sps-chroma-format s)))
     (unless (and (= 8 (sps-bit-depth-luma s)) (= 8 (sps-bit-depth-chroma s)))
@@ -158,12 +165,16 @@
   ;; the fallback to the picture parameter set below unreachable — which reads no reference indices
   ;; at all on a stream with more than one reference, and desynchronises the slice.
   (num-ref-idx-l0 nil)
+  (num-ref-idx-l1 nil)
+  (direct-spatial nil)                  ; direct_spatial_mv_pred_flag
+  (ref-list-reordering-l1 '())
   (cabac-init-idc 0)
   ;; explicit weighted prediction (7.4.3.2): a scale and an offset per reference picture, applied
   ;; to the motion-compensated prediction before the residual is added
   (weighted-p nil)
   (luma-log2-denom 0) (chroma-log2-denom 0)
   (luma-weights nil) (chroma-weights nil)
+  (luma-weights-l1 nil) (chroma-weights-l1 nil)
   (ref-list-reordering '())
   (no-output-of-prior-pics nil) (long-term-reference nil)
   (adaptive-ref-marking nil)
@@ -177,6 +188,40 @@
 
 (defun sh-i-slice-p (sh) (eq (slice-type-name (sh-slice-type sh)) :i))
 (defun sh-p-slice-p (sh) (eq (slice-type-name (sh-slice-type sh)) :p))
+(defun sh-b-slice-p (sh) (eq (slice-type-name (sh-slice-type sh)) :b))
+
+(defun %skip-hrd (br)
+  "hrd_parameters (E.1.2), read only far enough to get past it."
+  (let ((cpb-cnt (1+ (ue br))))
+    (ub br 4) (ub br 4)                                ; bit_rate_scale, cpb_size_scale
+    (dotimes (i cpb-cnt) (ue br) (ue br) (u1 br))
+    (ub br 5) (ub br 5) (ub br 5) (ub br 5)))
+
+(defun parse-vui (br s)
+  "The video usability information (E.1.1), for the one field that matters here.
+
+   Everything before max_num_reorder_frames has to be stepped over exactly, which is why this
+   reads fields it then throws away: they are variable width, so skipping is walking."
+  (when (= 1 (u1 br))                                  ; aspect_ratio_info_present_flag
+    (let ((idc (ub br 8)))
+      (when (= idc 255) (ub br 16) (ub br 16))))       ; Extended_SAR
+  (when (= 1 (u1 br)) (u1 br))                         ; overscan
+  (when (= 1 (u1 br))                                  ; video_signal_type
+    (ub br 3) (u1 br)
+    (when (= 1 (u1 br)) (ub br 8) (ub br 8) (ub br 8)))
+  (when (= 1 (u1 br)) (ue br) (ue br))                 ; chroma_loc_info
+  (when (= 1 (u1 br)) (ub br 32) (ub br 32) (u1 br))   ; timing_info
+  (let ((nal-hrd (= 1 (u1 br))))
+    (when nal-hrd (%skip-hrd br))
+    (let ((vcl-hrd (= 1 (u1 br))))
+      (when vcl-hrd (%skip-hrd br))
+      (when (or nal-hrd vcl-hrd) (u1 br))))            ; low_delay_hrd_flag
+  (u1 br)                                              ; pic_struct_present_flag
+  (when (= 1 (u1 br))                                  ; bitstream_restriction_flag
+    (u1 br) (ue br) (ue br) (ue br) (ue br)
+    (setf (sps-num-reorder-frames s) (ue br))
+    (ue br))                                           ; max_dec_frame_buffering
+  s)
 
 (defun parse-pred-weight-table (br sh)
   "pred_weight_table (7.3.3.2), list 0 only — which is all a P slice has.
@@ -199,6 +244,20 @@
         (dotimes (j 2)
           (setf (aref cw i j 0) (se br) (aref cw i j 1) (se br)))))
     (setf (sh-luma-weights sh) lw (sh-chroma-weights sh) cw)
+    (when (sh-b-slice-p sh)
+      (let* ((n1 (max 1 (or (sh-num-ref-idx-l1 sh) 1)))
+             (lw1 (make-array (list n1 2) :element-type 'fixnum))
+             (cw1 (make-array (list n1 2 2) :element-type 'fixnum)))
+        (dotimes (i n1)
+          (setf (aref lw1 i 0) (ash 1 (sh-luma-log2-denom sh)) (aref lw1 i 1) 0)
+          (when (= 1 (u1 br))
+            (setf (aref lw1 i 0) (se br) (aref lw1 i 1) (se br)))
+          (dotimes (j 2)
+            (setf (aref cw1 i j 0) (ash 1 (sh-chroma-log2-denom sh)) (aref cw1 i j 1) 0))
+          (when (= 1 (u1 br))
+            (dotimes (j 2)
+              (setf (aref cw1 i j 0) (se br) (aref cw1 i j 1) (se br)))))
+        (setf (sh-luma-weights-l1 sh) lw1 (sh-chroma-weights-l1 sh) cw1)))
     sh))
 
 (defun parse-slice-header (br nal sps-table pps-table)
@@ -224,23 +283,35 @@
         (se br)                                        ; delta_pic_order_cnt[0]
         (when (pps-bottom-field-order pps) (se br)))
       (when (pps-redundant-pic-cnt pps) (setf (sh-redundant-pic-cnt sh) (ue br)))
-      ;; B slices would read direct_spatial_mv_pred_flag here; we refuse them below
-      (when (sh-p-slice-p sh)
+      ;; which of the two direct prediction methods a B slice uses, chosen per slice
+      (when (sh-b-slice-p sh)
+        (setf (sh-direct-spatial sh) (= 1 (u1 br))))
+      (when (or (sh-p-slice-p sh) (sh-b-slice-p sh))
         (when (= 1 (u1 br))                            ; num_ref_idx_active_override_flag
-          (setf (sh-num-ref-idx-l0 sh) (1+ (ue br))))
+          (setf (sh-num-ref-idx-l0 sh) (1+ (ue br)))
+          (when (sh-b-slice-p sh) (setf (sh-num-ref-idx-l1 sh) (1+ (ue br)))))
         (unless (sh-num-ref-idx-l0 sh)
-          (setf (sh-num-ref-idx-l0 sh) (pps-num-ref-idx-l0 pps))))
-      (unless (or (sh-i-slice-p sh) (sh-p-slice-p sh))
+          (setf (sh-num-ref-idx-l0 sh) (pps-num-ref-idx-l0 pps)))
+        (when (and (sh-b-slice-p sh) (null (sh-num-ref-idx-l1 sh)))
+          (setf (sh-num-ref-idx-l1 sh) (pps-num-ref-idx-l1 pps))))
+      (unless (or (sh-i-slice-p sh) (sh-p-slice-p sh) (sh-b-slice-p sh))
         (%err "slice_type ~d (~a) is not supported" (sh-slice-type sh)
               (slice-type-name (sh-slice-type sh))))
-      ;; reference picture list modification
+      ;; reference picture list modification, one list for a P slice and two for a B
       (unless (sh-i-slice-p sh)
         (when (= 1 (u1 br))                            ; ref_pic_list_modification_flag_l0
           (loop for op = (ue br)
                 until (= op 3)
                 do (push (cons op (ue br)) (sh-ref-list-reordering sh)))
-          (setf (sh-ref-list-reordering sh) (nreverse (sh-ref-list-reordering sh)))))
-      (when (and (pps-weighted-pred pps) (sh-p-slice-p sh))
+          (setf (sh-ref-list-reordering sh) (nreverse (sh-ref-list-reordering sh))))
+        (when (sh-b-slice-p sh)
+          (when (= 1 (u1 br))                          ; ref_pic_list_modification_flag_l1
+            (loop for op = (ue br)
+                  until (= op 3)
+                  do (push (cons op (ue br)) (sh-ref-list-reordering-l1 sh)))
+            (setf (sh-ref-list-reordering-l1 sh) (nreverse (sh-ref-list-reordering-l1 sh))))))
+      (when (or (and (pps-weighted-pred pps) (sh-p-slice-p sh))
+                (and (= 1 (pps-weighted-bipred pps)) (sh-b-slice-p sh)))
         (parse-pred-weight-table br sh))
       ;; decoded reference picture marking
       (when (plusp (nal-ref-idc nal))

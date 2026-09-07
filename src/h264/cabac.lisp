@@ -24,6 +24,9 @@
 (defconstant +ctx-mb-type-p-prefix+ 14)
 (defconstant +ctx-mb-type-p-suffix+ 17)
 (defconstant +ctx-sub-mb-type-p+ 21)
+(defconstant +ctx-mb-type-b+ 27)
+(defconstant +ctx-sub-mb-type-b+ 36)
+(defconstant +ctx-mb-skip-b+ 24)
 (defconstant +ctx-mvd-x+ 40)
 (defconstant +ctx-mvd-y+ 47)
 (defconstant +ctx-ref-idx+ 54)
@@ -428,14 +431,31 @@
 
 ;;; ---- P slices ------------------------------------------------------------------------------------
 
-(defun cabac-mb-skip-flag (ss)
+(defun cabac-mb-skip-flag (ss &optional b-slice)
   "mb_skip_flag (9.3.3.1.1.1).  CABAC has no skip RUN: every macroblock carries its own flag, and
-   the context is how many of its neighbours were themselves NOT skipped."
-  (let ((pic (ss-pic ss)) (inc 0))
+   the context is how many of its neighbours were themselves NOT skipped.  P and B slices count
+   from different context bases."
+  (let ((pic (ss-pic ss)) (inc 0) (base (if b-slice +ctx-mb-skip-b+ +ctx-mb-skip-p+)))
     (dolist (d '((-1 0) (0 -1)))
       (let ((i (%nbr-mbi ss (first d) (second d))))
         (when (and i (/= -2 (aref (pic-mb-types pic) i))) (incf inc))))
-    (= 1 (decode-decision (ss-cabac ss) (+ +ctx-mb-skip-p+ inc)))))
+    (= 1 (decode-decision (ss-cabac ss) (+ base inc)))))
+
+(defun cabac-intra-suffix (ss base)
+  "The intra mb_type tree as it appears INSIDE a P or B slice, on whichever contexts that slice
+   uses for it.  Same shape as the I-slice tree; only the base differs."
+  (let ((c (ss-cabac ss)))
+    (if (zerop (decode-decision c (+ base 0)))
+        0
+        (if (= 1 (decode-terminate c))
+            25
+            (let* ((cbp-luma (decode-decision c (+ base 1)))
+                   (chroma (if (zerop (decode-decision c (+ base 2)))
+                               0
+                               (if (zerop (decode-decision c (+ base 2))) 1 2)))
+                   (p1 (decode-decision c (+ base 3)))
+                   (p0 (decode-decision c (+ base 3))))
+              (+ 1 (* 12 cbp-luma) (* 4 chroma) (* 2 p1) p0))))))
 
 (defun cabac-mb-type-p (ss)
   "mb_type in a P slice.  Returns an inter type 0..3, or (+ 5 intra-type) so the caller can use the
@@ -446,19 +466,7 @@
   (let ((c (ss-cabac ss)))
     (if (= 1 (decode-decision c (+ +ctx-mb-type-p-prefix+ 0)))
         ;; the intra suffix, which is the I-slice tree on its own contexts (Table 9-39)
-        (+ 5
-           (if (zerop (decode-decision c (+ +ctx-mb-type-p-suffix+ 0)))
-               0
-               (if (= 1 (decode-terminate c))
-                   25
-                   (let* ((cbp-luma (decode-decision c (+ +ctx-mb-type-p-suffix+ 1)))
-                          (chroma (if (zerop (decode-decision c (+ +ctx-mb-type-p-suffix+ 2)))
-                                      0
-                                      (if (zerop (decode-decision c (+ +ctx-mb-type-p-suffix+ 2)))
-                                          1 2)))
-                          (p1 (decode-decision c (+ +ctx-mb-type-p-suffix+ 3)))
-                          (p0 (decode-decision c (+ +ctx-mb-type-p-suffix+ 3))))
-                     (+ 1 (* 12 cbp-luma) (* 4 chroma) (* 2 p1) p0)))))
+        (+ 5 (cabac-intra-suffix ss +ctx-mb-type-p-suffix+))
         (let* ((b1 (decode-decision c (+ +ctx-mb-type-p-prefix+ 1)))
                (b2 (decode-decision c (+ +ctx-mb-type-p-prefix+ (if (= b1 1) 3 2)))))
           ;; 000 -> 16x16, 001 -> 8x8, 010 -> 8x16, 011 -> 16x8
@@ -475,7 +483,7 @@
             1
             (if (= 1 (decode-decision c (+ +ctx-sub-mb-type-p+ 2))) 2 3)))))
 
-(defun %ref-idx-ctx-inc (ss bx by)
+(defun %ref-idx-ctx-inc (ss bx by &optional (lx 0))
   "ctxIdxInc for bin 0 of ref_idx (9.3.3.1.1.6): a neighbour counts when it used a reference other
    than the first one."
   (let ((pic (ss-pic ss)))
@@ -489,18 +497,21 @@
                                  (%nbr-mbi ss dx dy))))
                      (cond
                        ((null i) 0)
-                       ;; intra and skipped neighbours have no reference to have chosen
+                       ;; 9.3.3.1.1.6 excludes an intra neighbour AND a skipped one, and the
+                       ;; second exclusion is load-bearing rather than an optimisation: a skipped
+                       ;; B macroblock does have a direct-derived reference index, and counting it
+                       ;; desynchronises within a couple of dozen slices.
                        ((>= (aref (pic-mb-types pic) i) 0) 0)
                        ((= -2 (aref (pic-mb-types pic) i)) 0)
-                       (t (multiple-value-bind (mx my r) (blk-mv pic nbx nby)
+                       (t (multiple-value-bind (mx my r) (blk-mv pic nbx nby lx)
                             (declare (ignore mx my))
                             (if (> r 0) 1 0)))))))))
       (+ (term (1- bx) by) (* 2 (term bx (1- by)))))))
 
-(defun cabac-ref-idx (ss bx by)
-  "ref_idx_l0: unary, with the first three bins on their own contexts."
+(defun cabac-ref-idx (ss bx by &optional (lx 0))
+  "ref_idx for list LX: unary, with the first three bins on their own contexts."
   (let ((c (ss-cabac ss)))
-    (if (zerop (decode-decision c (+ +ctx-ref-idx+ (%ref-idx-ctx-inc ss bx by))))
+    (if (zerop (decode-decision c (+ +ctx-ref-idx+ (%ref-idx-ctx-inc ss bx by lx))))
         0
         (if (zerop (decode-decision c (+ +ctx-ref-idx+ 4)))
             1
@@ -510,7 +521,7 @@
                        (when (> n 32) (%err "runaway ref_idx")))
               n)))))
 
-(defun %mvd-ctx-inc (ss bx by comp)
+(defun %mvd-ctx-inc (ss bx by comp &optional (lx 0))
   "ctxIdxInc for bin 0 of a vector difference (9.3.3.1.1.7).
 
    The context is the SIZE of the neighbouring differences, not their direction: where the
@@ -524,13 +535,13 @@
                                (+ (* (ss-mby ss) mbw) (ss-mbx ss))
                                (%nbr-mbi ss dx dy))))
                    (when (and i (< (aref (pic-mb-types pic) i) -2))
-                     (multiple-value-bind (dxv dyv) (blk-mvd pic nbx nby)
+                     (multiple-value-bind (dxv dyv) (blk-mvd pic nbx nby lx)
                        (incf sum (abs (if (zerop comp) dxv dyv))))))))))
       (term (1- bx) by)
       (term bx (1- by)))
     (cond ((< sum 3) 0) ((> sum 32) 2) (t 1))))
 
-(defun cabac-mvd (ss bx by comp)
+(defun cabac-mvd (ss bx by comp &optional (lx 0))
   "One component of a motion vector difference: UEG3, signed, with the unary part context coded
    and everything past nine in bypass."
   (let* ((c (ss-cabac ss))
@@ -539,10 +550,64 @@
     (declare (type fixnum n))
     (loop while (< n 9)
           do (let ((ctx (+ base (case n
-                                  (0 (%mvd-ctx-inc ss bx by comp))
+                                  (0 (%mvd-ctx-inc ss bx by comp lx))
                                   (1 3) (2 4) (3 5) (t 6)))))
                (if (zerop (decode-decision c ctx)) (return) (incf n))))
     (let ((v n))
       (declare (type fixnum v))
       (when (= n 9) (incf v (%exp-golomb-bypass c 3)))
       (if (zerop v) 0 (if (= 1 (decode-bypass c)) (- v) v)))))
+
+(defun cabac-sub-mb-type-b (ss)
+  "sub_mb_type in a B slice, Table 9-38's B column.
+
+   The tree is lopsided on purpose: B_Direct_8x8 is one bin because it is by far the commonest, and
+   the four-way splits cost six."
+  (let ((c (ss-cabac ss)))
+    (if (zerop (decode-decision c (+ +ctx-sub-mb-type-b+ 0)))
+        0                                                       ; B_Direct_8x8
+        (if (zerop (decode-decision c (+ +ctx-sub-mb-type-b+ 1)))
+            (+ 1 (decode-decision c (+ +ctx-sub-mb-type-b+ 3))) ; B_L0_8x8 / B_L1_8x8
+            (if (zerop (decode-decision c (+ +ctx-sub-mb-type-b+ 2)))
+                (+ 3 (logior (ash (decode-decision c (+ +ctx-sub-mb-type-b+ 3)) 1)
+                             (decode-decision c (+ +ctx-sub-mb-type-b+ 3))))
+                (if (zerop (decode-decision c (+ +ctx-sub-mb-type-b+ 3)))
+                    (+ 7 (logior (ash (decode-decision c (+ +ctx-sub-mb-type-b+ 3)) 1)
+                                 (decode-decision c (+ +ctx-sub-mb-type-b+ 3))))
+                    (+ 11 (decode-decision c (+ +ctx-sub-mb-type-b+ 3)))))))))
+
+(defconstant +ctx-mb-type-b-suffix+ 32)
+
+(defun %mb-type-b-ctx-inc (ss)
+  "ctxIdxInc for bin 0 of a B slice's mb_type: how many neighbours did something other than take
+   the direct prediction whole.  A skipped macroblock and a B_Direct_16x16 both count as nothing
+   happening, which is what makes a still region cheap."
+  (let ((pic (ss-pic ss)) (n 0))
+    (dolist (d '((-1 0) (0 -1)) n)
+      (let ((i (%nbr-mbi ss (first d) (second d))))
+        (when i
+          (let ((tp (aref (pic-mb-types pic) i)))
+            ;; -2 is B_Skip and -3 is B_Direct_16x16; anything else is a real decision
+            (unless (or (= tp -2) (= tp -3)) (incf n))))))))
+
+(defun cabac-mb-type-b (ss)
+  "mb_type in a B slice (Table 9-34's B column).  Returns 0..22, or (+ 23 intra-type).
+
+   The tree is deliberately lopsided: B_Direct_16x16 costs one bin because it is much the
+   commonest, the two single-list 16x16 types cost three, and the two-partition combinations —
+   which is most of the table — cost six or seven."
+  (let ((c (ss-cabac ss)))
+    (if (zerop (decode-decision c (+ +ctx-mb-type-b+ (%mb-type-b-ctx-inc ss))))
+        0
+        (if (zerop (decode-decision c (+ +ctx-mb-type-b+ 3)))
+            (+ 1 (decode-decision c (+ +ctx-mb-type-b+ 5)))
+            (let ((bits (logior (ash (decode-decision c (+ +ctx-mb-type-b+ 4)) 3)
+                                (ash (decode-decision c (+ +ctx-mb-type-b+ 5)) 2)
+                                (ash (decode-decision c (+ +ctx-mb-type-b+ 5)) 1)
+                                (decode-decision c (+ +ctx-mb-type-b+ 5)))))
+              (cond
+                ((< bits 8) (+ bits 3))
+                ((= bits 13) (+ 23 (cabac-intra-suffix ss +ctx-mb-type-b-suffix+)))
+                ((= bits 14) 11)
+                ((= bits 15) 22)
+                (t (- (logior (ash bits 1) (decode-decision c (+ +ctx-mb-type-b+ 5))) 4))))))))

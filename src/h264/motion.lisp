@@ -155,7 +155,7 @@
 
 ;;; ---- predicting the vector ------------------------------------------------------------------------
 
-(defun %neighbour-motion (ss bx by)
+(defun %neighbour-motion (ss bx by &optional (lx 0))
   "(values mvx mvy ref available-p) for the 4x4 block at picture block coordinates BX,BY.
 
    An unavailable neighbour answers a zero vector and reference -1, which is what the prediction
@@ -176,7 +176,7 @@
                   (zerop (logand (ss-mb-done ss)
                                  (ash 1 (+ (* 4 (mod by 4)) (mod bx 4))))))
              (values 0 0 -1 nil))
-            (t (multiple-value-bind (mvx mvy ref) (blk-mv pic bx by)
+            (t (multiple-value-bind (mvx mvy ref) (blk-mv pic bx by lx)
                  (values mvx mvy ref t))))))))
 
 (declaim (inline %median3))
@@ -184,7 +184,7 @@
   (declare (type fixnum a b c) (optimize (speed 3) (safety 0)))
   (max (min a b) (min (max a b) c)))
 
-(defun predict-mv (ss bx by pw ref-idx &key shape part)
+(defun predict-mv (ss bx by pw ref-idx &key shape part (lx 0))
   "(values mvpx mvpy): the predicted motion vector for a partition whose top-left 4x4 block is at
    picture block coordinates BX,BY and which is PW blocks wide, referring to REF-IDX.
 
@@ -192,12 +192,12 @@
    half really is more like the macroblock above it than like a median of three neighbours, and a
    8x16's left half more like the one to its left.  Everything else takes the median."
   (declare (optimize (speed 3) (safety 1)))
-  (multiple-value-bind (ax ay aref a-ok) (%neighbour-motion ss (1- bx) by)
-    (multiple-value-bind (bx* by* bref b-ok) (%neighbour-motion ss bx (1- by))
+  (multiple-value-bind (ax ay aref a-ok) (%neighbour-motion ss (1- bx) by lx)
+    (multiple-value-bind (bx* by* bref b-ok) (%neighbour-motion ss bx (1- by) lx)
       ;; C is above-right of the whole partition; when it is not available D, above-left, stands in
-      (multiple-value-bind (cx cy cref c-ok) (%neighbour-motion ss (+ bx pw) (1- by))
+      (multiple-value-bind (cx cy cref c-ok) (%neighbour-motion ss (+ bx pw) (1- by) lx)
         (unless c-ok
-          (multiple-value-setq (cx cy cref c-ok) (%neighbour-motion ss (1- bx) (1- by))))
+          (multiple-value-setq (cx cy cref c-ok) (%neighbour-motion ss (1- bx) (1- by) lx)))
         ;; the directional cases first: each is a whole answer, not a tweak to the median
         (when (and shape part)
           (cond
@@ -231,8 +231,8 @@
    the ordinary 16x16 prediction."
   (declare (optimize (speed 3) (safety 1)))
   (let ((bx (* 4 (ss-mbx ss))) (by (* 4 (ss-mby ss))))
-    (multiple-value-bind (ax ay aref a-ok) (%neighbour-motion ss (1- bx) by)
-      (multiple-value-bind (bvx bvy bref b-ok) (%neighbour-motion ss bx (1- by))
+    (multiple-value-bind (ax ay aref a-ok) (%neighbour-motion ss (1- bx) by 0)
+      (multiple-value-bind (bvx bvy bref b-ok) (%neighbour-motion ss bx (1- by) 0)
         (if (or (not a-ok) (not b-ok)
                 (and (zerop aref) (zerop ax) (zerop ay))
                 (and (zerop bref) (zerop bvx) (zerop bvy)))
@@ -261,3 +261,62 @@
                              (+ (* v weight) offset))))
             (declare (type fixnum v scaled))
             (setf (aref plane (+ row i)) (clamp255 scaled))))))))
+
+;;; ---- bi-prediction -------------------------------------------------------------------------------
+
+(defun average-into (dst dstride dbase src sstride sbase w h)
+  "DST = (DST + SRC + 1) >> 1 over a W x H rectangle.
+
+   The rounding is up, and it is not optional: a decoder that truncates here drifts half a level
+   darker on every bi-predicted block and the error compounds through the sequence."
+  (declare (type (simple-array (unsigned-byte 8) (*)) dst src)
+           (type fixnum dstride dbase sstride sbase w h)
+           (optimize (speed 3) (safety 1)))
+  (dotimes (j h)
+    (let ((d (+ dbase (* j dstride))) (s (+ sbase (* j sstride))))
+      (declare (type fixnum d s))
+      (dotimes (i w)
+        (setf (aref dst (+ d i))
+              (ash (+ (aref dst (+ d i)) (aref src (+ s i)) 1) -1))))))
+
+(defun weighted-average-into (dst dstride dbase src sstride sbase w h w0 w1 log2-denom o0 o1)
+  "DST = the WEIGHTED mean of the two predictions (8.4.2.3.2).
+
+   One rounding, not two: the two predictions are combined and rounded once, which is why this
+   cannot be expressed as weighting each side and then averaging."
+  (declare (type (simple-array (unsigned-byte 8) (*)) dst src)
+           (type fixnum dstride dbase sstride sbase w h w0 w1 log2-denom o0 o1)
+           (optimize (speed 3) (safety 1)))
+  (let ((round (ash 1 log2-denom))
+        (shift (1+ log2-denom))
+        (off (ash (+ o0 o1 1) -1)))
+    (declare (type fixnum round shift off))
+    (dotimes (j h)
+      (let ((d (+ dbase (* j dstride))) (s (+ sbase (* j sstride))))
+        (declare (type fixnum d s))
+        (dotimes (i w)
+          (setf (aref dst (+ d i))
+                (clamp255 (+ (ash (+ (* (aref dst (+ d i)) w0)
+                                     (* (aref src (+ s i)) w1)
+                                     round)
+                                  (- shift))
+                             off))))))))
+
+(defun implicit-bi-weights (curr-poc poc0 poc1)
+  "(values w0 w1) for implicit weighted bi-prediction (8.4.2.3.1).
+
+   The weights come from WHERE the two references sit relative to this picture: a reference twice
+   as far away counts half as much.  No weights are transmitted at all — both ends derive them from
+   the order counts, which is why an encoder can turn this on for free.
+
+   Out-of-range distances fall back to an even split, which is also what a zero distance means."
+  (let* ((tb (max -128 (min 127 (- curr-poc poc0))))
+         (td (max -128 (min 127 (- poc1 poc0)))))
+    (if (zerop td)
+        (values 32 32)
+        (let* ((tx (floor (+ 16384 (abs (floor td 2))) td))
+               (dsf (max -1024 (min 1023 (ash (+ (* tb tx) 32) -6))))
+               (w1 (ash dsf -2)))
+          (if (or (< w1 -64) (> w1 128))
+              (values 32 32)
+              (values (- 64 w1) w1))))))

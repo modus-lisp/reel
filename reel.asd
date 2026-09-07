@@ -47,8 +47,11 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
       :serial t
       :components
       ((:file "bits")         ; NAL units, RBSP, the Exp-Golomb bit reader
-       (:file "params")       ; sequence and picture parameter sets, slice headers
+       ;; the pure-data files come first: the parameter sets need the scan order and the default
+       ;; scaling matrices to turn a transmitted scaling list into something dequantisation can use
        (:file "tables")       ; the CAVLC VLC tables, the scan order, the dequant tables
+       (:file "scaling-tables")  ; GENERATED: the default scaling matrices
+       (:file "params")       ; sequence and picture parameter sets, slice headers
        (:file "cavlc")        ; residual blocks: coeff_token, levels, runs
        (:file "cabac-tables") ; GENERATED: the normative CABAC constants
        (:file "transform")    ; dequantisation, the inverse 4x4 and the DC transforms

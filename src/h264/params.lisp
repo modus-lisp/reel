@@ -25,6 +25,7 @@
   (max-ref-frames 1)
   (gaps-allowed nil)
   (num-reorder-frames nil)              ; from the VUI, when it says; NIL when it does not
+  (scale-4x4 nil)                       ; six 4x4 weight matrices in raster order, or NIL for flat
   (mb-width 0) (mb-height 0)            ; in macroblocks
   (frame-mbs-only t) (mb-adaptive nil)
   (direct-8x8 nil)
@@ -44,6 +45,85 @@
   (- (* 16 (sps-mb-height s))
      (* 2 (+ (sps-crop-top s) (sps-crop-bottom s)))))
 
+(defparameter +flat-scale-4x4+
+  (make-array 16 :element-type '(unsigned-byte 8) :initial-element 16)
+  "The weight matrix a stream that signals none is decoded with: every position 16.")
+(declaim (type (simple-array (unsigned-byte 8) (16)) +flat-scale-4x4+))
+
+(defun parse-scaling-list (br size)
+  "One scaling list (7.3.2.1.1.1), in the SCAN order the bitstream sends it.
+
+   Returns (values list use-default-p).  A zero delta at the very first position does not mean a
+   weight of zero — it means `use the default matrix for this list\', and nothing more is sent.
+   After that, a next scale of zero means the run simply continues at the last value."
+  (let ((list (make-array size :element-type '(unsigned-byte 8)))
+        (last 8) (next 8) (use-default nil))
+    (dotimes (j size)
+      (when (/= next 0)
+        (let ((delta (se br)))
+          (setf next (mod (+ last delta 256) 256))
+          (when (and (zerop j) (zerop next)) (setf use-default t))))
+      (setf (aref list j) (if (zerop next) last next)
+            last (aref list j)))
+    (values list use-default)))
+
+(defun %unscan-4x4 (list)
+  "A 4x4 scaling list from scan order into raster, which is how dequantisation indexes it."
+  (let ((out (make-array 16 :element-type '(unsigned-byte 8))))
+    (dotimes (j 16 out) (setf (aref out (aref +zigzag-4x4+ j)) (aref list j)))))
+
+(defun %default-4x4 (which)
+  (let ((out (make-array 16 :element-type '(unsigned-byte 8))))
+    (dotimes (j 16 out) (setf (aref out j) (aref +default-scale-4x4+ which j)))))
+
+(defun parse-scaling-matrices (br n8x8)
+  "The lists a parameter set carries: six 4x4, then N8X8 of the 8x8 ones (7.3.2.1.1).
+
+   THE COUNT IS NOT FIXED, and getting it wrong is not a scaling bug.  A sequence parameter set
+   always carries the two 8x8 lists for 4:2:0; a picture parameter set carries them ONLY when it
+   enables the 8x8 transform.  Reading two lists that are not there consumes the flags belonging to
+   second_chroma_qp_index_offset, so the Cr plane alone decodes at the wrong quantiser while luma
+   and Cb stay perfect.
+
+   Returns a six-vector holding a raster-order matrix for each list the stream sent and NIL for
+   each it omitted.  The fall-back is NOT applied here, because rule set B sends a picture
+   parameter set to the SEQUENCE parameter set for its answer, and the two are parsed apart.
+   RESOLVE-SCALING-MATRICES does it once both are in hand.
+
+   The 8x8 lists are read so the bitstream stays in step and then set aside: they matter only once
+   the 8x8 transform is decoded, and that is still refused."
+  (let ((out (make-array 6 :initial-element nil)))
+    (dotimes (i 6)
+      (when (= 1 (u1 br))
+        (multiple-value-bind (list use-default) (parse-scaling-list br 16)
+          (setf (aref out i)
+                (if use-default (%default-4x4 (if (< i 3) 0 1)) (%unscan-4x4 list))))))
+    (dotimes (i n8x8)
+      (when (= 1 (u1 br)) (parse-scaling-list br 64)))
+    out))
+
+(defun resolve-scaling-matrices (sps pps)
+  "The six weight matrices in force for a slice, or NIL when everything is flat.
+
+   The rules are positional and chained (Table 7-2): lists 1 and 2 fall back to the list before
+   them rather than to a default, so a stream that omits the Cb list means `the same as luma', which
+   is what encoders intend and never transmit.  Lists 0 and 3 fall back to the sequence's own list
+   when a picture parameter set is overriding one, and to the specification's default otherwise."
+  (let ((pic (and pps (pps-scale-4x4 pps)))
+        (seq (and sps (sps-scale-4x4 sps))))
+    (when (and (null pic) (null seq)) (return-from resolve-scaling-matrices nil))
+    (let ((out (make-array 6)))
+      (dotimes (i 6 out)
+        (setf (aref out i)
+              (or (and pic (aref pic i))
+                  ;; a picture parameter set that overrides at all defers to the sequence's list
+                  (and (null pic) seq (aref seq i))
+                  (and pic seq (member i '(0 3)) (aref seq i))
+                  (case i
+                    (0 (%default-4x4 0))
+                    (3 (%default-4x4 1))
+                    (t (aref out (1- i))))))))))
+
 (defun parse-sps (rbsp)
   "Parse a sequence parameter set from a NAL's RBSP."
   (let ((br (make-bitreader rbsp))
@@ -61,7 +141,7 @@
             (sps-bit-depth-chroma s) (+ 8 (ue br)))
       (u1 br)                                          ; qpprime_y_zero_transform_bypass_flag
       (when (= 1 (u1 br))                              ; seq_scaling_matrix_present_flag
-        (%err "scaling matrices are not supported (High profile)")))
+        (setf (sps-scale-4x4 s) (parse-scaling-matrices br 2))))
     (setf (sps-log2-max-frame-num s) (+ 4 (ue br))
           (sps-poc-type s) (ue br))
     (case (sps-poc-type s)
@@ -114,7 +194,8 @@
   (deblocking-control nil)
   (constrained-intra nil)
   (redundant-pic-cnt nil)
-  (transform-8x8 nil))
+  (transform-8x8 nil)
+  (scale-4x4 nil))
 
 (defun parse-pps (rbsp)
   (let ((br (make-bitreader rbsp))
@@ -147,7 +228,8 @@
       ;; scaling matrices is decodable here, and there is no reason to turn it away.
       (when (pps-transform-8x8 p)
         (%err "the 8x8 transform is not supported (High profile)"))
-      (when (= 1 (u1 br)) (%err "picture scaling matrices are not supported"))
+      (when (= 1 (u1 br))                              ; pic_scaling_matrix_present_flag
+        (setf (pps-scale-4x4 p) (parse-scaling-matrices br (if (pps-transform-8x8 p) 2 0))))
       (setf (pps-second-chroma-qp-offset p) (se br)))
     p))
 
@@ -181,6 +263,7 @@
   ;; to the motion-compensated prediction before the residual is added
   (weighted-p nil)
   (luma-log2-denom 0) (chroma-log2-denom 0)
+  (scale-4x4 nil)                       ; six resolved weight matrices, or NIL for flat
   (luma-weights nil) (chroma-weights nil)
   (luma-weights-l1 nil) (chroma-weights-l1 nil)
   (ref-list-reordering '())
@@ -280,7 +363,8 @@
            (sps (or (gethash (pps-sps-id pps) sps-table)
                     (%err "PPS ~d refers to SPS ~d, which has not been seen"
                           (sh-pps-id sh) (pps-sps-id pps)))))
-      (setf (sh-pps sh) pps (sh-sps sh) sps)
+      (setf (sh-pps sh) pps (sh-sps sh) sps
+            (sh-scale-4x4 sh) (resolve-scaling-matrices sps pps))
       (setf (sh-frame-num sh) (ub br (sps-log2-max-frame-num sps)))
       ;; frame_mbs_only_flag is asserted in PARSE-SPS, so there is no field_pic_flag here
       (when (nal-idr-p nal) (setf (sh-idr-pic-id sh) (ue br)))

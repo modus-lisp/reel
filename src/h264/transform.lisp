@@ -42,7 +42,7 @@ just far too small to matter, so the output looks like prediction alone.")
   (fill block d)
   block)
 
-(defun dequant-4x4 (coeffs out qp &key (start 0) (end 15))
+(defun dequant-4x4 (coeffs out qp &key (start 0) (end 15) (weights +flat-scale-4x4+))
   "Dequantise a 4x4 block.  COEFFS is in SCAN order, OUT is filled in RASTER order.
 
    START is 1 for the AC-only block of an Intra16x16 macroblock, whose DC came from the separate
@@ -53,7 +53,8 @@ just far too small to matter, so the output looks like prediction alone.")
    block with two coefficients has fourteen positions nobody need look at.  OUT is zeroed first,
    so positions past END — and zeros inside the range — need no work at all."
   (declare (optimize (speed 3) (safety 1)))
-  (declare (type (simple-array fixnum (*)) coeffs out) (type fixnum qp start end))
+  (declare (type (simple-array fixnum (*)) coeffs out) (type fixnum qp start end)
+           (type (simple-array (unsigned-byte 8) (16)) weights))
   (fill out 0)
   ;; END is -1 when the block carried nothing, and below START when everything it carried was the
   ;; DC the caller supplies separately.  Either way the zeroed OUT is already the answer.
@@ -67,8 +68,10 @@ just far too small to matter, so the output looks like prediction alone.")
           ;; saying so is what turns this loop into machine arithmetic.
           for c of-type (signed-byte 26) = (aref coeffs scan)
           do (let* ((raster (aref +zigzag-4x4+ scan))
+                    ;; the transmitted weight for this POSITION, which is 16 everywhere
+                    ;; unless the stream sent a scaling list
                     (scale (the (integer 0 8192)
-                                (* +flat-weight-scale+
+                                (* (aref weights raster)
                                    (aref +dequant-coeff+ m (aref +dequant-class+ raster))))))
                (declare (type (integer 0 15) raster))
                (unless (zerop c)
@@ -111,7 +114,7 @@ just far too small to matter, so the output looks like prediction alone.")
 
 ;;; ---- the DC transforms -------------------------------------------------------------------------
 
-(defun luma-dc-transform (dc qp)
+(defun luma-dc-transform (dc qp &optional (w0 16))
   "The 4x4 Hadamard over an Intra16x16 macroblock's sixteen DC coefficients (8.5.10).
 
    An Intra16x16 macroblock codes the DC of its sixteen 4x4 blocks as a block of its own,
@@ -142,7 +145,7 @@ just far too small to matter, so the output looks like prediction alone.")
             (aref dc (+ j 8)) (- s2 s3) (aref dc (+ j 12)) (+ s2 s3))))
   ;; then scale, with the same qp split as everywhere else
   (let* ((m (mod qp 6)) (e (floor qp 6))
-         (scale (* +flat-weight-scale+ (aref +dequant-coeff+ m 0))))
+         (scale (* w0 (aref +dequant-coeff+ m 0))))
     (declare (type fixnum m e scale))
     (dotimes (i 16 dc)
       (setf (aref dc i)
@@ -150,14 +153,14 @@ just far too small to matter, so the output looks like prediction alone.")
                 (ash (* (aref dc i) scale) (- e 6))
                 (ash (+ (* (aref dc i) scale) (ash 1 (- 5 e))) (- (- 6 e))))))))
 
-(defun chroma-dc-transform (dc qp)
+(defun chroma-dc-transform (dc qp &optional (w0 16))
   "The 2x2 Hadamard over a chroma component's four DC coefficients (8.5.11).  DC is four elements."
   (declare (optimize (speed 3) (safety 1)))
   (declare (type (simple-array fixnum (*)) dc) (type fixnum qp))
   (let* ((a (aref dc 0)) (b (aref dc 1)) (c (aref dc 2)) (d (aref dc 3))
          (e0 (+ a b)) (e1 (- a b)) (e2 (+ c d)) (e3 (- c d))
          (m (mod qp 6)) (e (floor qp 6))
-         (scale (* +flat-weight-scale+ (aref +dequant-coeff+ m 0))))
+         (scale (* w0 (aref +dequant-coeff+ m 0))))
     (declare (type fixnum a b c d e0 e1 e2 e3 m e scale))
     (setf (aref dc 0) (+ e0 e2) (aref dc 1) (+ e1 e3)
           (aref dc 2) (- e0 e2) (aref dc 3) (- e1 e3))

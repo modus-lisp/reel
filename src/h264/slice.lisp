@@ -352,6 +352,13 @@ order count can be negative, so absence needs a value no picture can hold.")
           mode)))
 
 
+(declaim (inline %scale-list))
+(defun %scale-list (ss idx)
+  "The weight matrix for one of the six block kinds: intra Y, Cb, Cr then inter Y, Cb, Cr.
+   Flat when the stream sent no scaling list, which is the overwhelming majority of streams."
+  (let ((m (sh-scale-4x4 (ss-sh ss))))
+    (if m (aref m idx) +flat-scale-4x4+)))
+
 ;;; ---- the two entropy coders, behind one interface ------------------------------------------------
 ;;;
 ;;; CAVLC and CABAC disagree about how every syntax element is spelled, and agree completely about
@@ -534,7 +541,8 @@ order count can be negative, so absence needs a value no picture can hold.")
                           (coerce (ss-coeffs ss) 'list)))
                 (set-luma-nz ss blk n)
                 (when (plusp n)
-                  (dequant-4x4 (ss-coeffs ss) (ss-block ss) (ss-qp ss) :end hi)
+                  (dequant-4x4 (ss-coeffs ss) (ss-block ss) (ss-qp ss) :end hi
+                                                    :weights (%scale-list ss 0))
                   (if (zerop hi)
                       (idct-4x4-dc (ss-block ss) (aref (ss-block ss) 0))
                       (idct-4x4 (ss-block ss)))
@@ -571,7 +579,7 @@ order count can be negative, so absence needs a value no picture can hold.")
           ;; the DC block's own coefficients are in scan order; un-scan them into raster
           (fill dc 0)
           (dotimes (i 16) (setf (aref dc (aref +zigzag-4x4+ i)) (aref (ss-coeffs ss) i))))
-        (luma-dc-transform dc (ss-qp ss))
+        (luma-dc-transform dc (ss-qp ss) (aref (%scale-list ss 0) 0))
         ;; then every 4x4's AC, with that block's DC substituted in
         (dotimes (blk 16)
           (let ((bbase (+ base (* (aref +blk-y+ blk) 4 (pic-ystride pic))
@@ -584,7 +592,8 @@ order count can be negative, so absence needs a value no picture can hold.")
                            (multiple-value-setq (n hi)
                              (%residual ss (ss-coeffs ss) :cat +cat-luma-ac+ :nc (luma-nc ss blk)
                                                           :max-coeff 15 :start 1 :bx bx :by by)))
-                         (dequant-4x4 (ss-coeffs ss) (ss-block ss) (ss-qp ss) :start 1 :end hi))
+                         (dequant-4x4 (ss-coeffs ss) (ss-block ss) (ss-qp ss) :start 1 :end hi
+                                                          :weights (%scale-list ss 0)))
                   (fill (ss-block ss) 0))
               (set-luma-nz ss blk n)
               ;; the DC comes from the second-order transform, not from this block's own scan
@@ -635,7 +644,8 @@ order count can be negative, so absence needs a value no picture can hold.")
               (setf (aref (pic-mb-dc-cbf pic) (%mb-index ss))
                     (logior (aref (pic-mb-dc-cbf pic) (%mb-index ss)) (ash 1 (1+ plane))))))
           (dotimes (i 4) (setf (aref dc i) (aref (ss-coeffs ss) i)))
-          (chroma-dc-transform dc (aref qps plane)))))
+          (chroma-dc-transform dc (aref qps plane)
+                               (aref (%scale-list ss (+ (if mode 1 4) plane)) 0)))))
     ;; then the AC blocks, all of Cb's before any of Cr's
     (dotimes (plane 2)
       (let ((data (aref planes plane)) (qpc (aref qps plane)) (dc (aref dcs plane)))
@@ -651,7 +661,8 @@ order count can be negative, so absence needs a value no picture can hold.")
                                                           :nc (chroma-nc ss plane blk)
                                                           :max-coeff 15 :start 1
                                                           :bx bx :by by :plane plane)))
-                         (dequant-4x4 (ss-coeffs ss) (ss-block ss) qpc :start 1 :end hi))
+                         (dequant-4x4 (ss-coeffs ss) (ss-block ss) qpc :start 1 :end hi
+                                                     :weights (%scale-list ss (+ (if mode 1 4) plane))))
                   (fill (ss-block ss) 0))
               (set-chroma-nz ss plane blk n)
               (setf (aref (ss-block ss) 0) (aref dc blk))
@@ -759,7 +770,8 @@ order count can be negative, so absence needs a value no picture can hold.")
               (declare (type fixnum n hi))
               (set-luma-nz ss blk n)
               (when (plusp n)
-                (dequant-4x4 (ss-coeffs ss) (ss-block ss) (ss-qp ss) :end hi)
+                (dequant-4x4 (ss-coeffs ss) (ss-block ss) (ss-qp ss) :end hi
+                                                  :weights (%scale-list ss 3))
                 (if (zerop hi)
                     (idct-4x4-dc (ss-block ss) (aref (ss-block ss) 0))
                     (idct-4x4 (ss-block ss)))

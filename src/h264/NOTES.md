@@ -151,33 +151,52 @@ Every one was a neighbour that had been decoded but did not look decoded, or the
 (9.3.3.1.1.6): a skipped B macroblock does have a direct-derived reference index, and counting it
 desynchronises within a couple of dozen slices. That was verified by breaking it on purpose.
 
-## Known gap: temporal direct with more than one reference
+## Fixed: reference identity was stored as frame_num, not order count
 
-**Isolated, reproducible in seconds, not yet fixed.** Three fixtures pin it down exactly:
+Temporal direct with more than one reference picture used to decode wrong. The cause was that the
+per-block "which picture did this come from" array held **frame_num** on the P path and **picture
+order count** on the B path. Temporal direct READS THAT BACK from a previously decoded picture and
+looks it up in the current list 0, so it compared one kind of number against the other, missed, and
+silently fell back to index 0.
 
-| fixture | direct mode | references | result |
-|---|---|---|---|
-| `bs-r3` | spatial | 3 | bit-exact |
-| `bt-r1` | temporal | 1 | bit-exact |
-| `bt-r3` | temporal | 3 | 13 frames of 30 wrong |
+Invisible with one reference picture, because index 0 is the only answer there is. Wrong with
+several. Frame_num does not identify a picture anyway — every non-reference picture between two
+references shares one — so the order count is the right thing to store, and `%ref-picture-id` now
+returns it.
 
-So it is neither temporal direct nor multiple references on their own — it is the two together.
-`b-hard` is the same fault with everything else turned on as well, where it desynchronises rather
-than merely predicting wrong.
+Three fixtures hold that down: `bt-r3`, `bs-r3` and `bt-r1`. Neither temporal direct nor multiple
+references fails alone, which is why all three are kept.
 
-What has been checked and is NOT the cause: the scaling arithmetic (worked through by hand against
-8.4.1.2.3 for a real block and it agrees), the reference lookup for that block, the choice of
-co-located picture, and the list construction. `truncate` replaced `floor` in the distance scaling
-along the way, which is correct — the specification's division truncates toward zero and they part
-company for negative distances — but it was not this bug.
+## Known gap: one bin, in a rare configuration
 
-An ordinary YouTube file (Main, CABAC, B slices, implicit weighted bi-prediction) decodes **236 of
-its pictures bit-exactly** and then desynchronises inside the 237th. That was tracked to a single
-macroblock by comparing per-macroblock quantiser maps from `ffmpeg -debug qp` against the decoder's
-own — rows 0 to 7 agree exactly, including every quantiser change, and row 8 diverges at column 9.
-`ffmpeg -debug mb_type` gives the same for macroblock types, and is worth knowing about: its
-`>` means list-0-only and `<` means list-1-only, which is the opposite of what the characters
-suggest, and reading them the natural way invents a bug that is not there.
+`b-hard` (320x240, everything on at once) and an ordinary YouTube file both still desynchronise.
+The YouTube file decodes 236 pictures bit-exactly and fails in the 237th; `b-hard` fails in its 7th
+slice and reproduces in seconds.
+
+In `b-hard` the divergence is narrowed to a **single bin**. Everything before macroblock (1,3) of
+that slice is verified identical to ffmpeg: 60 macroblocks matching in type, in partition shape, in
+skip-versus-coded status, and pixel for pixel. The skip flag's context index is right there
+(neighbours skip and coded, so ctxIdxInc 1). Since the arithmetic decoder's state is a pure
+function of the bins consumed, some earlier macroblock must have consumed a different number of
+bins in a way that changed neither pixels nor types. The quantiser is uniform across that picture,
+which means a `mb_qp_delta` of zero read or not read would be entirely invisible — that is the
+first thing to check.
+
+### The tooling, which is the useful part
+
+`ffmpeg -v debug -threads 1 -debug mb_type` and `-debug qp` print per-macroblock maps, and
+`-threads 1` matters because frame threads interleave the log lines into nonsense. Two things about
+the map are not guessable and cost hours if assumed:
+
+- **`>` is list-0-only and `<` is list-1-only**, which is the opposite of what the arrows suggest.
+  Reading them naturally invents a list swap that is not there.
+- **Lowercase `d` is direct AND skipped; uppercase `D` is direct but coded.** The suffix character
+  is the partition shape: `+` is 8x8, `-` is 16x8, `|` is 8x16, space is 16x16. Without the suffix
+  a B_8x8 and a bi-predicted 16x16 look identical, and they consume wildly different numbers of
+  bins.
+
+The quantiser map is the sharpest tracer when a picture has quantiser changes in it: comparing it
+against the decoder's own `pic-mb-qps` located the YouTube fault to one macroblock in one run.
 
 ## Performance
 

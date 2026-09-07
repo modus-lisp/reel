@@ -669,11 +669,20 @@ order count can be negative, so absence needs a value no picture can hold.")
   (let ((pic (ss-pic ss)))
     (dotimes (j hb) (dotimes (i wb) (set-blk-mvd pic (+ bx i) (+ by j) dx dy lx)))))
 
-(defun %ref-picture-id (ss ref)
-  "A stable identity for the picture at list index REF: its frame_num, which is unique among the
-   references in the buffer.  -1 where there is no reference at all."
-  (let ((v (ss-reflist ss)))
-    (if (and (>= ref 0) (< ref (length v))) (pic-frame-num (aref v ref)) -1)))
+(defun %ref-picture-poc (ss ref-idx lx)
+  (let ((v (if (zerop lx) (ss-reflist ss) (or (ss-reflist1 ss) #()))))
+    (if (and (>= ref-idx 0) (< ref-idx (length v))) (pic-poc (aref v ref-idx)) +no-ref-poc+)))
+
+(defun %ref-picture-id (ss ref &optional (lx 0))
+  "The identity of the picture at index REF of list LX, as its PICTURE ORDER COUNT.
+
+   It must be the order count and not frame_num, for two reasons.  Frame_num does not identify a
+   picture — every non-reference picture between two references shares one — and, more sharply,
+   temporal direct prediction READS THIS BACK from a previously decoded picture and looks it up in
+   the current list 0.  Storing one kind of number here and comparing it against another produces a
+   lookup that silently misses and falls back to index 0.  That is invisible with a single
+   reference picture, because index 0 is the only answer there is, and wrong with several."
+  (%ref-picture-poc ss ref lx))
 
 (defun %set-partition-motion (ss bx by wb hb mvx mvy ref)
   "Record one partition's vector on every 4x4 block it covers.
@@ -701,9 +710,6 @@ order count can be negative, so absence needs a value no picture can hold.")
         (aref v ref-idx)
         (%err "ref_idx ~d, but list ~d holds ~d picture~:p" ref-idx lx (length v)))))
 
-(defun %ref-picture-poc (ss ref-idx lx)
-  (let ((v (if (zerop lx) (ss-reflist ss) (or (ss-reflist1 ss) #()))))
-    (if (and (>= ref-idx 0) (< ref-idx (length v))) (pic-poc (aref v ref-idx)) +no-ref-poc+)))
 
 (defun %mc-partition (ss ref-pic px py w h mvx mvy &optional (ref 0) (lx 0) skip-weight)
   "Motion compensate one partition, luma and both chroma planes, into the current picture, and

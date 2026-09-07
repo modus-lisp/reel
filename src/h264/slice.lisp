@@ -80,6 +80,7 @@
   ;; prediction correct without either of them having to learn about inter macroblocks.
   (mb-types (%emptyfx) :type fixnums)
   (mb-qps (%emptyfx) :type fixnums)
+  (frame-num 0 :type fixnum)            ; this picture's frame_num, which is its PicNum for a frame
   ;; motion, per 4x4 block: two components each, in quarter-pel units, and the reference index
   ;; (-1 where the block is intra).  The loop filter reads both, and so does the next picture.
   (mvs (%emptyfx) :type fixnums)
@@ -87,6 +88,10 @@
   ;; the coded DIFFERENCES, which only CABAC needs: the context for a vector difference is chosen
   ;; from how large the neighbouring differences were, not from the vectors themselves
   (mvds (%emptyfx) :type fixnums)
+  ;; WHICH PICTURE each block referred to, not which index referred to it.  The loop filter asks
+  ;; whether two blocks came from the same picture (8.7.2.1), and with a reordered list the same
+  ;; picture can sit at two different indices — which is exactly what weighted prediction does.
+  (ref-pics (%emptyfx) :type fixnums)
   ;; Per macroblock, and only CABAC reads them: it chooses a context for nearly every syntax
   ;; element from what the neighbouring macroblocks decoded, so facts CAVLC could forget as soon
   ;; as it used them have to survive here.
@@ -115,6 +120,7 @@
      :mvs (make-array (* mbw 4 mbh 4 2) :element-type 'fixnum :initial-element 0)
      :refs (make-array (* mbw 4 mbh 4) :element-type 'fixnum :initial-element -1)
      :mvds (make-array (* mbw 4 mbh 4 2) :element-type 'fixnum :initial-element 0)
+     :ref-pics (make-array (* mbw 4 mbh 4) :element-type 'fixnum :initial-element -1)
      :mb-cbp (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0)
      :mb-chroma-mode (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0)
      :mb-dc-cbf (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0))))
@@ -418,6 +424,7 @@
     (let ((bx (* 4 (ss-mbx ss))) (by (* 4 (ss-mby ss))))
       (dotimes (j 4) (dotimes (i 4)
                        (set-blk-mv pic (+ bx i) (+ by j) 0 0 -1)
+                       (setf (aref (pic-ref-pics pic) (%mv-index pic (+ bx i) (+ by j))) -1)
                        (set-blk-mvd pic (+ bx i) (+ by j) 0 0))))
     (if (zerop mb-type)
         (decode-i4x4-macroblock ss)
@@ -634,6 +641,12 @@
   (let ((pic (ss-pic ss)))
     (dotimes (j hb) (dotimes (i wb) (set-blk-mvd pic (+ bx i) (+ by j) dx dy)))))
 
+(defun %ref-picture-id (ss ref)
+  "A stable identity for the picture at list index REF: its frame_num, which is unique among the
+   references in the buffer.  -1 where there is no reference at all."
+  (let ((v (ss-reflist ss)))
+    (if (and (>= ref 0) (< ref (length v))) (pic-frame-num (aref v ref)) -1)))
+
 (defun %set-partition-motion (ss bx by wb hb mvx mvy ref)
   "Record one partition's vector on every 4x4 block it covers.
 
@@ -642,10 +655,12 @@
    strength all ask about 4x4 blocks and do not care how they were grouped."
   (declare (optimize (speed 3) (safety 1)))
   (let ((pic (ss-pic ss))
+        (rid (%ref-picture-id ss ref))
         (bx0 (* 4 (ss-mbx ss))) (by0 (* 4 (ss-mby ss))))
     (dotimes (j hb)
       (dotimes (i wb)
         (set-blk-mv pic (+ bx i) (+ by j) mvx mvy ref)
+        (setf (aref (pic-ref-pics pic) (%mv-index pic (+ bx i) (+ by j))) rid)
         (let ((lx (- (+ bx i) bx0)) (ly (- (+ by j) by0)))
           (when (and (<= 0 lx 3) (<= 0 ly 3))
             (setf (ss-mb-done ss) (logior (ss-mb-done ss) (ash 1 (+ (* 4 ly) lx))))))))))
@@ -658,19 +673,28 @@
         (aref v ref-idx)
         (%err "ref_idx ~d, but list 0 holds ~d picture~:p" ref-idx (length v)))))
 
-(defun %mc-partition (ss ref-pic px py w h mvx mvy)
-  "Motion compensate one partition, luma and both chroma planes, into the current picture."
+(defun %mc-partition (ss ref-pic px py w h mvx mvy &optional (ref 0))
+  "Motion compensate one partition, luma and both chroma planes, into the current picture, and
+   apply this reference's weight if the slice carries a prediction weight table."
   (declare (optimize (speed 3) (safety 1)))
-  (let ((pic (ss-pic ss)))
-    (predict-luma (pic-y pic) (pic-ystride pic)
-                  (+ (pic-yoff pic) (* py (pic-ystride pic)) px)
-                  ref-pic px py w h mvx mvy)
-    (let ((cx (ash px -1)) (cy (ash py -1)) (cw (ash w -1)) (ch (ash h -1)))
-      (let ((cbase (+ (pic-coff pic) (* cy (pic-cstride pic)) cx)))
-        (predict-chroma (pic-u pic) (pic-u ref-pic) (pic-cstride pic) cbase
-                        ref-pic cx cy cw ch mvx mvy)
-        (predict-chroma (pic-v pic) (pic-v ref-pic) (pic-cstride pic) cbase
-                        ref-pic cx cy cw ch mvx mvy)))))
+  (let* ((pic (ss-pic ss)) (sh (ss-sh ss))
+         (ybase (+ (pic-yoff pic) (* py (pic-ystride pic)) px))
+         (cx (ash px -1)) (cy (ash py -1)) (cw (ash w -1)) (ch (ash h -1))
+         (cbase (+ (pic-coff pic) (* cy (pic-cstride pic)) cx)))
+    (predict-luma (pic-y pic) (pic-ystride pic) ybase ref-pic px py w h mvx mvy)
+    (predict-chroma (pic-u pic) (pic-u ref-pic) (pic-cstride pic) cbase
+                    ref-pic cx cy cw ch mvx mvy)
+    (predict-chroma (pic-v pic) (pic-v ref-pic) (pic-cstride pic) cbase
+                    ref-pic cx cy cw ch mvx mvy)
+    (when (sh-weighted-p sh)
+      (let ((lw (sh-luma-weights sh)) (cwt (sh-chroma-weights sh)))
+        (when (and lw (< ref (array-dimension lw 0)))
+          (apply-weight (pic-y pic) (pic-ystride pic) ybase w h
+                        (aref lw ref 0) (aref lw ref 1) (sh-luma-log2-denom sh))
+          (apply-weight (pic-u pic) (pic-cstride pic) cbase cw ch
+                        (aref cwt ref 0 0) (aref cwt ref 0 1) (sh-chroma-log2-denom sh))
+          (apply-weight (pic-v pic) (pic-cstride pic) cbase cw ch
+                        (aref cwt ref 1 0) (aref cwt ref 1 1) (sh-chroma-log2-denom sh)))))))
 
 (defun %inter-luma-residual (ss cbp)
   "The luma residual of an inter macroblock: no prediction step, because motion compensation has
@@ -788,7 +812,7 @@
                          (mvx (+ mpx dx)) (mvy (+ mpy dy)))
                     (%set-partition-mvd ss bx by (ash sw -2) (ash shh -2) dx dy)
                     (%set-partition-motion ss bx by (ash sw -2) (ash shh -2) mvx mvy ref)
-                    (%mc-partition ss (%ref-picture ss ref) (+ px sx) (+ py sy) sw shh mvx mvy)))))))
+                    (%mc-partition ss (%ref-picture ss ref) (+ px sx) (+ py sy) sw shh mvx mvy ref)))))))
         (let ((across (floor 16 pw)))
           (dotimes (i nparts)
             (let* ((sx (* pw (mod i across))) (sy (* ph (floor i across)))
@@ -801,7 +825,7 @@
                        (mvx (+ mpx dx)) (mvy (+ mpy dy)))
                   (%set-partition-mvd ss bx by (ash pw -2) (ash ph -2) dx dy)
                   (%set-partition-motion ss bx by (ash pw -2) (ash ph -2) mvx mvy ref)
-                  (%mc-partition ss (%ref-picture ss ref) (+ px sx) (+ py sy) pw ph mvx mvy)))))))
+                  (%mc-partition ss (%ref-picture ss ref) (+ px sx) (+ py sy) pw ph mvx mvy ref)))))))
     ;; 4. the residual, on top of what motion compensation predicted
     (let ((cbp (%read-cbp ss nil)))
       (setf (aref (pic-mb-cbp pic) mbi) cbp)

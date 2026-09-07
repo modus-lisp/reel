@@ -143,10 +143,18 @@ negative slice offset still lands inside the array instead of before it.")
                  (plusp (aref (pic-nz-y pic) (+ (* qby gw) qbx))))
              2
              (multiple-value-bind (pmx pmy pref) (blk-mv pic pbx pby)
+               (declare (ignore pref))
                (multiple-value-bind (qmx qmy qref) (blk-mv pic qbx qby)
-                 ;; a quarter-pel difference of 4 is one whole sample, which is the specification's
-                 ;; threshold for "these two blocks did not move together"
-                 (if (or (/= pref qref)
+                 (declare (ignore qref))
+                 ;; THE PICTURES, not the indices.  8.7.2.1 compares which picture each side came
+                 ;; from "without regard to the index position within a reference picture list" —
+                 ;; and a list reordered for weighted prediction holds the same picture at two
+                 ;; indices, so comparing indices filters edges that have no seam.
+                 ;;
+                 ;; A quarter-pel difference of 4 is one whole sample, which is the threshold for
+                 ;; "these two blocks did not move together".
+                 (if (or (/= (aref (pic-ref-pics pic) (+ (* pby gw) pbx))
+                             (aref (pic-ref-pics pic) (+ (* qby gw) qbx)))
                          (>= (abs (- pmx qmx)) 4)
                          (>= (abs (- pmy qmy)) 4))
                      1

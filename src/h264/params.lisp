@@ -159,6 +159,11 @@
   ;; at all on a stream with more than one reference, and desynchronises the slice.
   (num-ref-idx-l0 nil)
   (cabac-init-idc 0)
+  ;; explicit weighted prediction (7.4.3.2): a scale and an offset per reference picture, applied
+  ;; to the motion-compensated prediction before the residual is added
+  (weighted-p nil)
+  (luma-log2-denom 0) (chroma-log2-denom 0)
+  (luma-weights nil) (chroma-weights nil)
   (ref-list-reordering '())
   (no-output-of-prior-pics nil) (long-term-reference nil)
   (adaptive-ref-marking nil)
@@ -172,6 +177,29 @@
 
 (defun sh-i-slice-p (sh) (eq (slice-type-name (sh-slice-type sh)) :i))
 (defun sh-p-slice-p (sh) (eq (slice-type-name (sh-slice-type sh)) :p))
+
+(defun parse-pred-weight-table (br sh)
+  "pred_weight_table (7.3.3.2), list 0 only — which is all a P slice has.
+
+   A reference with no flag of its own is not unweighted-by-omission: it takes the DEFAULT weight,
+   which is 1 at the current denominator, and that is not the same as skipping the arithmetic."
+  (let* ((n (max 1 (or (sh-num-ref-idx-l0 sh) 1)))
+         (lw (make-array (list n 2) :element-type 'fixnum))
+         (cw (make-array (list n 2 2) :element-type 'fixnum)))
+    (setf (sh-weighted-p sh) t
+          (sh-luma-log2-denom sh) (ue br)
+          (sh-chroma-log2-denom sh) (ue br))
+    (dotimes (i n)
+      (setf (aref lw i 0) (ash 1 (sh-luma-log2-denom sh)) (aref lw i 1) 0)
+      (when (= 1 (u1 br))
+        (setf (aref lw i 0) (se br) (aref lw i 1) (se br)))
+      (dotimes (j 2)
+        (setf (aref cw i j 0) (ash 1 (sh-chroma-log2-denom sh)) (aref cw i j 1) 0))
+      (when (= 1 (u1 br))
+        (dotimes (j 2)
+          (setf (aref cw i j 0) (se br) (aref cw i j 1) (se br)))))
+    (setf (sh-luma-weights sh) lw (sh-chroma-weights sh) cw)
+    sh))
 
 (defun parse-slice-header (br nal sps-table pps-table)
   "Parse a slice header from BR, which is positioned at the start of a slice NAL's RBSP.
@@ -213,7 +241,7 @@
                 do (push (cons op (ue br)) (sh-ref-list-reordering sh)))
           (setf (sh-ref-list-reordering sh) (nreverse (sh-ref-list-reordering sh)))))
       (when (and (pps-weighted-pred pps) (sh-p-slice-p sh))
-        (%err "weighted prediction is not supported"))
+        (parse-pred-weight-table br sh))
       ;; decoded reference picture marking
       (when (plusp (nal-ref-idc nal))
         (cond ((nal-idr-p nal)

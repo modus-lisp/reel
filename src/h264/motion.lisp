@@ -238,3 +238,26 @@
                 (and (zerop bref) (zerop bvx) (zerop bvy)))
             (values 0 0)
             (predict-mv ss bx by 4 0))))))
+
+;;; ---- weighted prediction (8.4.2.3) ---------------------------------------------------------------
+
+(defun apply-weight (plane stride base w h weight offset log2-denom)
+  "Scale and offset a predicted partition in place.
+
+   The rounding term exists only when the denominator does: at a denominator of zero there is
+   nothing to round and adding half of nothing shifts every sample by one."
+  (declare (type (simple-array (unsigned-byte 8) (*)) plane)
+           (type fixnum stride base w h weight offset log2-denom)
+           (optimize (speed 3) (safety 1)))
+  (let ((round (if (plusp log2-denom) (ash 1 (1- log2-denom)) 0)))
+    (declare (type fixnum round))
+    (dotimes (j h)
+      (let ((row (+ base (* j stride))))
+        (declare (type fixnum row))
+        (dotimes (i w)
+          (let* ((v (aref plane (+ row i)))
+                 (scaled (if (plusp log2-denom)
+                             (+ (ash (+ (* v weight) round) (- log2-denom)) offset)
+                             (+ (* v weight) offset))))
+            (declare (type fixnum v scaled))
+            (setf (aref plane (+ row i)) (clamp255 scaled))))))))

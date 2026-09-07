@@ -158,6 +158,7 @@
   ;; the fallback to the picture parameter set below unreachable — which reads no reference indices
   ;; at all on a stream with more than one reference, and desynchronises the slice.
   (num-ref-idx-l0 nil)
+  (cabac-init-idc 0)
   (ref-list-reordering '())
   (no-output-of-prior-pics nil) (long-term-reference nil)
   (adaptive-ref-marking nil)
@@ -185,7 +186,6 @@
                     (%err "PPS ~d refers to SPS ~d, which has not been seen"
                           (sh-pps-id sh) (pps-sps-id pps)))))
       (setf (sh-pps sh) pps (sh-sps sh) sps)
-      (when (pps-cabac pps) (%err "CABAC is not supported (Baseline is CAVLC)"))
       (setf (sh-frame-num sh) (ub br (sps-log2-max-frame-num sps)))
       ;; frame_mbs_only_flag is asserted in PARSE-SPS, so there is no field_pic_flag here
       (when (nal-idr-p nal) (setf (sh-idr-pic-id sh) (ue br)))
@@ -233,6 +233,11 @@
                             (6 (ue br))
                             (5 nil)
                             (t (%err "memory management control operation ~d" op))))))))
+      ;; 7.3.3 puts cabac_init_idc HERE: after the reference picture marking and immediately
+      ;; before slice_qp_delta.  A bit read in the wrong place costs the quantiser and everything
+      ;; after it, so the order matters more than it looks.
+      (when (and (pps-cabac pps) (not (sh-i-slice-p sh)))
+        (setf (sh-cabac-init-idc sh) (ue br)))
       (setf (sh-qp sh) (+ (pps-init-qp pps) (se br)))
       (when (pps-deblocking-control pps)
         (setf (sh-disable-deblocking sh) (ue br))

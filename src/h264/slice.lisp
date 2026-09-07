@@ -83,7 +83,13 @@
   ;; motion, per 4x4 block: two components each, in quarter-pel units, and the reference index
   ;; (-1 where the block is intra).  The loop filter reads both, and so does the next picture.
   (mvs (%emptyfx) :type fixnums)
-  (refs (%emptyfx) :type fixnums))
+  (refs (%emptyfx) :type fixnums)
+  ;; Per macroblock, and only CABAC reads them: it chooses a context for nearly every syntax
+  ;; element from what the neighbouring macroblocks decoded, so facts CAVLC could forget as soon
+  ;; as it used them have to survive here.
+  (mb-cbp (%emptyfx) :type fixnums)       ; coded_block_pattern, for the CBP contexts
+  (mb-chroma-mode (%emptyfx) :type fixnums) ; intra_chroma_pred_mode
+  (mb-dc-cbf (%emptyfx) :type fixnums))   ; bit 0 luma DC, 1 Cb DC, 2 Cr DC
 
 (defun make-picture-for (sps)
   (let* ((mbw (sps-mb-width sps)) (mbh (sps-mb-height sps))
@@ -104,7 +110,10 @@
      :mb-types (make-array (* mbw mbh) :element-type 'fixnum :initial-element -1)
      :mb-qps (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0)
      :mvs (make-array (* mbw 4 mbh 4 2) :element-type 'fixnum :initial-element 0)
-     :refs (make-array (* mbw 4 mbh 4) :element-type 'fixnum :initial-element -1))))
+     :refs (make-array (* mbw 4 mbh 4) :element-type 'fixnum :initial-element -1)
+     :mb-cbp (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0)
+     :mb-chroma-mode (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0)
+     :mb-dc-cbf (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0))))
 
 (declaim (inline pic-y-base pic-c-base))
 (defun pic-y-base (p mbx mby)
@@ -127,6 +136,7 @@
   ;; smaller than 8x8, where a partition's above-right neighbour can be a later partition of the
   ;; same macroblock.
   (mb-done 0 :type fixnum)
+  cabac                                         ; the arithmetic decoder, or NIL for CAVLC
   (mbx 0 :type fixnum) (mby 0 :type fixnum)
   (qp 26 :type fixnum)
   ;; typed for the same reason the picture's planes are: these are read and written per block
@@ -280,6 +290,58 @@
                    (+ (* 4 (ss-mbx ss)) (aref +blk-x+ blk))))
           mode)))
 
+
+;;; ---- the two entropy coders, behind one interface ------------------------------------------------
+;;;
+;;; CAVLC and CABAC disagree about how every syntax element is spelled, and agree completely about
+;;; what to do with the values once read.  Keeping the dispatch to these few functions is what lets
+;;; one reconstruction path serve both: the prediction, the transforms and the loop filter never
+;;; learn which entropy coder the slice used.
+
+(declaim (ftype function cabac-mb-type-i cabac-intra-chroma-mode cabac-intra4x4-mode
+                cabac-cbp cabac-mb-qp-delta cabac-residual-block init-cabac decode-terminate
+                cb-last-qp-delta))
+
+(defun %read-intra4x4-mode (ss blk)
+  (if (ss-cabac ss)
+      (cabac-intra4x4-mode ss blk)
+      (let* ((br (ss-br ss)) (pred (predicted-mode ss blk)) (flag (u1 br)))
+        (if (= flag 1)
+            pred
+            (let ((rem (ub br 3))) (if (< rem pred) rem (1+ rem)))))))
+
+(defun %read-chroma-mode (ss)
+  (if (ss-cabac ss) (cabac-intra-chroma-mode ss) (%chroma-pred-mode (ss-br ss))))
+
+(defun %read-cbp (ss intra-p)
+  (if (ss-cabac ss)
+      (cabac-cbp ss)
+      (let ((code (ue (ss-br ss))))
+        (if (< code 48)
+            (aref (if intra-p +intra4x4-cbp+ +inter-cbp+) code)
+            (%err "coded_block_pattern code ~d" code)))))
+
+(defun %read-qp-delta (ss)
+  (if (ss-cabac ss) (cabac-mb-qp-delta ss) (se (ss-br ss))))
+
+(defun %no-qp-delta (ss)
+  "A macroblock that codes no mb_qp_delta still counts as `the previous one had none\', which is
+   what the first bin\'s context asks about."
+  (when (ss-cabac ss) (setf (cb-last-qp-delta (ss-cabac ss)) 0)))
+
+(defun %residual (ss coeffs &key cat nc max-coeff (start 0) (bx 0) (by 0) (plane 0))
+  "One residual block through whichever entropy coder this slice uses.  Both return
+   (values count highest-scan-position)."
+  (if (ss-cabac ss)
+      (cabac-residual-block ss cat coeffs bx by plane :start start)
+      (residual-block (ss-br ss) coeffs nc max-coeff :start start)))
+
+(declaim (inline %luma-blk-xy %chroma-blk-xy))
+(defun %luma-blk-xy (ss blk)
+  (values (+ (* 4 (ss-mbx ss)) (aref +blk-x+ blk)) (+ (* 4 (ss-mby ss)) (aref +blk-y+ blk))))
+(defun %chroma-blk-xy (ss blk)
+  (values (+ (* 2 (ss-mbx ss)) (mod blk 2)) (+ (* 2 (ss-mby ss)) (floor blk 2))))
+
 ;;; ---- one macroblock ------------------------------------------------------------------------------
 
 (defun up-right-available-p (ss blk)
@@ -357,22 +419,20 @@
     (declare (dynamic-extent modes))
     ;; the sixteen prediction modes, each coded against its neighbours' minimum
     (dotimes (blk 16)
-      (let* ((pred (predicted-mode ss blk))
-             (flag (u1 br))
-             (rem (if (= flag 1) nil (ub br 3)))
-             (mode (if (= flag 1) pred (if (< rem pred) rem (1+ rem)))))
+      (let ((mode (%read-intra4x4-mode ss blk)))
         (when-debug-blk ((%mb-index ss) :modes)
-          (format t "~&  blk ~2d: pred=~d flag=~d rem=~a -> mode ~d~%" blk pred flag rem mode))
+          (format t "~&  blk ~2d: mode ~d~%" blk mode))
         (setf (aref modes blk) mode)
         (set-mode ss blk mode)))
-    (let* ((chroma-mode (%chroma-pred-mode br))
-           (cbp-code (ue br))
-           (cbp (if (< cbp-code 48)
-                    (aref +intra4x4-cbp+ cbp-code)
-                    (%err "coded_block_pattern code ~d" cbp-code))))
-      (when (plusp cbp)
-        (incf (ss-qp ss) (se br))
-        (setf (ss-qp ss) (mod (+ (ss-qp ss) 52) 52)))
+    (let* ((mbi (%mb-index ss))
+           (chroma-mode (%read-chroma-mode ss))
+           (cbp (%read-cbp ss t)))
+      (setf (aref (pic-mb-chroma-mode pic) mbi) chroma-mode
+            (aref (pic-mb-cbp pic) mbi) cbp)
+      (if (plusp cbp)
+          (progn (incf (ss-qp ss) (%read-qp-delta ss))
+                 (setf (ss-qp ss) (mod (+ (ss-qp ss) 52) 52)))
+          (%no-qp-delta ss))
       ;; luma: predict and reconstruct each 4x4 in turn, because each one predicts from the
       ;; reconstruction of the ones before it
       (dotimes (blk 16)
@@ -402,7 +462,10 @@
               (setf (aref (pic-y pic) (+ base (* i (pic-ystride pic)) j))
                     (aref (ss-pred ss) (+ (* i 4) j)))))
           (if (logbitp (ash blk -2) cbp)
-              (multiple-value-bind (n hi) (residual-block br (ss-coeffs ss) (luma-nc ss blk) 16)
+              (multiple-value-bind (n hi)
+                  (multiple-value-bind (bx by) (%luma-blk-xy ss blk)
+                    (%residual ss (ss-coeffs ss) :cat +cat-luma+ :nc (luma-nc ss blk)
+                                                 :max-coeff 16 :bx bx :by by))
                 (declare (type fixnum n hi))
                 (when-debug-blk ((%mb-index ss) blk)
                   (format t "   nc=~d n=~d coeffs(scan)=~a~%" (luma-nc ss blk) n
@@ -427,17 +490,22 @@
          (cbp-chroma (mod (floor code 4) 3))
          (cbp-luma (if (>= code 12) 15 0))
          (base (pic-y-base pic (ss-mbx ss) (ss-mby ss))))
-    (let* ((chroma-mode (%chroma-pred-mode br))
+    (let* ((mbi (%mb-index ss))
+           (chroma-mode (%read-chroma-mode ss))
            (cbp (logior cbp-luma (ash cbp-chroma 4))))
+      (setf (aref (pic-mb-chroma-mode pic) mbi) chroma-mode
+            (aref (pic-mb-cbp pic) mbi) cbp)
       ;; an Intra16x16 macroblock always carries a QP delta, because it always has a DC block
-      (incf (ss-qp ss) (se br))
+      (incf (ss-qp ss) (%read-qp-delta ss))
       (setf (ss-qp ss) (mod (+ (ss-qp ss) 52) 52))
       (intra16x16-predict (pic-y pic) (pic-ystride pic) base pred-mode
                           (mb-available-p ss 0 -1) (mb-available-p ss -1 0))
       ;; the DC block: sixteen coefficients, one per 4x4, transformed again
       (let ((dc (ss-luma-dc ss)))
-        (let ((n (residual-block br (ss-coeffs ss) (luma-nc ss 0) 16)))
-          (declare (ignorable n))
+        (let ((n (%residual ss (ss-coeffs ss) :cat +cat-luma-dc+ :nc (luma-nc ss 0) :max-coeff 16)))
+          ;; CABAC asks its neighbours whether THEY had a luma DC block, so record that we did
+          (when (plusp n)
+            (setf (aref (pic-mb-dc-cbf pic) mbi) (logior (aref (pic-mb-dc-cbf pic) mbi) 1)))
           ;; the DC block's own coefficients are in scan order; un-scan them into raster
           (fill dc 0)
           (dotimes (i 16) (setf (aref dc (aref +zigzag-4x4+ i)) (aref (ss-coeffs ss) i))))
@@ -450,8 +518,10 @@
             (let ((hi -1))
               (declare (type fixnum hi))
               (if (logbitp (ash blk -2) cbp-luma)
-                  (progn (multiple-value-setq (n hi)
-                           (residual-block br (ss-coeffs ss) (luma-nc ss blk) 15 :start 1))
+                  (progn (multiple-value-bind (bx by) (%luma-blk-xy ss blk)
+                           (multiple-value-setq (n hi)
+                             (%residual ss (ss-coeffs ss) :cat +cat-luma-ac+ :nc (luma-nc ss blk)
+                                                          :max-coeff 15 :start 1 :bx bx :by by)))
                          (dequant-4x4 (ss-coeffs ss) (ss-block ss) (ss-qp ss) :start 1 :end hi))
                   (fill (ss-block ss) 0))
               (set-luma-nz ss blk n)
@@ -497,7 +567,11 @@
     (when (plusp cbp-chroma)
       (dotimes (plane 2)
         (let ((dc (aref dcs plane)))
-          (residual-block br (ss-coeffs ss) -1 4)
+          (let ((n (%residual ss (ss-coeffs ss) :cat +cat-chroma-dc+ :nc -1 :max-coeff 4
+                                                :plane plane)))
+            (when (plusp n)
+              (setf (aref (pic-mb-dc-cbf pic) (%mb-index ss))
+                    (logior (aref (pic-mb-dc-cbf pic) (%mb-index ss)) (ash 1 (1+ plane))))))
           (dotimes (i 4) (setf (aref dc i) (aref (ss-coeffs ss) i)))
           (chroma-dc-transform dc (aref qps plane)))))
     ;; then the AC blocks, all of Cb's before any of Cr's
@@ -509,8 +583,12 @@
             (let ((hi -1))
               (declare (type fixnum hi))
               (if (= cbp-chroma 2)
-                  (progn (multiple-value-setq (n hi)
-                           (residual-block br (ss-coeffs ss) (chroma-nc ss plane blk) 15 :start 1))
+                  (progn (multiple-value-bind (bx by) (%chroma-blk-xy ss blk)
+                           (multiple-value-setq (n hi)
+                             (%residual ss (ss-coeffs ss) :cat +cat-chroma-ac+
+                                                          :nc (chroma-nc ss plane blk)
+                                                          :max-coeff 15 :start 1
+                                                          :bx bx :by by :plane plane)))
                          (dequant-4x4 (ss-coeffs ss) (ss-block ss) qpc :start 1 :end hi))
                   (fill (ss-block ss) 0))
               (set-chroma-nz ss plane blk n)
@@ -578,7 +656,10 @@
     (dotimes (blk 16)
       (let ((base (+ ybase (* (aref +blk-y+ blk) 4 (pic-ystride pic)) (* (aref +blk-x+ blk) 4))))
         (if (logbitp (ash blk -2) cbp)
-            (multiple-value-bind (n hi) (residual-block br (ss-coeffs ss) (luma-nc ss blk) 16)
+            (multiple-value-bind (n hi)
+                (multiple-value-bind (bx by) (%luma-blk-xy ss blk)
+                  (%residual ss (ss-coeffs ss) :cat +cat-luma+ :nc (luma-nc ss blk)
+                                               :max-coeff 16 :bx bx :by by))
               (declare (type fixnum n hi))
               (set-luma-nz ss blk n)
               (when (plusp n)
@@ -605,6 +686,9 @@
       (%mc-partition ss (ss-ref0 ss) (* 16 mbx) (* 16 mby) 16 16 mvx mvy))
     (dotimes (blk 16) (set-luma-nz ss blk 0))
     (dotimes (plane 2) (dotimes (blk 4) (set-chroma-nz ss plane blk 0)))
+    (setf (aref (pic-mb-cbp pic) mbi) 0
+          (aref (pic-mb-dc-cbf pic) mbi) 0)
+    (%no-qp-delta ss)
     (setf (aref (pic-mb-qps pic) mbi) (ss-qp ss))))
 
 (defun decode-p-macroblock (ss mb-type)
@@ -670,13 +754,12 @@
                   (%set-partition-motion ss bx by (ash pw -2) (ash ph -2) mvx mvy ref)
                   (%mc-partition ss (%ref-picture ss ref) (+ px sx) (+ py sy) pw ph mvx mvy)))))))
     ;; 4. the residual, on top of what motion compensation predicted
-    (let* ((cbp-code (ue br))
-           (cbp (if (< cbp-code 48)
-                    (aref +inter-cbp+ cbp-code)
-                    (%err "coded_block_pattern code ~d in a P macroblock" cbp-code))))
-      (when (plusp cbp)
-        (incf (ss-qp ss) (se br))
-        (setf (ss-qp ss) (mod (+ (ss-qp ss) 52) 52)))
+    (let ((cbp (%read-cbp ss nil)))
+      (setf (aref (pic-mb-cbp pic) mbi) cbp)
+      (if (plusp cbp)
+          (progn (incf (ss-qp ss) (%read-qp-delta ss))
+                 (setf (ss-qp ss) (mod (+ (ss-qp ss) 52) 52)))
+          (%no-qp-delta ss))
       (%inter-luma-residual ss cbp)
       (decode-chroma ss nil cbp)
       (setf (aref (pic-mb-qps pic) mbi) (ss-qp ss))
@@ -684,9 +767,13 @@
 
 (defun decode-slice (pic sh br &optional refs)
   "Decode every macroblock of a slice into PIC.  REFS is the list-0 reference picture vector."
-  (let* ((ss (make-slice-state :pic pic :sh sh :br br :qp (sh-qp sh)
+  (let* ((cabac-p (pps-cabac (sh-pps sh)))
+         (ss (make-slice-state :pic pic :sh sh :br br :qp (sh-qp sh)
                                :reflist (or refs #())
-                               :ref0 (and refs (plusp (length refs)) (aref refs 0))))
+                               :ref0 (and refs (plusp (length refs)) (aref refs 0))
+                               :cabac (when cabac-p
+                                        (init-cabac br (sh-qp sh) (sh-i-slice-p sh)
+                                                    (sh-cabac-init-idc sh)))))
          (mbw (pic-mb-width pic))
          (total (* mbw (pic-mb-height pic)))
          (mb (sh-first-mb sh))
@@ -694,11 +781,19 @@
     (unless (or (sh-i-slice-p sh) p-slice)
       (%err "only I and P slices are decoded so far; this is a ~a slice"
             (slice-type-name (sh-slice-type sh))))
-    (flet ((at (n) (setf (ss-mbx ss) (mod n mbw) (ss-mby ss) (floor n mbw))))
+    (when (and cabac-p p-slice)
+      (%err "CABAC is decoded for I slices so far; this is a P slice"))
+    (flet ((at (n) (setf (ss-mbx ss) (mod n mbw) (ss-mby ss) (floor n mbw)))
+           (more-p ()
+             ;; CABAC ends a slice with an explicit decision, not by running out of bits: the
+             ;; arithmetic decoder has no "am I at the end" to consult, so the encoder says so
+             (if cabac-p
+                 (zerop (decode-terminate (ss-cabac ss)))
+                 (more-rbsp-data-p br))))
       (loop
         (when (>= mb total) (return))
-        ;; a P slice codes a RUN of skipped macroblocks before each coded one, and the run may be
-        ;; the last thing in the slice — so the end-of-data test belongs after it, not before
+        ;; a CAVLC P slice codes a RUN of skipped macroblocks before each coded one, and the run
+        ;; may be the last thing in the slice — so the end-of-data test belongs after it
         (when p-slice
           (let ((skip (ue br)))
             (dotimes (i skip)
@@ -715,8 +810,7 @@
               (if (< mt 5)
                   (decode-p-macroblock ss mt)
                   (decode-intra-macroblock ss (- mt 5))))
-            (decode-i-macroblock ss))
+            (decode-intra-macroblock ss (if cabac-p (cabac-mb-type-i ss) (ue br))))
         (incf mb)
-        ;; the slice ends at its stop bit, not at a macroblock count it declares
-        (unless (more-rbsp-data-p br) (return))))
+        (unless (more-p) (return))))
     ss))

@@ -50,10 +50,12 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
        (:file "params")       ; sequence and picture parameter sets, slice headers
        (:file "tables")       ; the CAVLC VLC tables, the scan order, the dequant tables
        (:file "cavlc")        ; residual blocks: coeff_token, levels, runs
+       (:file "cabac-tables") ; GENERATED: the normative CABAC constants
        (:file "transform")    ; dequantisation, the inverse 4x4 and the DC transforms
        (:file "intra")        ; the nine 4x4, four 16x16 and four chroma prediction modes
        (:file "motion")       ; inter prediction: vector prediction and quarter-pel resampling
        (:file "slice")        ; the macroblock layer and the slice loop
+       (:file "cabac")        ; the arithmetic decoder, and the syntax read through it
        (:file "deblock-tables")  ; the loop filter's alpha/beta/tc0 thresholds
        (:file "deblock")      ; the in-loop deblocking filter
        (:file "decode")      ; NAL units in, pictures out

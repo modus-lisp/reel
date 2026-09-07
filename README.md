@@ -48,6 +48,12 @@ a different entropy coder, a different transform. What it does share is the *out
 picture type whichever codec produced it. See `src/h264/NOTES.md` for what is verified,
 which three bugs cost the most time, and what remains.
 
+## What plays, and what is next
+
+[FORMATS.md](FORMATS.md) is the road map for the whole media stack: what decodes today and what it
+was verified against, what is refused and why refusing loudly matters, and the gaps in the order
+they are worth closing.
+
 ## Using it
 
 ```lisp

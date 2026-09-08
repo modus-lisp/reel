@@ -161,6 +161,40 @@ both ways a frame may refresh its probability context.
 The one thing left out is prediction from a reference of a different size, which is refused with the
 sizes named.
 
+## Measured against the standards, not against ffmpeg
+
+Every fixture above is something ffmpeg, x264 or libvpx produced. A mainstream encoder uses a
+narrow slice of the standard it implements, so bit-exactness against its output is a weaker claim
+than it looks. `t/fetch-conformance.sh` pulls the official suites; here is what they say.
+
+| | result |
+|---|---|
+| **VP8**, the seventeen official libvpx vectors | **17 of 17 bit-exact**, 833 frames |
+| **VP9**, the official feature vectors | 28 of 34 bit-exact; 11 profile 1/2/3 streams correctly refused |
+| **H.264**, a spread of 37 JVT conformance streams | 17 bit-exact, 15 refused, 5 wrong |
+| **AC-3**, three real Dolby-encoded tracks | two at 0.9998; one is a near-silent excerpt where correlation measures rounding |
+
+What that exercise found, none of which the synthetic corpus could:
+
+- **VP9 had three interpolation filters and the format has four.** Bilinear is used at very low bit
+  rates and in speed-oriented encoder modes, so no ordinary encode contains one. Worse, the frame
+  header's "switchable" flag was stored in the same field as the filter number, using 3 as its
+  sentinel — and 3 is bilinear. Fixed.
+- **AC-3's dynamic range compression was entirely wrong**, and could not have been caught here:
+  ffmpeg's AC-3 encoder never emits the field, and Dolby's uses it constantly. Fixed.
+- **Vorbis crashed on truncated Ogg files** rather than decoding what was there. Fixed.
+
+And what it found that is *not* fixed, which is the honest part:
+
+- **VP9 fails six feature vectors**: loop filter deltas, `show_existing_frame`, segmentation with an
+  alternate quantiser on key frames, one other segmentation case, one tiling case, and one
+  regression bitstream. Every one is a feature this decoder claims and gets wrong on content no
+  encoder here produces.
+- **H.264 refuses more than this document admits.** Alongside the documented refusals it turns away
+  I_PCM macroblocks, `pic_order_cnt_type` 1, and several streams whose reference lists it cannot
+  build — and five streams decode to the wrong picture rather than being refused, which is worse
+  than either.
+
 ## Not worth it, and why
 
 - **HEVC / H.265.** Larger than all of H.264 put together: coding tree units with quadtrees, 35

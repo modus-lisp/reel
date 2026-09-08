@@ -125,10 +125,50 @@ decision, every block mode, every transform size, every coefficient of every tra
 on its last byte. A 1280x720 key frame is thirty-four thousand bytes and twenty-three hundred blocks;
 one symbol read at the wrong width anywhere in it does not land there.
 
+## Reconstruction
+
+Stage four: the intra predictors, the inverse transforms, and the edge samples that feed them.
+
+**VP9 uses two transforms in the same block.** The DCT is what every codec has; the ADST — an
+asymmetric discrete sine transform — is used along whichever axis an intra prediction ran, because
+the residual a directional prediction leaves is small at the predicted edge and large away from it,
+and a sine basis fits that where a cosine basis does not. A vertically predicted block gets ADST down
+its columns and DCT across its rows, and the intra mode chooses the pair. The first pass is the
+columns and the second the rows, and which of them takes the ADST is the low bit and the high bit of
+the transform type respectively — swapping them decodes a picture that looks almost right, because
+the two transforms agree on flat content and differ only where the prediction had a direction.
+
+The one-dimensional passes are transcribed **by parsing ffmpeg's C**, not by hand: six hundred lines
+of straight-line arithmetic in which every constant and every shift is normative, and one transposed
+digit gives a decoder wrong on one coefficient in a thousand.
+
+The edge samples are most of the remaining difficulty. Any of the row above, the column to the left,
+the corner, or the four samples above-right may be outside the picture, outside the tile, or not yet
+decoded, and each case has its own rule: a missing row is a flat 127, a missing column a flat 129, a
+missing corner 127 or 129 depending on which side survives, and a row that runs off the right repeats
+its last real sample. Ten codeable modes become fifteen once the substitutions are applied, and the
+three flat constants differ by one in each direction rather than all being 128 — which is what makes
+substituting the wrong one visible.
+
+And one rule that is not about availability: **a block in the first row of a superblock row reads the
+row above it from a copy taken before the loop filter ran**, not from the picture. Intra prediction is
+defined on unfiltered samples, and by the time that block is decoded the filter has already been over
+that line. A decoder that reads the picture instead is right until the first frame whose filter level
+is not zero, and then it is wrong everywhere, faintly.
+
+### Verified on a lossless key frame
+
+A lossless encode is the one case that can be compared before the loop filter exists, because a
+lossless frame has a filter level of zero and ffmpeg's own output is therefore unfiltered too. It is
+bit-exact. That proves the partition walk, every block mode, every coefficient, the edge gathering
+with all its substitutions, the fifteen predictors, the Walsh-Hadamard, and the crop on the way out —
+everything except the DCT and ADST themselves, which a lossless frame does not use, and the filter.
+
 ## What is next
 
-1. Reconstruction: ten intra modes across four sizes, and the inverse transforms — DCT and ADST in
-   four sizes each, plus the Walsh-Hadamard a lossless frame uses.
+1. The loop filter, which is what stands between this and a lossy frame that can be compared. VP9
+   applies it per TRANSFORM-BLOCK edge rather than per macroblock, with the widths chosen by a mask
+   built while decoding.
 2. Motion vectors and inter prediction, including compound.
 3. The loop filter, which in VP9 is applied per transform-block edge rather than per macroblock.
 4. Backward probability adaptation, which is what makes a frame's counts the next frame's model.

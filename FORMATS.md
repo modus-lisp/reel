@@ -112,8 +112,11 @@ byte. A 1280x720 key frame is thirty-four thousand bytes and twenty-three hundre
 symbol read at the wrong width anywhere in it does not land on the last one. So the entropy layer is
 as verified as a decoded picture would make it, before there is a picture.
 
-What remains is reconstruction: the intra modes, the inverse transforms, motion, and the loop
-filter. `reel/src/vp9/NOTES.md` has the detail.
+Reconstruction is in too, and a LOSSLESS key frame decodes bit-exact against ffmpeg — which is the
+one case comparable before the loop filter exists, because a lossless frame's filter level is zero.
+That covers the intra predictors, the edge substitutions, the Walsh-Hadamard and the crop.
+
+What remains is the loop filter, then motion. `reel/src/vp9/NOTES.md` has the detail.
 
 ## Not worth it, and why
 

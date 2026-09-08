@@ -112,7 +112,11 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
        (:file "headers")     ; the superframe index and the uncompressed frame header
        (:file "compressed")  ; the second header, read through the arithmetic coder
        (:file "scans")       ; GENERATED: the coefficient scans and their neighbour tables
-       (:file "block"))      ; tiles, the partition quadtree, block modes and coefficients
+       (:file "picture")     ; the decoded picture, ahead of everything that writes into it
+       (:file "transform")   ; GENERATED (one dimension at a time) plus the two-pass wrapper
+       (:file "intra")        ; the fifteen intra prediction modes at four sizes
+       (:file "block")       ; tiles, the partition quadtree, block modes and coefficients
+       (:file "recon"))      ; edge samples, prediction and the inverse transform
       )
      ;; ---- Theora, a VP3 descendant, in Ogg
      (:module "theora"

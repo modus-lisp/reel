@@ -60,8 +60,6 @@
 
 ;;; ---- the decoding state --------------------------------------------------------------------------
 
-(defun %o (n) (make-array n :element-type '(unsigned-byte 8) :initial-element 0))
-
 (defstruct (state (:conc-name st-) (:constructor make-state-))
   h fp                                          ; the two headers
   (cols 0 :type fixnum) (rows 0 :type fixnum)   ; in eight-sample units
@@ -93,10 +91,9 @@
   (uvmode 0 :type fixnum)
   (tile-col-start 0 :type fixnum) (tile-col-end 0 :type fixnum)
   ;; coefficients of one block, and how many each of its transform blocks held
-  (coeffs (make-array 4096 :element-type '(signed-byte 32))
-          :type (simple-array (signed-byte 32) (4096)))
-  (uvcoeffs (vector (make-array 1024 :element-type '(signed-byte 32))
-                    (make-array 1024 :element-type '(signed-byte 32)))
+  (coeffs (make-array 4096 :element-type 'fixnum) :type (simple-array fixnum (4096)))
+  (uvcoeffs (vector (make-array 1024 :element-type 'fixnum)
+                    (make-array 1024 :element-type 'fixnum))
             :type simple-vector)
   (eob (make-array 256 :element-type 'fixnum) :type (simple-array fixnum (256)))
   (uveob (vector (make-array 64 :element-type 'fixnum) (make-array 64 :element-type 'fixnum))
@@ -105,6 +102,13 @@
   (qmul (make-array '(8 2 2) :element-type 'fixnum) :type (simple-array fixnum (8 2 2)))
   ;; per-segment skip and reference features, read out of the header once
   (seg-skip (make-array 8 :element-type 'fixnum) :type (simple-array fixnum (8)))
+  frame                                         ; the picture being decoded
+  ;; The last line of each superblock row, saved BEFORE the loop filter touched it.  Intra
+  ;; prediction is defined on unfiltered samples and the filter has already run over that line by
+  ;; the time the row below is decoded, so exactly one line has to be kept.
+  (intra-row (vector (%o 0) (%o 0) (%o 0)) :type simple-vector)
+  (edge-a (%o 96) :type octets)                 ; the row above, corner at index thirty-one
+  (edge-l (%o 64) :type octets)                 ; and the column to the left
   c                                             ; the arithmetic coder of the current tile
   (blocks 0 :type fixnum)                       ; how many blocks this frame has decoded
   ;; THE CHECK THAT COSTS NOTHING: how far any tile's coder finished from the end of its own
@@ -151,8 +155,22 @@
                           :above-txfm (%o cols)
                           :above-segpred (%o cols)
                           :above-intra (%o cols))))
+    (setf (st-frame st) (make-frame-for h))
+    (dotimes (p 3)
+      (setf (aref (st-intra-row st) p)
+            (%o (aref (fr-stride (st-frame st)) p))))
     (%init-quant st h)
     st))
+
+(declaim (inline st-block-base))
+(defun st-block-base (st plane)
+  "Where the block being decoded begins in PLANE."
+  (declare (type state st) (type fixnum plane))
+  (let ((stride (aref (fr-stride (st-frame st)) plane)))
+    (declare (type fixnum stride))
+    (if (zerop plane)
+        (+ (* 8 (st-row st) stride) (* 8 (st-col st)))
+        (+ (* 4 (st-row st) stride) (* 4 (st-col st))))))
 
 (defun %reset-above (st)
   "The above contexts, once per frame: a block in the top row has no neighbour above and the
@@ -314,7 +332,7 @@
            (type (simple-array (unsigned-byte 16) (*)) scan)
            (type (simple-array (unsigned-byte 16) (* 2)) nb)
            (type (simple-array fixnum (*)) bands)
-           (type (simple-array (signed-byte 32) (*)) out)
+           (type (simple-array fixnum (*)) out)
            (optimize (speed 3) (safety 1)))
   (let* ((c (st-c st))
          (cache (make-array 1024 :element-type '(unsigned-byte 8) :initial-element 0))
@@ -463,7 +481,7 @@
           (dotimes (pl 2)
             (let ((a (the octets (aref (st-above-uv-nnz st) pl))) (ao col)
                   (l (the octets (aref (st-left-uv-nnz st) pl))) (lo (st-row7 st))
-                  (out (the (simple-array (signed-byte 32) (*)) (aref (st-uvcoeffs st) pl)))
+                  (out (the (simple-array fixnum (*)) (aref (st-uvcoeffs st) pl)))
                   (eobs (the (simple-array fixnum (*)) (aref (st-uveob st) pl)))
                   (n 0))
               (declare (type fixnum ao lo n))
@@ -517,6 +535,7 @@
             (%splat (aref (st-above-uv-nnz st) pl) col w4 0)
             (%splat (aref (st-left-uv-nnz st) pl) (st-row7 st) h4 0)))
         (%decode-coeffs st))
+    (%intra-recon st)
     (incf (st-blocks st))))
 
 (defun %decode-sb (st row col bl)
@@ -613,9 +632,24 @@
               (loop for row of-type fixnum from row-start below row-end by 8
                     do (%reset-left st)
                        (loop for col of-type fixnum from col-start below col-end by 8
-                             do (%decode-sb st row col 0)))
+                             do (%decode-sb st row col 0))
+                       (%save-intra-row st row))
               (setf (st-tile-slack st)
                     (max (st-tile-slack st)
                          (abs (- (bd-end (st-c st)) (bd-pos (st-c st))))))
               (incf at size))))))
     at))
+
+(defun %save-intra-row (st row)
+  "Keep the last line of this superblock row for the intra prediction of the next one."
+  (declare (type state st) (type fixnum row))
+  (let ((f (st-frame st)))
+    (when (< (+ row 8) (st-rows st))
+      (dotimes (p 3)
+        (let* ((stride (aref (fr-stride f) p))
+               (plane (the octets (aref (fr-planes f) p)))
+               (line (if (zerop p) (+ (* 8 row) 63) (+ (* 4 row) 31)))
+               (o (* line stride)))
+          (declare (type fixnum stride line o))
+          (replace (the octets (aref (st-intra-row st) p)) plane
+                   :start1 0 :end1 stride :start2 o :end2 (+ o stride)))))))

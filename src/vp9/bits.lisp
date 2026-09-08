@@ -21,6 +21,10 @@
   (error 'vp9-error :message (apply #'format nil fmt args)))
 
 (deftype octets () '(simple-array (unsigned-byte 8) (*)))
+
+(defun %o (n)
+  "A zeroed octet vector, which is what every context and edge buffer here is."
+  (make-array n :element-type '(unsigned-byte 8) :initial-element 0))
 (deftype fixnums () '(simple-array fixnum (*)))
 
 ;;; ---- plain bits, most significant first ----------------------------------------------------------

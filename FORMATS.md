@@ -26,7 +26,7 @@ as data.
 | **FFV1**, the preservation codec | ffmpeg, bit-exact on twelve configurations, every frame |
 | **Theora** in Ogg | ffmpeg, bit-exact on six fixtures, every frame |
 | **VP9** | ffmpeg, bit-exact on seven clips, every picture |
-| **Opus, AAC, MP3, MPEG audio Layer II, Vorbis, G.711** | reed's own suites; Vorbis at correlation 1.000000 against ffmpeg on ten fixtures |
+| **Opus, AAC, MP3, MPEG audio Layer II, Vorbis, FLAC, G.711** | reed's own suites; FLAC bit-exact on sixteen fixtures and against the MD5 the encoder recorded |
 
 H.264 covers CAVLC and CABAC, P and B slices, both direct modes, weighted and implicit weighted
 prediction, reference list reordering, adaptive reference marking, the 8x8 transform, Intra_8x8,

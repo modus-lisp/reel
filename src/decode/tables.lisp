@@ -3,6 +3,15 @@
 ;;;; probabilities, and the token/mode trees.
 (in-package #:reel.decode)
 
+(deftype u8vec () '(simple-array (unsigned-byte 8) (*)))
+(deftype fxvec () '(simple-array (signed-byte 32) (*)))
+
+;;; SAMPLES ARE OCTETS, and the planes hold nothing else.  Every value written into a plane here is
+;;; the output of a clamp — a prediction, a filtered sample, or a residual added and clamped — so
+;;; the widest thing any of them can be is 255, and the borders are 127 and 129.  Holding them in
+;;; anything wider is four bytes of memory traffic per sample for no information, through the two
+;;; busiest loops the decoder has: the deblocking kernel and the six-tap interpolator.
+
 (deftype dim ()
   "A plane dimension, a plane stride, or an index into a plane.
 

@@ -16,7 +16,7 @@
 ;;; 0 <= x < w, 0 <= y < h maps to array index (y+1)*stride + (x+1).
 
 (defstruct (plane (:conc-name pl-))
-  (data nil :type (simple-array (signed-byte 32) (*)))
+  (data nil :type u8vec)
   (stride 0 :type dim)
   (w 0 :type dim)
   (h 0 :type dim))
@@ -32,7 +32,7 @@
 (defun make-plane* (w h rpad)
   "Allocate a plane WxH with a 1-pixel top/left border and RPAD right columns."
   (let* ((stride (+ w 1 rpad))
-         (data (make-array (* stride (+ h 1)) :element-type '(signed-byte 32)
+         (data (make-array (* stride (+ h 1)) :element-type '(unsigned-byte 8)
                                               :initial-element 0))
          (pl (make-plane :data data :stride stride :w w :h h)))
     ;; top border row (y = -1): 127 across the whole stride
@@ -138,7 +138,7 @@
 (defun predict-block (pl mx my size mode has-above has-left out)
   "Fill OUT (size*size raster) with the DC/V/H/TM prediction for the block at
    plane pixel (MX,MY).  MODE: 0=DC 1=V 2=H 3=TM."
-  (declare (type plane pl) (type fixnum mx my size mode) (type (simple-array (signed-byte 32) (*)) out))
+  (declare (type plane pl) (type (signed-byte 26) mx my) (type fixnum size mode) (type u8vec out))
   (ecase mode
     (0 (let ((dc 0) (s 0))
          (declare (type fixnum dc s))
@@ -179,7 +179,7 @@
 (defun predict-subblock (mode a p l out)
   "B_PRED subblock prediction.  A[0..7] above row, P above-left, L[0..3] left.
    OUT is a 16-fixnum raster 4x4 buffer.  MODE per intra_bmode enumeration."
-  (declare (type (simple-array (signed-byte 32) (*)) a l out) (type fixnum p mode))
+  (declare (type u8vec a l out) (type (unsigned-byte 8) p) (type fixnum mode))
   (macrolet ((a (i) `(aref a ,i)) (l (i) `(aref l ,i)))
     (let ((e0 (l 3)) (e1 (l 2)) (e2 (l 1)) (e3 (l 0)) (e4 p)
           (e5 (a 0)) (e6 (a 1)) (e7 (a 2)) (e8 (a 3)))
@@ -282,18 +282,23 @@
 
 ;;; ---- decoder state ----------------------------------------------------
 
+(defun %emptyfx () (make-array 0 :element-type '(signed-byte 32)))
+
 (defstruct (dec (:conc-name d-))
   bytes
   (key-frame t)
   (mb-cols 0 :type fixnum) (mb-rows 0 :type fixnum)
   (width 0 :type fixnum) (height 0 :type fixnum)
-  yplane uplane vplane
+  (yplane nil :type (or null plane))
+  (uplane nil :type (or null plane))
+  (vplane nil :type (or null plane))
   (coeff-probs nil :type (or null (simple-array (signed-byte 32) (*))))
   ;; non-zero context (above spans the frame, left is reset per MB row)
-  above-y above-u above-v above-y2
-  (left-y (make-array 4 :element-type '(signed-byte 32)))
-  (left-u (make-array 2 :element-type '(signed-byte 32)))
-  (left-v (make-array 2 :element-type '(signed-byte 32)))
+  (above-y (%emptyfx) :type fxvec) (above-u (%emptyfx) :type fxvec)
+  (above-v (%emptyfx) :type fxvec) (above-y2 (%emptyfx) :type fxvec)
+  (left-y (make-array 4 :element-type '(signed-byte 32)) :type fxvec)
+  (left-u (make-array 2 :element-type '(signed-byte 32)) :type fxvec)
+  (left-v (make-array 2 :element-type '(signed-byte 32)) :type fxvec)
   (left-y2 0 :type fixnum)
   ;; segmentation
   (seg-enabled nil) (seg-update-map nil) (seg-abs nil)
@@ -309,30 +314,34 @@
   (ref-lf-delta (make-array 4 :element-type '(signed-byte 32) :initial-element 0))
   (mode-lf-delta (make-array 4 :element-type '(signed-byte 32) :initial-element 0))
   ;; per-MB records for the loop filter
-  mb-i4x4 mb-nonzero mb-seg
+  (mb-i4x4 #() :type simple-vector) (mb-nonzero #() :type simple-vector)
+  (mb-seg (%emptyfx) :type fxvec)
   ;; per-MB work buffers
   (ycoeffs (let ((v (make-array 16)))
              (dotimes (i 16) (setf (aref v i) (make-array 16 :element-type '(signed-byte 32))))
-             v))
+             v)
+           :type simple-vector)
   (ublocks (let ((v (make-array 4)))
              (dotimes (i 4) (setf (aref v i) (make-array 16 :element-type '(signed-byte 32))))
-             v))
+             v)
+           :type simple-vector)
   (vblocks (let ((v (make-array 4)))
              (dotimes (i 4) (setf (aref v i) (make-array 16 :element-type '(signed-byte 32))))
-             v))
-  (y2coeffs (make-array 16 :element-type '(signed-byte 32)))
+             v)
+           :type simple-vector)
+  (y2coeffs (make-array 16 :element-type '(signed-byte 32)) :type fxvec)
   ;; subblock modes: 16 per current MB, plus above row and left column caches
-  (bmodes (make-array 16 :element-type '(signed-byte 32)))
-  above-bmode                           ; 4 * mb-cols
-  (left-bmode (make-array 4 :element-type '(signed-byte 32)))
-  (pred16 (make-array 256 :element-type '(signed-byte 32)))
-  (pred8 (make-array 64 :element-type '(signed-byte 32)))
-  (subpred (make-array 16 :element-type '(signed-byte 32)))
-  (suba (make-array 8 :element-type '(signed-byte 32)))
-  (subl (make-array 4 :element-type '(signed-byte 32))))
+  (bmodes (make-array 16 :element-type '(signed-byte 32)) :type fxvec)
+  (above-bmode (%emptyfx) :type fxvec)   ; 4 * mb-cols
+  (left-bmode (make-array 4 :element-type '(signed-byte 32)) :type fxvec)
+  (pred16 (make-array 256 :element-type '(unsigned-byte 8)) :type u8vec)
+  (pred8 (make-array 64 :element-type '(unsigned-byte 8)) :type u8vec)
+  (subpred (make-array 16 :element-type '(unsigned-byte 8)) :type u8vec)
+  (suba (make-array 8 :element-type '(unsigned-byte 8)) :type u8vec)
+  (subl (make-array 4 :element-type '(unsigned-byte 8)) :type u8vec))
 
 (declaim (inline zero16))
-(defun zero16 (a) (declare (type (simple-array (signed-byte 32) (*)) a)) (fill a 0))
+(defun zero16 (a) (declare (type fxvec a)) (fill a 0))
 
 ;;; ---- header continuation (RFC 6386 §9.2-9.11) -------------------------
 
@@ -427,6 +436,7 @@
 (defun decode-residue (d bd mbx skip has-y2 dq)
   "Decode all subblock coefficients for the current MB.  Returns T if the MB
    has any non-zero coefficient.  When SKIP, only the contexts are cleared."
+  (declare (type dec d) (type dim mbx) (optimize (speed 3) (safety 1)))
   (let* ((ay (d-above-y d)) (au (d-above-u d)) (av (d-above-v d))
          (ay2 (d-above-y2 d)) (ly (d-left-y d)) (lu (d-left-u d)) (lv (d-left-v d))
          (y1dc (first dq)) (y1ac (second dq))
@@ -487,7 +497,8 @@
 (defun add-residual (pl mx my res)
   "Add a 4x4 IDCT residual RES to the prediction already present in plane PL at
    pixel (MX,MY), clamping to 0..255."
-  (declare (type plane pl) (type fixnum mx my) (type (simple-array (signed-byte 32) (16)) res))
+  (declare (type plane pl) (type (signed-byte 26) mx my)
+           (type (simple-array (signed-byte 32) (16)) res))
   (dotimes (i 4)
     (dotimes (j 4)
       (pset pl (+ mx j) (+ my i)

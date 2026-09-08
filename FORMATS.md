@@ -44,14 +44,14 @@ after the type work described below:
 | MPEG-2 | 283 fps | 611 |
 | MPEG-4 Part 2 | 255 fps | 556 |
 | Theora | 308 fps | 398 |
-| VP8 | 184 fps | 249 |
+| VP8 | 184 fps | 302 |
 | VP9 | 125 fps | 238 |
 | H.264, P and B pictures | 43 fps | 57 |
 | FFV1, lossless | 23.5 fps | 32 |
 
-At other sizes: VP9 goes 31 to 60 fps at 1280x720 and 13.7 to 27 at 1920x1080; H.264 with P and B
-pictures runs about 6.5 fps at 1920x1080. FFV1 is last because it is lossless — it carries every
-sample of every picture and there is nothing to skip.
+At other sizes: VP9 goes 31 to 60 fps at 1280x720 and 13.7 to 27 at 1920x1080; VP8 11 to 15 at
+1920x1080; H.264 with P and B pictures runs about 6.5 fps at 1920x1080. FFV1 is last because it is
+lossless — it carries every sample of every picture and there is nothing to skip.
 
 Pictures are decoded concurrently when they are independently decodable, which today means
 all-intra; on an idle machine that was worth about eight times on sixteen threads. A stream with P
@@ -66,6 +66,11 @@ from arrays. Declaring the arrays thirty-two bits wide, which is what they all h
 strides and offsets twenty-six, was most of the table above; the rest was bounding a handful of
 variable shifts so they could become machine shifts, and one file — VP8's loop filter, thirty-eight
 per cent of a VP8 decode — that turned out to carry no optimisation declaration at all.
+
+VP8 then went further, because its planes were holding one sample per machine word: an octet plane
+is 3.1 MB at 1920x1080 where a thirty-two bit one is 12.3 and the `fixnum` one it started as was
+24.6. That is worth about 1.25 times at 640x360 and 1.37 at 1920x1080 — the gain grows with the
+picture, which is what a memory-traffic change looks like. `src/decode/NOTES.md` has that one.
 
 Nothing about the decoded pictures changed: every fixture in every suite is still bit-exact against
 ffmpeg. `src/vp9/NOTES.md` has the long version, including the two changes that were measured,
@@ -159,9 +164,8 @@ sizes named.
 - **A serial H.264 stream is still a serial decode.** Concurrency here is per PICTURE, so it does
   nothing for a stream with P or B pictures — which is every real stream. VP9 has the same shape and
   the same limit. Slice-level or wavefront parallelism would help both, and neither is small.
-- **The two profiles that are still one function.** FFV1 spends 84 per cent of its time in
-  `%decode-line` and VP8 a third in its deblocking kernel, and in both cases that is now the
-  arithmetic the format actually specifies rather than anything the compiler was failing to see.
-  Getting further would mean doing less of it — VP8's planes are still thirty-two bits a sample
-  where eight would do, which is four times the memory traffic through the busiest loop it has —
-  rather than telling the compiler things.
+- **The profiles that are still one function.** FFV1 spends 84 per cent of its time in
+  `%decode-line` and VP8 nearly forty per cent in its deblocking kernel, and in both cases that is
+  now the arithmetic the format specifies rather than anything the compiler was failing to see.
+  Going further would mean filtering or coding more than one sample at a time, which is a different
+  kind of change from anything above.

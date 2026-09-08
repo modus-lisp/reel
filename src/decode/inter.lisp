@@ -16,8 +16,6 @@
 ;;;; replication, which is what the specification defines.
 (in-package #:reel.decode)
 
-(deftype u8vec () '(simple-array (unsigned-byte 8) (*)))
-(deftype fxvec () '(simple-array (signed-byte 32) (*)))
 
 (defconstant +border+ 32)                       ; luma border pixels
 (defconstant +cborder+ 16)                      ; chroma border pixels
@@ -42,20 +40,19 @@
 (defun plane->rframe-plane (pl dst stride border w h)
   "Copy the visible WxH of plane PL into DST (stride STRIDE, BORDER pixels on
    each side) and replicate its edges into the border."
-  (declare (type plane pl) (type u8vec dst) (type fixnum stride border w h)
+  (declare (type plane pl) (type u8vec dst) (type dim stride border w h)
            (optimize (speed 3) (safety 0)))
   (let ((src (pl-data pl)) (ps (pl-stride pl)))
-    (declare (type fxvec src) (type fixnum ps))
+    (declare (type u8vec src) (type dim ps))
     (dotimes (y h)
       (let ((si (+ (* (1+ y) ps) 1)) (di (+ (* (+ y border) stride) border)))
-        (declare (type fixnum si di))
-        (dotimes (x w)
-          (setf (aref dst (+ di x)) (the (unsigned-byte 8) (aref src (+ si x)))))
+        (declare (type dim si di))
+        ;; both sides are octets now, so this is a block move rather than a loop
+        (replace dst src :start1 di :end1 (+ di w) :start2 si :end2 (+ si w))
         ;; left and right border of this row
         (let ((l (aref dst di)) (r (aref dst (+ di w -1))))
-          (dotimes (i border)
-            (setf (aref dst (+ di (- i) -1)) l
-                  (aref dst (+ di w i)) r)))))
+          (fill dst l :start (- di border) :end di)
+          (fill dst r :start (+ di w) :end (+ di w border)))))
     ;; top and bottom rows
     (let ((top (* border stride)) (bot (* (+ border h -1) stride)))
       (declare (type fixnum top bot))
@@ -157,7 +154,7 @@
   ;; scratch
   (near-r (make-array 4 :element-type '(signed-byte 32))) (near-c (make-array 4 :element-type '(signed-byte 32)))
   (cnt (make-array 4 :element-type '(signed-byte 32)))
-  (mc-tmp (make-array (* 16 21) :element-type '(signed-byte 32)))
+  (mc-tmp (make-array (* 16 21) :element-type '(unsigned-byte 8)))
   (mc-scratch (make-array (* 21 21) :element-type '(unsigned-byte 8)))
   (split-r (make-array 16 :element-type '(signed-byte 32))) (split-c (make-array 16 :element-type '(signed-byte 32)))
   (frame-count 0 :type fixnum)
@@ -523,7 +520,7 @@
   "Predict a WxH block from REF (octets, top-left sample at RBASE, row stride
    RSTRIDE) with eighth-pel fractions FX/FY into the fixnum raster DST at
    DBASE.  Two-pass separable filter, each pass rounded and clamped to 0..255."
-  (declare (type u8vec ref) (type fxvec dst tmp) (type (simple-array (signed-byte 32) (8 6)) filters)
+  (declare (type u8vec ref dst tmp) (type (simple-array (signed-byte 32) (8 6)) filters)
            (type dim rstride rbase dstride dbase) (type (integer 0 64) w h)
            (type (integer 0 7) fx fy)
            (optimize (speed 3) (safety 0)))
@@ -569,7 +566,7 @@
            (h3 (aref filters fx 3)) (h4 (aref filters fx 4)) (h5 (aref filters fx 5))
            (v0 (aref filters fy 0)) (v1 (aref filters fy 1)) (v2 (aref filters fy 2))
            (v3 (aref filters fy 3)) (v4 (aref filters fy 4)) (v5 (aref filters fy 5)))
-       (declare (type fixnum h0 h1 h2 h3 h4 h5 v0 v1 v2 v3 v4 v5))
+       (declare (type (signed-byte 16) h0 h1 h2 h3 h4 h5 v0 v1 v2 v3 v4 v5))
        (dotimes (r (+ h 5))
          (let ((s (+ rbase (* (- r 2) rstride))) (o (* r w)))
            (declare (type fixnum s o))

@@ -138,8 +138,10 @@ decoder anywhere in the stack — Ogg and Matroska both recognise the track and 
 exactly why nothing ever failed loudly enough to catch it. It was found by costing what to build
 next rather than by a test, which is its own small lesson about which claims here are load-bearing.
 There is a Vorbis decoder now, and a `.webm` from before about 2013 — VP8 and Vorbis, the original
-pairing — plays with its sound. What was here — H.264 High profile, MPEG-2 in program and transport streams, AVI with
-MPEG-4 Part 2, FFV1, Theora, VP9 — is above.
+pairing — plays with its sound.
+
+What was here — H.264 High profile, MPEG-2 in program and transport streams, AVI with MPEG-4 Part
+2, FFV1, Theora, VP9 — is above.
 
 ### VP9 — the last one, and the largest
 

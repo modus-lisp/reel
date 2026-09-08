@@ -127,13 +127,15 @@ negative slice offset still lands inside the array instead of before it.")
 (declaim (inline %far-apart))
 (defun %far-apart (ax ay bx by)
   "Did these two vectors part company by a whole sample or more?  Quarter-pel units, so four."
-  (declare (type fixnum ax ay bx by))
+  (declare (type fixnum ax ay bx by) (optimize (speed 3) (safety 0)))
   (or (>= (abs (- ax bx)) 4) (>= (abs (- ay by)) 4)))
 
+(declaim (inline %block-motion))
 (defun %block-motion (pic bx by)
   "(values n pocA mvAx mvAy pocB mvBx mvBy) for one block: how many predictions it used, and each
    one's picture and vector.  A block predicting only from list 1 answers with that in the A slot,
    because what matters downstream is the SET of predictions, not which list held them."
+  (declare (type picture pic) (type fixnum bx by) (optimize (speed 3) (safety 0)))
   (let ((n 0) (pa +no-ref-poc+) (ax 0) (ay 0) (pb +no-ref-poc+) (bx* 0) (by* 0))
     (dotimes (lx 2)
       (let ((poc (blk-ref-poc pic bx by lx)))
@@ -153,10 +155,11 @@ negative slice offset still lands inside the array instead of before it.")
    can hold nothing at all while the 8x8 as a whole is full — the coefficients simply landed at
    scan positions belonging to its siblings.  The filter asks about the 8x8 (8.7.2.1), so the four
    counts are ORed; the counts themselves must stay per-4x4 because that is what nC reads."
-  (declare (optimize (speed 3) (safety 1)))
+  ;; block coordinates are never negative here, so the divisions by four are shifts
+  (declare (type picture pic) (type fixnum bx by) (optimize (speed 3) (safety 0)))
   (let* ((gw (* 4 (pic-mb-width pic)))
          (nz (pic-nz-y pic))
-         (mbi (+ (* (floor by 4) (pic-mb-width pic)) (floor bx 4))))
+         (mbi (+ (* (ash by -2) (pic-mb-width pic)) (ash bx -2))))
     (if (zerop (aref (pic-mb-tf8 pic) mbi))
         (aref nz (+ (* by gw) bx))
         (let ((b0x (logandc2 bx 1)) (b0y (logandc2 by 1)))
@@ -176,9 +179,9 @@ negative slice offset still lands inside the array instead of before it.")
    held them or at what index (8.7.2.1).  A bi-predicted block that used one picture TWICE is the
    awkward case: the two vectors can be matched to the other block's two either way round, and the
    edge is only left alone if some pairing works."
-  (declare (optimize (speed 3) (safety 1)))
-  (let ((p-intra (mb-intra-p pic (floor pbx 4) (floor pby 4)))
-        (q-intra (mb-intra-p pic (floor qbx 4) (floor qby 4))))
+  (declare (type picture pic) (type fixnum pbx pby qbx qby) (optimize (speed 3) (safety 0)))
+  (let ((p-intra (mb-intra-p pic (ash pbx -2) (ash pby -2)))
+        (q-intra (mb-intra-p pic (ash qbx -2) (ash qby -2))))
     (cond
       ((or p-intra q-intra) (if mb-edge-p 4 3))
       (t

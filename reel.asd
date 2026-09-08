@@ -53,6 +53,11 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
        (:file "scaling-tables")  ; GENERATED: the default scaling matrices
        (:file "transform8-tables") ; GENERATED: the 8x8 scan and normalisation
        (:file "params")       ; sequence and picture parameter sets, slice headers
+       ;; THE PICTURE STRUCT COMES EARLY ON PURPOSE.  Motion compensation reads a reference
+       ;; picture's slots in its innermost loop; a file compiled before the DEFSTRUCT is seen
+       ;; cannot inline those reads and does not know what type they return, so the arithmetic on
+       ;; them goes generic.  It measured at more than half the decode time at 1080p.
+       (:file "picture")      ; the decoded picture, the slice state, and per-block accessors
        (:file "cavlc")        ; residual blocks: coeff_token, levels, runs
        (:file "cabac-tables") ; GENERATED: the normative CABAC constants
        (:file "transform")    ; dequantisation, the inverse 4x4 and the DC transforms

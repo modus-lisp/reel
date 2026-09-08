@@ -310,3 +310,35 @@ x264 turns the B pyramid on by default, so this sat in the way of most real High
 in a session about the 8x8 transform it would have been read as an 8x8 transform bug. Two things
 saved time: the failing macroblocks all had `transform_size_8x8_flag` clear, which said the new
 code was not involved; and comparing with the loop filter disabled said the fault was underneath it.
+
+## Making it 2.7 times faster without changing a line of arithmetic
+
+Motion compensation is the whole cost of an inter-coded stream, and four things were wrong with it —
+none of them in the maths, all of them in what the compiler could see.
+
+**The picture structure was defined after its users.** `slice.lisp` held the `picture` DEFSTRUCT and
+loads *after* `motion.lisp`. So every `(declare (type picture ref))` in the motion path named an
+unknown type, every `pic-y` was a full call returning an object of unknown type, and every piece of
+arithmetic on the result went generic. Moving the definitions into `picture.lisp`, ahead of every
+file that reads them in a loop, was worth 1.76x on its own. SBCL says so in a style warning — "the
+structure definition was not yet seen" — which is very easy to read past.
+
+**The per-block accessors were undeclared.** `blk-mv`, `blk-ref-poc`, `set-blk-mv`, `%mv-index` are
+read a few times per 4x4 block by motion prediction and again by the loop filter: millions of calls
+a second at 1080p. They are now inline and fully typed. Another 1.1x.
+
+**Every reference sample was clamped.** The specification's rule is that a vector may point outside
+the picture and the edge sample repeats — so every read is clamped, and a thirty-six tap filter pays
+that thirty-six times per output sample. When the whole source rectangle is inside the picture, which
+it is for nearly every block of nearly every frame, the clamp cannot fire. There are now two copies
+of the sampler, generated from one body by a macro, and the choice is made once per partition.
+
+**A whole-sample vector is a copy.** Integer motion needs no filter at all, and static or slowly
+panning content is full of it. `replace` per row instead of the sampler per sample.
+
+The remaining hot spots, in case this is picked up again: the six-tap itself, the chroma bilinear,
+and the boundary-strength computation, in that order. None of them is obviously wasteful any more.
+
+**What did NOT change: all-intra decoding, at all.** None of the above runs when there is no motion.
+That is worth stating because it is the thing a benchmark on the wrong clip would hide — the two
+all-intra measurements moved by less than the noise, and only the inter ones moved at all.

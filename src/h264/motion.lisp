@@ -34,6 +34,19 @@
       (declare (type fixnum cx cy))
       (aref (pic-y pic) (+ (pic-yoff pic) (* cy (pic-ystride pic)) cx)))))
 
+(declaim (inline %ref-luma-fast %ref-chroma-fast))
+(defun %ref-luma-fast (pic x y)
+  "The same sample WITHOUT the clamp, for a block whose whole source rectangle is inside the
+   picture — which is nearly all of them, and the clamp is six comparisons and two multiplies per
+   tap of a thirty-six tap filter."
+  (declare (type picture pic) (type fixnum x y) (optimize (speed 3) (safety 0)))
+  (aref (pic-y pic) (+ (pic-yoff pic) (* y (pic-ystride pic)) x)))
+
+(defun %ref-chroma-fast (plane pic x y)
+  (declare (type (simple-array (unsigned-byte 8) (*)) plane) (type picture pic) (type fixnum x y)
+           (optimize (speed 3) (safety 0)))
+  (aref plane (+ (pic-coff pic) (* y (pic-cstride pic)) x)))
+
 (defun %ref-chroma (plane pic x y)
   (declare (type (simple-array (unsigned-byte 8) (*)) plane) (type picture pic) (type fixnum x y)
            (optimize (speed 3) (safety 0)))
@@ -51,61 +64,74 @@
   (declare (type fixnum a b c d e f) (optimize (speed 3) (safety 0)))
   (+ a (* -5 b) (* 20 c) (* 20 d) (* -5 e) f))
 
-(declaim (inline %h6 %v6))
-(defun %h6 (ref x y)
-  "The unrounded horizontal half-sample between (X,Y) and (X+1,Y)."
-  (declare (type fixnum x y) (optimize (speed 3) (safety 0)))
-  (%tap6 (%ref-luma ref (- x 2) y) (%ref-luma ref (- x 1) y) (%ref-luma ref x y)
-         (%ref-luma ref (+ x 1) y) (%ref-luma ref (+ x 2) y) (%ref-luma ref (+ x 3) y)))
-
-(defun %v6 (ref x y)
-  "The unrounded vertical half-sample between (X,Y) and (X,Y+1)."
-  (declare (type fixnum x y) (optimize (speed 3) (safety 0)))
-  (%tap6 (%ref-luma ref x (- y 2)) (%ref-luma ref x (- y 1)) (%ref-luma ref x y)
-         (%ref-luma ref x (+ y 1)) (%ref-luma ref x (+ y 2)) (%ref-luma ref x (+ y 3))))
-
 (declaim (inline %r5 %avg))
 (defun %r5 (v) (declare (type fixnum v) (optimize (speed 3) (safety 0))) (clamp255 (ash (+ v 16) -5)))
 (defun %avg (a b) (declare (type fixnum a b) (optimize (speed 3) (safety 0))) (ash (+ a b 1) -1))
 
-(defun luma-sample (ref x y xf yf)
-  "The luma sample of REF at (X + XF/4, Y + YF/4), by 8.4.2.2.1.
+;;; TWO COPIES OF THE SAME SAMPLER, generated rather than written.  They differ in one thing: how a
+;;; reference sample is read.  The specification's rule is that a vector may point outside the
+;;; picture and the edge sample repeats for as far as it does, so every read is clamped — and a
+;;; thirty-six tap filter pays that clamp thirty-six times per output sample.  When the whole source
+;;; rectangle is inside the picture, which it is for nearly every block of nearly every frame, the
+;;; clamp cannot change anything and the second copy drops it.  The choice is made once per
+;;; partition, in PREDICT-LUMA, not once per sample.
+(macrolet
+    ((define-sampler (h6 v6 sample refer)
+       `(progn
+          (declaim (inline ,h6 ,v6))
+          (defun ,h6 (ref x y)
+            "The unrounded horizontal half-sample between (X,Y) and (X+1,Y)."
+            (declare (type fixnum x y) (optimize (speed 3) (safety 0)))
+            (%tap6 (,refer ref (- x 2) y) (,refer ref (- x 1) y) (,refer ref x y)
+                   (,refer ref (+ x 1) y) (,refer ref (+ x 2) y) (,refer ref (+ x 3) y)))
+
+          (defun ,v6 (ref x y)
+            "The unrounded vertical half-sample between (X,Y) and (X,Y+1)."
+            (declare (type fixnum x y) (optimize (speed 3) (safety 0)))
+            (%tap6 (,refer ref x (- y 2)) (,refer ref x (- y 1)) (,refer ref x y)
+                   (,refer ref x (+ y 1)) (,refer ref x (+ y 2)) (,refer ref x (+ y 3))))
+
+          (defun ,sample (ref x y xf yf)
+            "The luma sample of REF at (X + XF/4, Y + YF/4), by 8.4.2.2.1.
 
    The letters are the specification's: b and h are the half positions right and below the integer
    sample G, j is the centre, m is the half position below G's right neighbour and s the one right
    of G's lower neighbour.  Every quarter position is the average of two of those."
-  (declare (type fixnum x y xf yf) (optimize (speed 3) (safety 0)))
-  (cond
-    ;; integer position
-    ((and (zerop xf) (zerop yf)) (%ref-luma ref x y))
-    ;; along the top row: only the horizontal half is needed
-    ((zerop yf)
-     (let ((b (%r5 (%h6 ref x y))))
-       (case xf (1 (%avg (%ref-luma ref x y) b)) (2 b) (t (%avg (%ref-luma ref (1+ x) y) b)))))
-    ;; down the left column: only the vertical half
-    ((zerop xf)
-     (let ((h (%r5 (%v6 ref x y))))
-       (case yf (1 (%avg (%ref-luma ref x y) h)) (2 h) (t (%avg (%ref-luma ref x (1+ y)) h)))))
-    (t
-     ;; anywhere else the centre position j is needed, and j comes from filtering the UNROUNDED
-     ;; half-sample values, not the rounded ones
-     (let* ((b (%r5 (%h6 ref x y)))
-            (h (%r5 (%v6 ref x y)))
-            (j (let ((j1 (%tap6 (%h6 ref x (- y 2)) (%h6 ref x (- y 1)) (%h6 ref x y)
-                                (%h6 ref x (+ y 1)) (%h6 ref x (+ y 2)) (%h6 ref x (+ y 3)))))
-                 (clamp255 (ash (+ j1 512) -10)))))
-       (declare (type fixnum b h j))
-       (if (= xf 2)
-           (case yf (1 (%avg b j)) (2 j) (t (%avg j (%r5 (%h6 ref x (1+ y))))))   ; f, j, q
-           (if (= yf 2)
-               (if (= xf 1) (%avg h j) (%avg j (%r5 (%v6 ref (1+ x) y))))          ; i, k
-               ;; the four true diagonals: e, g, p, r
-               (let ((m (%r5 (%v6 ref (1+ x) y)))
-                     (s (%r5 (%h6 ref x (1+ y)))))
-                 (declare (type fixnum m s))
-                 (if (= yf 1)
-                     (if (= xf 1) (%avg b h) (%avg b m))                           ; e, g
-                     (if (= xf 1) (%avg h s) (%avg m s))))))))))                   ; p, r
+            (declare (type fixnum x y xf yf) (optimize (speed 3) (safety 0)))
+            (cond
+              ;; integer position
+              ((and (zerop xf) (zerop yf)) (,refer ref x y))
+              ;; along the top row: only the horizontal half is needed
+              ((zerop yf)
+               (let ((b (%r5 (,h6 ref x y))))
+                 (case xf (1 (%avg (,refer ref x y) b)) (2 b) (t (%avg (,refer ref (1+ x) y) b)))))
+              ;; down the left column: only the vertical half
+              ((zerop xf)
+               (let ((h (%r5 (,v6 ref x y))))
+                 (case yf (1 (%avg (,refer ref x y) h)) (2 h) (t (%avg (,refer ref x (1+ y)) h)))))
+              (t
+               ;; anywhere else the centre position j is needed, and j comes from filtering the
+               ;; UNROUNDED half-sample values, not the rounded ones
+               (let* ((b (%r5 (,h6 ref x y)))
+                      (h (%r5 (,v6 ref x y)))
+                      (j (let ((j1 (%tap6 (,h6 ref x (- y 2)) (,h6 ref x (- y 1)) (,h6 ref x y)
+                                          (,h6 ref x (+ y 1)) (,h6 ref x (+ y 2))
+                                          (,h6 ref x (+ y 3)))))
+                           (clamp255 (ash (+ j1 512) -10)))))
+                 (declare (type fixnum b h j))
+                 (if (= xf 2)
+                     (case yf (1 (%avg b j)) (2 j) (t (%avg j (%r5 (,h6 ref x (1+ y))))))  ; f, j, q
+                     (if (= yf 2)
+                         (if (= xf 1) (%avg h j) (%avg j (%r5 (,v6 ref (1+ x) y))))         ; i, k
+                         ;; the four true diagonals: e, g, p, r
+                         (let ((m (%r5 (,v6 ref (1+ x) y)))
+                               (s (%r5 (,h6 ref x (1+ y)))))
+                           (declare (type fixnum m s))
+                           (if (= yf 1)
+                               (if (= xf 1) (%avg b h) (%avg b m))                          ; e, g
+                               (if (= xf 1) (%avg h s) (%avg m s)))))))))))))              ; p, r
+  (define-sampler %h6 %v6 luma-sample %ref-luma)
+  (define-sampler %h6f %v6f luma-sample-fast %ref-luma-fast))
 
 ;;; ---- copying a partition out of the reference ----------------------------------------------------
 
@@ -117,13 +143,36 @@
   (let ((xi (+ px (ash mvx -2))) (yi (+ py (ash mvy -2)))
         (xf (logand mvx 3)) (yf (logand mvy 3)))
     (declare (type fixnum xi yi xf yf))
-    (dotimes (j h)
-      (declare (type fixnum j))
-      (let ((row (+ base (* j stride))))
-        (declare (type fixnum row))
-        (dotimes (i w)
-          (declare (type fixnum i))
-          (setf (aref dst (+ row i)) (luma-sample ref (+ xi i) (+ yi j) xf yf)))))))
+    ;; the filter reaches two samples back and three forward on each axis, so this is the whole
+    ;; rectangle it will touch; when that is inside the picture the clamp cannot fire
+    ;; a whole-sample vector is a copy, and it is common enough — anything static, and most of a
+    ;; pan — to be worth taking out of the sampler's hands entirely
+    (when (and (zerop xf) (zerop yf)
+               (>= xi 0) (>= yi 0)
+               (<= (+ xi w) (* 16 (pic-mb-width ref)))
+               (<= (+ yi h) (* 16 (pic-mb-height ref))))
+      (let ((src (pic-y ref)) (sstride (pic-ystride ref)))
+        (declare (type (simple-array (unsigned-byte 8) (*)) src) (type fixnum sstride))
+        (dotimes (j h)
+          (declare (type fixnum j))
+          (let ((d (+ base (* j stride)))
+                (o (+ (pic-yoff ref) (* (+ yi j) sstride) xi)))
+            (declare (type fixnum d o))
+            (replace dst src :start1 d :end1 (+ d w) :start2 o :end2 (+ o w)))))
+      (return-from predict-luma))
+    (macrolet ((fill-with (sample)
+                 `(dotimes (j h)
+                    (declare (type fixnum j))
+                    (let ((row (+ base (* j stride))))
+                      (declare (type fixnum row))
+                      (dotimes (i w)
+                        (declare (type fixnum i))
+                        (setf (aref dst (+ row i)) (,sample ref (+ xi i) (+ yi j) xf yf)))))))
+      (if (and (>= xi 2) (>= yi 2)
+               (<= (+ xi w 3) (* 16 (pic-mb-width ref)))
+               (<= (+ yi h 3) (* 16 (pic-mb-height ref))))
+          (fill-with luma-sample-fast)
+          (fill-with luma-sample)))))
 
 (defun predict-chroma (dst plane stride base ref px py w h mvx mvy)
   "Fill a W x H chroma partition.  4:2:0, so the luma vector addresses chroma in EIGHTHS of a
@@ -137,21 +186,40 @@
     (let ((a (* (- 8 xf) (- 8 yf))) (b (* xf (- 8 yf)))
           (c (* (- 8 xf) yf)) (d (* xf yf)))
       (declare (type fixnum a b c d))
-      (dotimes (j h)
-        (declare (type fixnum j))
-        (let ((row (+ base (* j stride))) (sy (+ yi j)))
-          (declare (type fixnum row sy))
-          (dotimes (i w)
-            (declare (type fixnum i))
-            (let ((sx (+ xi i)))
-              (declare (type fixnum sx))
-              (setf (aref dst (+ row i))
-                    (ash (+ (* a (%ref-chroma plane ref sx sy))
-                            (* b (%ref-chroma plane ref (1+ sx) sy))
-                            (* c (%ref-chroma plane ref sx (1+ sy)))
-                            (* d (%ref-chroma plane ref (1+ sx) (1+ sy)))
-                            32)
-                         -6)))))))))
+      (when (and (zerop xf) (zerop yf)
+                 (>= xi 0) (>= yi 0)
+                 (<= (+ xi w) (* 8 (pic-mb-width ref)))
+                 (<= (+ yi h) (* 8 (pic-mb-height ref))))
+        (let ((sstride (pic-cstride ref)))
+          (declare (type fixnum sstride))
+          (dotimes (j h)
+            (declare (type fixnum j))
+            (let ((d (+ base (* j stride)))
+                  (o (+ (pic-coff ref) (* (+ yi j) sstride) xi)))
+              (declare (type fixnum d o))
+              (replace dst plane :start1 d :end1 (+ d w) :start2 o :end2 (+ o w)))))
+        (return-from predict-chroma))
+      (macrolet ((fill-with (refer)
+                   `(dotimes (j h)
+                      (declare (type fixnum j))
+                      (let ((row (+ base (* j stride))) (sy (+ yi j)))
+                        (declare (type fixnum row sy))
+                        (dotimes (i w)
+                          (declare (type fixnum i))
+                          (let ((sx (+ xi i)))
+                            (declare (type fixnum sx))
+                            (setf (aref dst (+ row i))
+                                  (ash (+ (* a (,refer plane ref sx sy))
+                                          (* b (,refer plane ref (1+ sx) sy))
+                                          (* c (,refer plane ref sx (1+ sy)))
+                                          (* d (,refer plane ref (1+ sx) (1+ sy)))
+                                          32)
+                                       -6))))))))
+        (if (and (>= xi 0) (>= yi 0)
+                 (< (+ xi w) (* 8 (pic-mb-width ref)))
+                 (< (+ yi h) (* 8 (pic-mb-height ref))))
+            (fill-with %ref-chroma-fast)
+            (fill-with %ref-chroma))))))
 
 ;;; ---- predicting the vector ------------------------------------------------------------------------
 
@@ -160,12 +228,16 @@
 
    An unavailable neighbour answers a zero vector and reference -1, which is what the prediction
    rules expect to see rather than a special case at every use."
-  (declare (optimize (speed 3) (safety 1)))
-  (let* ((pic (ss-pic ss))
+  (declare (type slice-state ss) (type fixnum bx by lx) (optimize (speed 3) (safety 0)))
+  (let* ((pic (the picture (ss-pic ss)))
          (mbw (pic-mb-width pic)) (mbh (pic-mb-height pic)))
+    (declare (type fixnum mbw mbh))
     (if (or (minusp bx) (minusp by) (>= bx (* 4 mbw)) (>= by (* 4 mbh)))
         (values 0 0 -1 nil)
-        (let ((mbx (floor bx 4)) (mby (floor by 4)))
+        ;; a shift, not a division: BX and BY are non-negative here, which the branch above has
+        ;; just established, and FLOOR on an unknown sign is a call
+        (let ((mbx (ash bx -2)) (mby (ash by -2)))
+          (declare (type fixnum mbx mby))
           ;; the neighbour must be decoded already; raster order and one slice per picture make
           ;; that the same test macroblock availability uses everywhere else
           (cond

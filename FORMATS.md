@@ -25,8 +25,23 @@ as data.
 
 H.264 covers CAVLC and CABAC, P and B slices, both direct modes, weighted and implicit weighted
 prediction, reference list reordering, adaptive reference marking, the 8x8 transform, Intra_8x8,
-scaling matrices, and the in-loop filter. About 118 fps at 640x360 and 71 at 1080p, decoding
-independent pictures concurrently.
+scaling matrices, and the in-loop filter.
+
+Speed, on one machine and one synthetic source, so read it as ratios and not as a specification:
+
+| | one thread | sixteen |
+|---|---|---|
+| 640x360, P and B pictures | 38 fps | 40 |
+| 1920x1080, P and B pictures | 4.5 fps | 4.5 |
+| 640x360, all intra | 61 fps | 526 |
+| 1920x1080, all intra | 7.9 fps | 68 |
+
+The two columns differ only where the stream allows it. Pictures are decoded concurrently when they
+are independently decodable, which today means all-intra; a stream with P or B pictures is a chain
+and gets the serial walk, so the second column is the first plus noise.
+
+The inter rows are about 2.7 times what they were before the motion-compensation path was tuned;
+the intra rows are unchanged, because nothing that was tuned runs in them.
 
 That set is what x264 produces with no options at all, which is the point: High is x264's default
 profile, so most H.264 encoded since about 2010 is High rather than Main.
@@ -99,5 +114,6 @@ playing what people link you.
 
 ## Small things that are nearly free
 
-- **H.264 decode speed at 1080p.** 71 fps concurrently, but single-threaded it is 10.6, and the
-  deblocking filter is a third of that. Matters for a single-core or latency-bound path.
+- **A serial H.264 stream is still a serial decode.** Concurrency here is per PICTURE, so it does
+  nothing for a stream with P or B pictures — which is every real stream. Slice-level or
+  wavefront parallelism would, and neither is small.

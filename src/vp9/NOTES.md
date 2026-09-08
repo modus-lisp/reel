@@ -164,12 +164,44 @@ bit-exact. That proves the partition walk, every block mode, every coefficient, 
 with all its substitutions, the fifteen predictors, the Walsh-Hadamard, and the crop on the way out —
 everything except the DCT and ADST themselves, which a lossless frame does not use, and the filter.
 
+## The loop filter
+
+Stage five, and with it **every intra frame of every fixture decodes bit-exact against ffmpeg** —
+including 1280x720 across four tile columns and a stream whose transform mode is switchable. That is
+the whole decoder except inter prediction.
+
+VP9 filters TRANSFORM BLOCK edges, not macroblock edges — there are no macroblocks — and the width at
+each edge depends on the transform sizes meeting there: sixteen samples across a 32x32 boundary,
+eight across an 8x8 one, four inside a block of 4x4 transforms. Which edges get which width is worked
+out **while decoding**, as a bitmask per superblock, because by the time the filter runs the block
+structure is gone.
+
+The mask is four planes deep per row of the superblock: one each for the sixteen-, eight- and
+four-wide filters, and a fourth for the four-wide edges that fall *inside* an eight-sample step and
+so cannot be reached by the first three. That fourth plane looks redundant and is not: the filter
+walks eight samples at a time, and a 4x4 transform has an edge halfway through every step.
+
+Columns before rows, per plane, per superblock, and never interleaved — a sample on a corner is
+filtered twice and the horizontal pass must see what the vertical one left.
+
+### Three bugs worth recording
+
+**`2 - !(y & mask)` is two when the test passes.** The C negation inverts it, and reading it as
+written the other way round puts every four-wide horizontal edge into the eight-wide plane. This was
+the last bug and cost the most: it left about a tenth of a percent of samples wrong, scattered, which
+looks exactly like a rounding difference somewhere in the transforms.
+
+**The column pass advances sixteen sample rows per step whatever the subsampling**, because the step
+is twice as tall in a subsampled plane: two level rows of eight samples, or four of four.
+
+**A tile's left edge is in eight-sample units.** Storing it in superblocks makes every block at the
+left edge of a tile believe it has a neighbour — which is invisible until a frame uses more than one
+tile column *and* a switchable transform size, because only then does availability reach the
+entropy decoder.
+
 ## What is next
 
-1. The loop filter, which is what stands between this and a lossy frame that can be compared. VP9
-   applies it per TRANSFORM-BLOCK edge rather than per macroblock, with the widths chosen by a mask
-   built while decoding.
-2. Motion vectors and inter prediction, including compound.
+1. Motion vectors and inter prediction, including compound.
 3. The loop filter, which in VP9 is applied per transform-block edge rather than per macroblock.
 4. Backward probability adaptation, which is what makes a frame's counts the next frame's model.
 

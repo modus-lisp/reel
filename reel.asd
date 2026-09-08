@@ -115,6 +115,7 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
        (:file "picture")     ; the decoded picture, ahead of everything that writes into it
        (:file "transform")   ; GENERATED (one dimension at a time) plus the two-pass wrapper
        (:file "intra")        ; the fifteen intra prediction modes at four sizes
+       (:file "loopfilter")  ; the deblocking filter, and the masks that say where it goes
        (:file "block")       ; tiles, the partition quadtree, block modes and coefficients
        (:file "recon"))      ; edge samples, prediction and the inverse transform
       )

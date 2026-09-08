@@ -112,11 +112,14 @@ byte. A 1280x720 key frame is thirty-four thousand bytes and twenty-three hundre
 symbol read at the wrong width anywhere in it does not land on the last one. So the entropy layer is
 as verified as a decoded picture would make it, before there is a picture.
 
-Reconstruction is in too, and a LOSSLESS key frame decodes bit-exact against ffmpeg — which is the
-one case comparable before the loop filter exists, because a lossless frame's filter level is zero.
-That covers the intra predictors, the edge substitutions, the Walsh-Hadamard and the crop.
+Reconstruction and the loop filter are in, and **every intra frame of every fixture now decodes
+bit-exact against ffmpeg** — 176x144, 352x288 with a switchable transform mode, 1280x720 across four
+tile columns, and a lossless encode. That is the whole decoder except inter prediction: the partition
+quadtree, every block mode, every coefficient, all four transform sizes with both the DCT and the
+ADST, the fifteen intra predictors, and the filter with all three of its widths.
 
-What remains is the loop filter, then motion. `reel/src/vp9/NOTES.md` has the detail.
+What remains is motion: vector prediction, the eight-tap filters, and compound prediction.
+`reel/src/vp9/NOTES.md` has the detail.
 
 ## Not worth it, and why
 

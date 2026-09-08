@@ -152,3 +152,23 @@
                                 (%itxfm-add dst stride o coeffs sz uvtx 0 eob lossless (* 16 n))))
                             (incf n (* step step)))))))
     (values)))
+(defun %filter-superblock (st sb col row)
+  "One superblock: all the vertical edges of each plane, then all the horizontal ones.
+
+   Columns before rows, and never interleaved: a sample on a corner is filtered twice, and the
+   horizontal pass must see what the vertical pass left."
+  (declare (type state st) (type fixnum sb col row))
+  (let* ((f (st-frame st)) (mask (st-lf-mask st)) (level (st-lf-level st))
+         (lim (st-lf-lim st)) (mblim (st-lf-mblim st)))
+    (let ((stride (aref (fr-stride f) 0))
+          (dst (the octets (aref (fr-planes f) 0))))
+      (let ((base (+ (* 8 row stride) (* 8 col))))
+        (%filter-cols mask sb 0 level col 0 0 dst stride base lim mblim)
+        (%filter-rows mask sb 0 level row 0 0 dst stride base lim mblim)))
+    (dotimes (p 2)
+      (let ((stride (aref (fr-stride f) (1+ p)))
+            (dst (the octets (aref (fr-planes f) (1+ p)))))
+        (let ((base (+ (* 4 row stride) (* 4 col))))
+          (%filter-cols mask sb 1 level col 1 1 dst stride base lim mblim)
+          (%filter-rows mask sb 1 level row 1 1 dst stride base lim mblim)))))
+  (values))

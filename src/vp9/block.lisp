@@ -109,6 +109,13 @@
   (intra-row (vector (%o 0) (%o 0) (%o 0)) :type simple-vector)
   (edge-a (%o 96) :type octets)                 ; the row above, corner at index thirty-one
   (edge-l (%o 64) :type octets)                 ; and the column to the left
+  ;; the loop filter's working data: a level per 8x8 block and an edge mask, per superblock column
+  (lf-level (make-array '(1 8 8) :element-type 'fixnum) :type (simple-array fixnum (* 8 8)))
+  (lf-mask (make-array '(1 2 2 8 4) :element-type 'fixnum)
+           :type (simple-array fixnum (* 2 2 8 4)))
+  (lf-lim (make-array 64 :element-type 'fixnum) :type (simple-array fixnum (64)))
+  (lf-mblim (make-array 64 :element-type 'fixnum) :type (simple-array fixnum (64)))
+  (lf-lvl (make-array 8 :element-type 'fixnum) :type (simple-array fixnum (8)))
   c                                             ; the arithmetic coder of the current tile
   (blocks 0 :type fixnum)                       ; how many blocks this frame has decoded
   ;; THE CHECK THAT COSTS NOTHING: how far any tile's coder finished from the end of its own
@@ -156,6 +163,13 @@
                           :above-segpred (%o cols)
                           :above-intra (%o cols))))
     (setf (st-frame st) (make-frame-for h))
+    (setf (st-lf-level st) (make-array (list (st-sb-cols st) 8 8) :element-type 'fixnum
+                                       :initial-element 0)
+          (st-lf-mask st) (make-array (list (st-sb-cols st) 2 2 8 4) :element-type 'fixnum
+                                      :initial-element 0))
+    (multiple-value-bind (lim mblim) (%filter-luts (h-sharpness h))
+      (setf (st-lf-lim st) lim (st-lf-mblim st) mblim))
+    (%init-filter-levels st h)
     (dotimes (p 3)
       (setf (aref (st-intra-row st) p)
             (%o (aref (fr-stride (st-frame st)) p))))
@@ -536,7 +550,53 @@
             (%splat (aref (st-left-uv-nnz st) pl) (st-row7 st) h4 0)))
         (%decode-coeffs st))
     (%intra-recon st)
+    ;; and record which of this block's edges the filter will visit, and how wide
+    (let ((lvl (aref (st-lf-lvl st) (st-seg-id st))))
+      (declare (type fixnum lvl))
+      (when (and (plusp (h-filter-level (st-h st))) (plusp lvl))
+        (let* ((bs (st-bs st))
+               (sb (ash (st-col st) -3))
+               (w4 (%bw4 bs)) (h4 (%bh4 bs))
+               (x-end (min (- (st-cols st) (st-col st)) w4))
+               (y-end (min (- (st-rows st) (st-row st)) h4))
+               (row7 (st-row7 st)) (col7 (logand (st-col st) 7)))
+          (declare (type fixnum bs sb w4 h4 x-end y-end row7 col7))
+          (dotimes (dy h4)
+            (dotimes (dx w4)
+              (when (and (< (+ row7 dy) 8) (< (+ col7 dx) 8))
+                (setf (aref (st-lf-level st) sb (+ row7 dy) (+ col7 dx)) lvl))))
+          (%mask-edges (st-lf-mask st) sb 0 0 0 row7 col7 x-end y-end 0 0 (st-tx st) nil)
+          (%mask-edges (st-lf-mask st) sb 1 1 1 row7 col7 x-end y-end
+                       (if (and (logbitp 0 (st-cols st))
+                                (>= (+ (st-col st) w4) (st-cols st)))
+                           (logand (st-cols st) 7) 0)
+                       (if (and (logbitp 0 (st-rows st))
+                                (>= (+ (st-row st) h4) (st-rows st)))
+                           (logand (st-rows st) 7) 0)
+                       (st-uvtx st) nil))))
     (incf (st-blocks st))))
+
+(defun %init-filter-levels (st h)
+  "The filter level each segment uses, from the frame level and the per-segment and per-reference
+   deltas (6.2.9).
+
+   Only the intra entry is computed here, because only intra blocks exist so far; the reference and
+   mode deltas that an inter block would apply multiply by two once the frame level reaches
+   thirty-two, which is the format saying `a strong filter should be adjusted in bigger steps'."
+  (declare (type state st))
+  (let ((sh (if (>= (h-filter-level h) 32) 1 0)))
+    (declare (type fixnum sh))
+    (dotimes (i 8)
+      (let ((lvl (h-filter-level h)))
+        (declare (type fixnum lvl))
+        (when (and (h-seg-enabled h) (plusp (aref (h-seg-feature-on h) i 1)))
+          (setf lvl (if (h-seg-abs h)
+                        (aref (h-seg-feature h) i 1)
+                        (+ (h-filter-level h) (aref (h-seg-feature h) i 1)))))
+        (setf lvl (max 0 (min 63 lvl)))
+        (when (h-lf-delta-enabled h)
+          (setf lvl (max 0 (min 63 (+ lvl (* (aref (h-lf-ref-delta h) 0) (ash 1 sh)))))))
+        (setf (aref (st-lf-lvl st) i) lvl)))))
 
 (defun %decode-sb (st row col bl)
   "One node of the quadtree (6.4.4).
@@ -605,39 +665,57 @@
   (let* ((h (st-h st))
          (rows (ash 1 (h-log2-tile-rows h)))
          (cols (ash 1 (h-log2-tile-cols h)))
-         (at start))
+         (at start)
+         (coders (make-array cols)))
     (declare (type fixnum rows cols at))
     (%reset-above st)
     (dotimes (tr rows)
       (multiple-value-bind (row-start row-end)
           (%tile-bounds tr (h-log2-tile-rows h) (st-sb-rows st))
+        ;; EVERY TILE COLUMN'S CODER IS OPENED FIRST, because the rows are then decoded across all
+        ;; of them: the frame is walked a superblock row at a time, and each row visits every tile
+        ;; column in turn.  Decoding a whole tile column before starting the next would read the
+        ;; same bits — each tile has its own coder — but would put the loop filter and the saved
+        ;; intra row a whole tile out of step, since both are frame-wide and per superblock row.
         (dotimes (tc cols)
-          (multiple-value-bind (col-start col-end)
-              (%tile-bounds tc (h-log2-tile-cols h) (st-sb-cols st))
-            (let ((size (if (and (= tr (1- rows)) (= tc (1- cols)))
-                            (- end at)
-                            (progn
-                              (when (> (+ at 4) end) (%err "a tile length past the end of a frame"))
-                              (prog1 (logior (ash (aref bytes at) 24) (ash (aref bytes (1+ at)) 16)
-                                             (ash (aref bytes (+ at 2)) 8) (aref bytes (+ at 3)))
-                                (incf at 4))))))
-              (declare (type fixnum size))
-              (when (or (minusp size) (> (+ at size) end))
-                (%err "a tile of ~d bytes with ~d left in the frame" size (- end at)))
-              (setf (st-c st) (make-bool bytes at (+ at size)))
-              (when (plusp (bool-flag (st-c st)))
-                (%err "a tile whose marker bit is set"))
-              (setf (st-tile-col-start st) (ash col-start -3)
-                    (st-tile-col-end st) (ash col-end -3))
-              (loop for row of-type fixnum from row-start below row-end by 8
-                    do (%reset-left st)
-                       (loop for col of-type fixnum from col-start below col-end by 8
-                             do (%decode-sb st row col 0))
-                       (%save-intra-row st row))
-              (setf (st-tile-slack st)
-                    (max (st-tile-slack st)
-                         (abs (- (bd-end (st-c st)) (bd-pos (st-c st))))))
-              (incf at size))))))
+          (let ((size (if (and (= tr (1- rows)) (= tc (1- cols)))
+                          (- end at)
+                          (progn
+                            (when (> (+ at 4) end) (%err "a tile length past the end of a frame"))
+                            (prog1 (logior (ash (aref bytes at) 24) (ash (aref bytes (1+ at)) 16)
+                                           (ash (aref bytes (+ at 2)) 8) (aref bytes (+ at 3)))
+                              (incf at 4))))))
+            (declare (type fixnum size))
+            (when (or (minusp size) (> (+ at size) end))
+              (%err "a tile of ~d bytes with ~d left in the frame" size (- end at)))
+            (setf (aref coders tc) (make-bool bytes at (+ at size)))
+            (when (plusp (bool-flag (aref coders tc)))
+              (%err "a tile whose marker bit is set"))
+            (incf at size)))
+        (loop for row of-type fixnum from row-start below row-end by 8
+              do (dotimes (sb (st-sb-cols st))
+                   (dotimes (i 2) (dotimes (j 2) (dotimes (y 8) (dotimes (k 4)
+                     (setf (aref (st-lf-mask st) sb i j y k) 0))))))
+                 (dotimes (tc cols)
+                   (multiple-value-bind (col-start col-end)
+                       (%tile-bounds tc (h-log2-tile-cols h) (st-sb-cols st))
+                     ;; IN EIGHT-SAMPLE UNITS, the same as COL, because that is what the
+                     ;; availability test compares it against.  Storing it in superblocks makes a
+                     ;; block at the left edge of a tile believe it has a neighbour.
+                     (setf (st-c st) (aref coders tc)
+                           (st-tile-col-start st) col-start
+                           (st-tile-col-end st) col-end)
+                     (%reset-left st)
+                     (loop for col of-type fixnum from col-start below col-end by 8
+                           do (%decode-sb st row col 0))))
+                 (%save-intra-row st row)
+                 (when (plusp (h-filter-level h))
+                   (loop for col of-type fixnum from 0 below (st-cols st) by 8
+                         do (%filter-superblock st (ash col -3) col row))))
+        (dotimes (tc cols)
+          (setf (st-tile-slack st)
+                (max (st-tile-slack st)
+                     (abs (- (bd-end (aref coders tc)) (bd-pos (aref coders tc)))))))))
     at))
 
 (defun %save-intra-row (st row)

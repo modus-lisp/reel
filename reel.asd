@@ -51,11 +51,14 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
        ;; scaling matrices to turn a transmitted scaling list into something dequantisation can use
        (:file "tables")       ; the CAVLC VLC tables, the scan order, the dequant tables
        (:file "scaling-tables")  ; GENERATED: the default scaling matrices
+       (:file "transform8-tables") ; GENERATED: the 8x8 scan and normalisation
        (:file "params")       ; sequence and picture parameter sets, slice headers
        (:file "cavlc")        ; residual blocks: coeff_token, levels, runs
        (:file "cabac-tables") ; GENERATED: the normative CABAC constants
        (:file "transform")    ; dequantisation, the inverse 4x4 and the DC transforms
+       (:file "transform8")   ; the 8x8 transform, High profile's other half
        (:file "intra")        ; the nine 4x4, four 16x16 and four chroma prediction modes
+       (:file "intra8")       ; the nine 8x8 modes, over filtered reference samples
        (:file "motion")       ; inter prediction: vector prediction and quarter-pel resampling
        (:file "slice")        ; the macroblock layer and the slice loop
        (:file "cabac")        ; the arithmetic decoder, and the syntax read through it

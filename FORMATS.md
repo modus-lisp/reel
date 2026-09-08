@@ -171,7 +171,7 @@ than it looks. `t/fetch-conformance.sh` pulls the official suites; here is what 
 |---|---|
 | **VP8**, the seventeen official libvpx vectors | **17 of 17 bit-exact**, 833 frames |
 | **VP9**, the official feature vectors | **34 of 34 bit-exact**; 11 profile 1/2/3 streams correctly refused |
-| **H.264**, a spread of 37 JVT conformance streams | 17 bit-exact, 15 refused, 5 wrong |
+| **H.264**, a spread of 37 JVT conformance streams | 20 bit-exact, 15 refused, 2 wrong |
 | **AC-3**, three real Dolby-encoded tracks | two at 0.9998; one is a near-silent excerpt where correlation measures rounding |
 
 What that exercise found, none of which the synthetic corpus could:
@@ -180,6 +180,13 @@ What that exercise found, none of which the synthetic corpus could:
   rates and in speed-oriented encoder modes, so no ordinary encode contains one. Worse, the frame
   header's "switchable" flag was stored in the same field as the filter number, using 3 as its
   sentinel — and 3 is bilinear. Fixed.
+- **H.264 computed its reorder depth from the slice in hand rather than from the sequence.** How far
+  display order may run behind decoding order is a property of the sequence; deriving it from
+  whether the current picture is a B slice makes the depth drop to zero on every P picture, so the P
+  is handed out before the B that precedes it on screen. Every picture decoded perfectly and the
+  order was wrong in pairs, which is exactly what three of the JVT streams turned out to be. When
+  the VUI states `max_num_reorder_frames` that is the answer; when it does not — and most streams do
+  not — the default is the whole decoded picture buffer, from the level table. Fixed.
 - **VP9's segment map was not carried forward.** A frame that does not update the map still has
   one — the previous frame's, copied forward block by block. Writing nothing, which is what "no
   update means no work" gets you, leaves the current map all zeros and the frame after it predicts
@@ -207,9 +214,14 @@ And what it found that is *not* fixed, which is the honest part:
 - **H.264 refuses more than this document admits.** Alongside the documented refusals it turns away
   I_PCM macroblocks, `pic_order_cnt_type` 1, and several streams whose reference lists it cannot
   build.
-- **Five JVT streams decode to the wrong picture rather than being refused**, which is worse than
-  either: `BA3_SVA_C`, `CABA3_SVA_B`, `CANL4_SVA_B` and `CACQP3_Sony_D` go wrong immediately, and
-  `CI_MW_D` gets thirty-two pictures right and then diverges.
+- **Two JVT streams still decode to the wrong picture rather than being refused**, which is worse
+  than either. `CACQP3_Sony_D` decodes every luma sample of every picture correctly and gets the
+  chroma badly wrong — which points at the chroma quantiser and is not the chroma quantiser: its
+  `chroma_qp_index_offset` of 12 is parsed correctly, Table 8-15 maps it correctly, and forcing the
+  offset to zero or skipping the table both make matters worse rather than better. Since CABAC
+  cannot desynchronise for one plane and not the other, the coefficients must be right and the
+  chroma reconstruction wrong somewhere after them. `CI_MW_D` gets thirty-two pictures exactly right
+  and then diverges, which is the signature of reference management rather than of a block decode.
 
 ## Not worth it, and why
 

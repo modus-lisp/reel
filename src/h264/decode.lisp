@@ -67,6 +67,35 @@
                (t (* 2 (+ offset fn))))))
       (t (%err "pic_order_cnt_type ~d is not supported" (sps-poc-type sps))))))
 
+;;; ---- how far display order may run behind decoding order --------------------------------------
+;;;
+;;; THIS IS A PROPERTY OF THE SEQUENCE, NOT OF THE SLICE IN HAND.  Deriving it from whether the
+;;; current picture is a B slice looks reasonable and is wrong in a specific, quiet way: in a stream
+;;; coded I P B P B, the depth drops to zero on every P, the P is handed out immediately, and it
+;;; arrives before the B that precedes it on screen.  Every picture is decoded perfectly and the
+;;; order is wrong in pairs — which is what three of the JVT conformance streams turned out to be.
+;;;
+;;; When the sequence states max_num_reorder_frames in its VUI, that is the answer.  When it does
+;;; not — and most streams do not — the standard's default is the full decoded picture buffer,
+;;; which is MaxDpbMbs for the level divided by the picture area, capped at sixteen.  A file decode
+;;; pays for that in latency and nothing else, and both an IDR and the end of the stream drain it.
+
+(defparameter +max-dpb-mbs+
+  '((10 . 396) (11 . 900) (12 . 2376) (13 . 2376) (20 . 2376) (21 . 4752) (22 . 8100)
+    (30 . 8100) (31 . 18000) (32 . 20480) (40 . 32768) (41 . 32768) (42 . 34816)
+    (50 . 110400) (51 . 184320) (52 . 184320) (60 . 696320) (61 . 696320) (62 . 696320))
+  "Table A-1: the decoded picture buffer size each level allows, in macroblocks.")
+
+(defun %reorder-depth (sps)
+  (or (sps-num-reorder-frames sps)
+      (let* ((mbs (* (sps-mb-width sps) (sps-mb-height sps)))
+             (level (sps-level sps))
+             (dpb (or (cdr (assoc level +max-dpb-mbs+))
+                      ;; an unlisted level: take the next one up rather than under-buffer
+                      (cdr (find-if (lambda (e) (>= (car e) level)) +max-dpb-mbs+))
+                      696320)))
+        (max 0 (min 16 (floor dpb (max 1 mbs)))))))
+
 (defun %bump (d &optional flush)
   "Hand out the pending picture with the smallest order count, if it is time.
 
@@ -246,9 +275,7 @@
          (setf (pic-poc (h264-picture d)) (%picture-order-count d sh nal)
                (pic-frame-num (h264-picture d)) (sh-frame-num sh)
                (pic-ref-p (h264-picture d)) (plusp (nal-ref-idc nal)))
-         (setf (h264-reorder d)
-               ;; what the sequence says, or a delay wide enough for anything without B pyramids
-               (or (sps-num-reorder-frames sps) (if (sh-b-slice-p sh) 2 0))))
+         (setf (h264-reorder d) (%reorder-depth sps)))
        (unless (h264-picture d) (%err "a slice arrived before any picture was started"))
        (if (sh-b-slice-p sh)
            (multiple-value-bind (l0 l1) (build-ref-lists-b d sh)

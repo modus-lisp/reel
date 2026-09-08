@@ -119,9 +119,14 @@
    picture and the per-slice scratch must not be shared."
   (let ((w (%make-decoder :sps (h264-sps d) :pps (h264-pps d)))
         (out nil))
-    (dolist (n nals out)
+    (dolist (n nals)
       (let ((p (feed-nal w n)))
-        (when p (setf out p))))))
+        (when p (setf out p))))
+    ;; AND THEN FLUSH.  These access units are independently decodable, so decoding order is display
+    ;; order and there is nothing to reorder — but the reorder buffer does not know that, and a
+    ;; sequence whose level allows a deep buffer will hold the picture rather than hand it over.
+    ;; The picture is finished either way; it just has to be asked for.
+    (or out (first (flush-decoder w)))))
 
 #+sb-thread
 (defun %pmap-vector (fn items nthreads)

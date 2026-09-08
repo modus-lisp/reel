@@ -170,7 +170,7 @@ than it looks. `t/fetch-conformance.sh` pulls the official suites; here is what 
 | | result |
 |---|---|
 | **VP8**, the seventeen official libvpx vectors | **17 of 17 bit-exact**, 833 frames |
-| **VP9**, the official feature vectors | 29 of 34 bit-exact; 11 profile 1/2/3 streams correctly refused |
+| **VP9**, the official feature vectors | **34 of 34 bit-exact**; 11 profile 1/2/3 streams correctly refused |
 | **H.264**, a spread of 37 JVT conformance streams | 17 bit-exact, 15 refused, 5 wrong |
 | **AC-3**, three real Dolby-encoded tracks | two at 0.9998; one is a near-silent excerpt where correlation measures rounding |
 
@@ -180,6 +180,17 @@ What that exercise found, none of which the synthetic corpus could:
   rates and in speed-oriented encoder modes, so no ordinary encode contains one. Worse, the frame
   header's "switchable" flag was stored in the same field as the filter number, using 3 as its
   sentinel — and 3 is bilinear. Fixed.
+- **VP9's segment map was not carried forward.** A frame that does not update the map still has
+  one — the previous frame's, copied forward block by block. Writing nothing, which is what "no
+  update means no work" gets you, leaves the current map all zeros and the frame after it predicts
+  from zeros. Three vectors turned on that alone.
+- **A shown-existing frame decodes nothing, and must leave the bookkeeping alone.** The code
+  actively recorded that the last frame had been visible, which told the next frame it could predict
+  from a motion field that was never built.
+- **Two of the failures were the oracle, not the decoder.** `ffmpeg -f rawvideo` duplicates frames
+  to a constant rate unless told `-fps_mode passthrough`, and every comparison after the first
+  repeat is nonsense. Related: a frame count is not `size / (width * height * 3/2)`, because VP9
+  changes picture size from frame to frame. Both traps are written into `t/conformance.lisp`.
 - **VP9 threw away the state a frame is supposed to inherit.** The loop filter deltas and the
   segmentation feature data persist between frames; only `setup_past_independence` — a key frame, an
   intra-only frame that asks for a reset, or an error-resilient frame — returns them to their
@@ -193,16 +204,12 @@ What that exercise found, none of which the synthetic corpus could:
 
 And what it found that is *not* fixed, which is the honest part:
 
-- **VP9 fails five feature vectors**: `show_existing_frame`, segmentation with an alternate
-  quantiser on key frames, one other segmentation case, one tiling case, and one regression
-  bitstream. Every one is a feature this decoder claims and gets wrong on content no encoder here
-  produces. Two of them change picture size from frame to frame, which is worth knowing before
-  reading the numbers: a reference decode of such a file is not a stack of equal-sized pictures, and
-  measuring one as though it were gives a frame count that is simply wrong.
 - **H.264 refuses more than this document admits.** Alongside the documented refusals it turns away
   I_PCM macroblocks, `pic_order_cnt_type` 1, and several streams whose reference lists it cannot
-  build — and five streams decode to the wrong picture rather than being refused, which is worse
-  than either.
+  build.
+- **Five JVT streams decode to the wrong picture rather than being refused**, which is worse than
+  either: `BA3_SVA_C`, `CABA3_SVA_B`, `CANL4_SVA_B` and `CACQP3_Sony_D` go wrong immediately, and
+  `CI_MW_D` gets thirty-two pictures right and then diverges.
 
 ## Not worth it, and why
 

@@ -54,7 +54,7 @@
     (when (h-show-existing h)
       (let ((f (aref (d-refs d) (h-show-existing h))))
         (unless f (%err "a frame showing reference ~d, which is not there" (h-show-existing h)))
-        (setf (d-last-invisible d) nil)
+        ;; leave the previous-frame bookkeeping alone: nothing was decoded
         (return-from decode-frame f)))
     (when (h-keyframe h) (%reset-contexts d -1))
     (when (and (h-intra-only h) (plusp (h-reset-context h)))

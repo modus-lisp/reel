@@ -26,7 +26,7 @@ as data.
 | **FFV1**, the preservation codec | ffmpeg, bit-exact on twelve configurations, every frame |
 | **Theora** in Ogg | ffmpeg, bit-exact on six fixtures, every frame |
 | **VP9** | ffmpeg, bit-exact on seven clips, every picture |
-| **Opus, AAC, MP3, MPEG audio Layer II, Vorbis** | reed's own suites; Layer II within 0.0002 RMS of ffmpeg |
+| **Opus, AAC, MP3, MPEG audio Layer II, G.711** | reed's own suites; Layer II within 0.0002 RMS of ffmpeg |
 
 H.264 covers CAVLC and CABAC, P and B slices, both direct modes, weighted and implicit weighted
 prediction, reference list reordering, adaptive reference marking, the 8x8 transform, Intra_8x8,
@@ -128,6 +128,12 @@ because nobody knows to disbelieve it.
   sRGB colour space refused on its own — and prediction from a reference of a different size.
 - AC-3 and DTS, which a DVD may carry instead of MPEG audio. A file's video plays and the audio
   track is named as undecodable rather than guessed at.
+- **Vorbis**, on the same terms — and this line is a correction. This table claimed until now that
+  Vorbis played, and it does not: there is no Vorbis decoder anywhere in the stack. Ogg and
+  Matroska both recognise the track and name it, which is why nothing ever failed loudly enough to
+  catch the claim. It matters more than the other two refusals because Vorbis is the audio half of
+  the *original* WebM pairing — a `.webm` from before about 2013 is VP8 and Vorbis — so the most
+  likely file to open here with sound and no way to hear it is a WebM.
 
 ## The gaps
 

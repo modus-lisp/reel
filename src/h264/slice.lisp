@@ -260,6 +260,55 @@
 (defun %mb-index (ss) 
   (declare (optimize (speed 3) (safety 1)))(+ (* (ss-mby ss) (pic-mb-width (ss-pic ss))) (ss-mbx ss)))
 
+(defun decode-pcm-macroblock (ss)
+  "I_PCM: the macroblock's samples, sent verbatim (7.3.5, 8.5.1).
+
+   No prediction, no transform, no quantiser — the encoder decided this macroblock was cheaper to
+   send than to code, which happens on synthetic content and on noise.  The reconstruction is
+   trivial; the three things that are easy to get wrong are all about what the NEIGHBOURS see:
+
+     - every 4x4 block counts as sixteen coefficients for nC, so a neighbour picks the densest
+       coeff_token table.  Leave it at zero and the next macroblock desynchronises.
+     - the deblocking quantiser is 0 (8.7.2.2), which is what stops the filter from smoothing
+       samples that were sent exactly.
+     - under CABAC the arithmetic decoder has to be RESTARTED afterwards (9.3.1.2).  The contexts
+       survive; only the range and offset are re-read.  This works out simply here because the
+       engine consumes the bitstream one bit per renormalisation, exactly as the specification's
+       model does, so the read position is already where the PCM samples begin.  A decoder whose
+       CABAC reads whole words ahead has to back the pointer up by hand."
+  (declare (optimize (speed 3) (safety 1)))
+  (let* ((pic (ss-pic ss)) (br (ss-br ss))
+         (mbi (%mb-index ss))
+         (ys (pic-ystride pic)) (cs (pic-cstride pic))
+         (ybase (pic-y-base pic (ss-mbx ss) (ss-mby ss)))
+         (cbase (pic-c-base pic (ss-mbx ss) (ss-mby ss)))
+         (y (pic-y pic)) (u (pic-u pic)) (v (pic-v pic)))
+    (byte-align br)                                     ; pcm_alignment_zero_bit
+    (dotimes (j 16) (dotimes (i 16) (setf (aref y (+ ybase (* j ys) i)) (ub br 8))))
+    (dotimes (j 8) (dotimes (i 8) (setf (aref u (+ cbase (* j cs) i)) (ub br 8))))
+    (dotimes (j 8) (dotimes (i 8) (setf (aref v (+ cbase (* j cs) i)) (ub br 8))))
+    (let ((c (ss-cabac ss)))
+      (when c
+        (setf (cb-range c) 510
+              (cb-offset c) (ub br 9)
+              (cb-last-qp-delta c) 0)))
+    (setf (aref (pic-mb-types pic) mbi) 25
+          (aref (pic-mb-tf8 pic) mbi) 0
+          ;; "all coefficients present": luma 15 and chroma 2, spelled EXACTLY as a real coded
+          ;; block pattern would be.  A neighbour's chroma context asks whether this macroblock's
+          ;; CodedBlockPatternChroma is 2, not merely whether it is non-zero (9.3.3.1.1.4), so the
+          ;; obvious "set all the bits" of #x3f says 3 and answers that question wrong.
+          (aref (pic-mb-cbp pic) mbi) #x2f
+          ;; 9.3.3.1.1.8 gives an I_PCM neighbour condTermFlagN 0, which is what DC spells here
+          (aref (pic-mb-chroma-mode pic) mbi) 0
+          (aref (pic-mb-qps pic) mbi) 0)
+    (setf (ss-tf8 ss) nil)
+    (let ((bx (* 4 (ss-mbx ss))) (by (* 4 (ss-mby ss))))
+      (dotimes (j 4) (dotimes (i 4) (clear-blk-motion pic (+ bx i) (+ by j)))))
+    (dotimes (blk 16) (set-luma-nz ss blk 16))
+    (dotimes (plane 2) (dotimes (blk 4) (set-chroma-nz ss plane blk 16)))
+    25))
+
 (defun decode-intra-macroblock (ss mb-type)
   "Reconstruct one INTRA macroblock whose mb_type has already been read.
 
@@ -270,7 +319,7 @@
   (declare (optimize (speed 3) (safety 1)))
   (let* ((pic (ss-pic ss))
          (mbi (+ (* (ss-mby ss) (pic-mb-width pic)) (ss-mbx ss))))
-    (when (= mb-type 25) (%err "I_PCM macroblocks are not supported"))
+    (when (= mb-type 25) (return-from decode-intra-macroblock (decode-pcm-macroblock ss)))
     (when (> mb-type 25) (%err "mb_type ~d in an I slice" mb-type))
     (setf (aref (pic-mb-types pic) mbi) mb-type)
     (let ((bx (* 4 (ss-mbx ss))) (by (* 4 (ss-mby ss))))

@@ -341,6 +341,11 @@
              (let ((i (%nbr-mbi ss dx dy)))
                (cond
                  ((null i) (if intra-p 1 0))
+                 ;; An I_PCM neighbour answers 1 to EVERY coded_block_flag context (9.3.3.1.1.9).
+                 ;; It has no transform blocks at all, and the standard reads that as `full'
+                 ;; rather than `empty' — the opposite of what falling through to the luma DC arm
+                 ;; below would conclude, since an I_PCM macroblock is not Intra16x16 either.
+                 ((= 25 (aref (pic-mb-types pic) i)) 1)
                  ((= cat +cat-luma-dc+)
                   ;; only an Intra16x16 macroblock HAS a luma DC block; from anything else there is
                   ;; no transform block to ask about, which is a 0 rather than a missing neighbour

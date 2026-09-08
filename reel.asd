@@ -77,4 +77,12 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
        (:file "idct")        ; the inverse transform, and why it cannot be bit-exact by definition
        (:file "motion")      ; half-pel prediction
        (:file "slice")       ; the macroblock layer
-       (:file "decode"))))))) ; start codes in, pictures out
+       (:file "decode"))    ; start codes in, pictures out
+      )
+     ;; ---- MPEG-4 Part 2: the codec behind DivX and XviD
+     (:module "mpeg4"
+      :serial t
+      :components
+      ((:file "tables")      ; GENERATED: the scans, the matrices and seven Huffman tables
+       (:file "bits")        ; start codes, the bit reader, the Huffman machinery
+       (:file "headers"))))))) ; the video object layer and the video object plane

@@ -66,6 +66,14 @@
    #:picture #:pic-width #:pic-height #:pic-y #:pic-u #:pic-v #:picture->yuv420
    #:deblock-picture #:as-picture))
 
+(defpackage #:reel.mpeg4
+  (:use #:cl)
+  (:export
+   #:mpeg4-error #:mpeg4-error-message
+   #:find-start-code #:bitreader #:make-br
+   #:vol #:parse-vol-header #:vol-width #:vol-height #:vol-mb-width #:vol-mb-height
+   #:vop #:parse-vop-header #:vop-coding-type #:vop-type-name))
+
 (defpackage #:reel.mpeg2
   (:use #:cl)
   (:export
@@ -80,7 +88,9 @@
    #:decoder #:make-decoder #:feed-bytes #:flush-decoder #:decode-elementary-stream
    #:decoder-width #:decoder-height
    #:frame #:fr-width #:fr-height #:fr-y #:fr-u #:fr-v #:fr-ystride #:fr-cstride
-   #:fr-coding-type #:fr-timestamp #:picture->yuv420 #:as-picture))
+   #:fr-coding-type #:fr-timestamp #:picture->yuv420 #:as-picture
+   ;; the inverse transform, which MPEG-4 Part 2 shares exactly
+   #:idct-8x8 #:idct-put #:idct-add #:clamp255))
 
 (defpackage #:reel
   (:use #:cl)

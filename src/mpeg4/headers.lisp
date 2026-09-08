@@ -120,11 +120,7 @@
       (when (= 1 (read-bit br)) (setf (vol-intra-matrix v) (%read-matrix br)))
       (when (= 1 (read-bit br)) (setf (vol-inter-matrix v) (%read-matrix br))))
     (setf (vol-quarter-sample v) (and (/= 1 (vol-version v)) (= 1 (read-bit br))))
-    (when (vol-quarter-sample v)
-      ;; REFUSED, not ignored.  Quarter-sample motion is a different interpolation filter, not a
-      ;; finer version of the same one, and a decoder that treats the vectors as half-pel produces a
-      ;; picture that is plausible and drifting rather than one that is obviously wrong.
-      (%err "quarter-sample motion is not supported yet"))
+
     ;; complexity estimation: a pile of flags whose only effect on a decoder is that each one set
     ;; means a byte of nothing to skip in every picture header
     (when (= 0 (read-bit br))                    ; complexity_estimation_disable

@@ -131,7 +131,12 @@
   ;; A B picture predicts its vectors from a RUNNING predictor per direction, reset at the start of
   ;; every row — not from the median of neighbours the way P pictures do.
   (last-mv (make-array 4 :element-type 'fixnum) :type fixnums)
-  (pp-time 1 :type fixnum) (pb-time 1 :type fixnum))
+  (pp-time 1 :type fixnum) (pb-time 1 :type fixnum)
+  ;; scratch for quarter-sample interpolation: the window, and the three filtered versions of it
+  (qfull (make-array 289 :element-type '(unsigned-byte 8)) :type octets)
+  (qh (make-array 272 :element-type '(unsigned-byte 8)) :type octets)
+  (qv (make-array 256 :element-type '(unsigned-byte 8)) :type octets)
+  (qhv (make-array 256 :element-type '(unsigned-byte 8)) :type octets))
 
 (defun make-state (v p cur forward backward)
   (let* ((mbw (vol-mb-width v)) (mbh (vol-mb-height v))
@@ -539,6 +544,12 @@
    vectors are summed and this table decides where the sum lands, which is not the same answer as
    halving each one and averaging.")
 
+(declaim (inline %sticky-half))
+(defun %sticky-half (v)
+  "Halve V, keeping a set low bit rather than losing it.  A vector of one becomes one, not zero."
+  (declare (type fixnum v) (optimize (speed 3) (safety 0)))
+  (logior (ash v -1) (logand v 1)))
+
 (declaim (inline %round-chroma))
 (defun %round-chroma (sum)
   (declare (type fixnum sum) (optimize (speed 3) (safety 0)))
@@ -603,24 +614,45 @@
          (ybase (+ (* mby 16 ys) (* mbx 16)))
          (cbase (+ (* mby 8 cs) (* mbx 8))))
     (declare (type fixnum ys cs cw ch ccw cch r ybase cbase))
-    (if four-mv-p
-        (dotimes (i 4)
-          (let ((bx (* 8 (logand i 1))) (by (* 8 (ash i -1))))
-            (predict-block (fr-y cur) ys (+ ybase (* by ys) bx) (fr-y ref) ys cw ch
-                           (+ (* mbx 16) bx) (+ (* mby 16) by) 8 8
-                           (aref mv (* 2 i)) (aref mv (1+ (* 2 i))) r avg-p)))
-        (predict-block (fr-y cur) ys ybase (fr-y ref) ys cw ch
-                       (* mbx 16) (* mby 16) 16 16 (aref mv 0) (aref mv 1) r avg-p))
+    (if (vol-quarter-sample (st-vol st))
+        (if four-mv-p
+            (dotimes (i 4)
+              (let ((bx (* 8 (logand i 1))) (by (* 8 (ash i -1))))
+                (predict-block-qpel st (fr-y cur) ys (+ ybase (* by ys) bx) (fr-y ref) ys cw ch
+                                    (+ (* mbx 16) bx) (+ (* mby 16) by) 8
+                                    (aref mv (* 2 i)) (aref mv (1+ (* 2 i))) r avg-p)))
+            (predict-block-qpel st (fr-y cur) ys ybase (fr-y ref) ys cw ch
+                                (* mbx 16) (* mby 16) 16 (aref mv 0) (aref mv 1) r avg-p))
+        (if four-mv-p
+            (dotimes (i 4)
+              (let ((bx (* 8 (logand i 1))) (by (* 8 (ash i -1))))
+                (predict-block (fr-y cur) ys (+ ybase (* by ys) bx) (fr-y ref) ys cw ch
+                               (+ (* mbx 16) bx) (+ (* mby 16) by) 8 8
+                               (aref mv (* 2 i)) (aref mv (1+ (* 2 i))) r avg-p)))
+            (predict-block (fr-y cur) ys ybase (fr-y ref) ys cw ch
+                           (* mbx 16) (* mby 16) 16 16 (aref mv 0) (aref mv 1) r avg-p)))
     ;; ONE RULE FOR ONE VECTOR AND FOR FOUR.  The chroma vector is the SUM of the four luma vectors
     ;; put through a rounding table, and a macroblock with one vector simply has four copies of it.
     ;; Halving the single vector instead looks equivalent and is not: at a luma vector of one they
     ;; disagree, which is every odd vector, which is half of them.  The luma is then perfect and the
     ;; chroma alone is soft — a symptom that reads like a colour-space bug rather than a motion one.
+    ;; CHROMA STAYS HALF-SAMPLE even when luma is quarter-sample, so the vector has to come down a
+    ;; scale first — and it does so with a STICKY bit, `(v >> 1) | (v & 1)', which is not the same
+    ;; as halving.  A quarter-pel vector of one becomes a chroma half-pel vector of one, not zero.
     (multiple-value-bind (cx cy)
-        (if four-mv-p
-            (values (%round-chroma (+ (aref mv 0) (aref mv 2) (aref mv 4) (aref mv 6)))
-                    (%round-chroma (+ (aref mv 1) (aref mv 3) (aref mv 5) (aref mv 7))))
-            (values (%round-chroma (* 4 (aref mv 0))) (%round-chroma (* 4 (aref mv 1)))))
+        (cond
+          ((vol-quarter-sample (st-vol st))
+           (if four-mv-p
+               (values (%round-chroma (loop for i below 4 sum (truncate (aref mv (* 2 i)) 2)))
+                       (%round-chroma (loop for i below 4 sum (truncate (aref mv (1+ (* 2 i))) 2))))
+               ;; TWO steps down, not one: the quarter-pel vector is first halved toward zero
+               ;; into half-pel, and only then halved again with the sticky bit into chroma
+               (values (%sticky-half (truncate (aref mv 0) 2))
+                       (%sticky-half (truncate (aref mv 1) 2)))))
+          (four-mv-p
+           (values (%round-chroma (+ (aref mv 0) (aref mv 2) (aref mv 4) (aref mv 6)))
+                   (%round-chroma (+ (aref mv 1) (aref mv 3) (aref mv 5) (aref mv 7)))))
+          (t (values (%round-chroma (* 4 (aref mv 0))) (%round-chroma (* 4 (aref mv 1))))))
       (declare (type fixnum cx cy))
       (predict-block (fr-u cur) cs cbase (fr-u ref) cs ccw cch
                      (* mbx 8) (* mby 8) 8 8 cx cy r avg-p)
@@ -896,7 +928,9 @@
           (multiple-value-bind (fy by) (%scale-direct st py my)
             (setf (aref mv (* 2 i)) fx (aref mv (1+ (* 2 i))) fy
                   (aref mv1 (* 2 i)) bx (aref mv1 (1+ (* 2 i))) by)))))
-    four))
+    ;; with quarter-sample motion a direct macroblock is always treated as four blocks, even when
+    ;; the co-located one had a single vector
+    (or four (vol-quarter-sample (st-vol st)))))
 
 (defun decode-b-macroblock (st)
   "One macroblock of a B picture.
@@ -968,3 +1002,135 @@
           (if (vol-mpeg-quant (st-vol st)) (dequant-inter-mpeg st) (dequant-inter st))
           (multiple-value-bind (plane stride base) (%block-base st n)
             (reel.mpeg2:idct-add plane stride base (st-block st))))))))
+
+;;; ---- quarter-sample motion ----------------------------------------------------------------------
+;;;
+;;; Advanced Simple Profile interpolates to a QUARTER of a sample, and it is not a finer version of
+;;; the half-pel bilinear filter — it is a different filter.  The half positions come from an
+;;; eight-tap kernel (-1, 3, -6, 20, 20, -6, 3, -1)/32 and the quarter positions are averages of the
+;;; integer and half samples around them, which gives sixteen distinct cases.
+;;;
+;;; THE FILTER'S EDGES MIRROR RATHER THAN CLAMP.  It is applied to a window one sample wider than the
+;;; block, and where a tap would fall outside that window it takes the REFLECTION — s[-1] is s[0],
+;;; s[-2] is s[1], s[-3] is s[2].  Clamping instead, which is the natural guess and is what the
+;;; picture's own edges do, is wrong at every block boundary, which is everywhere.
+
+(declaim (inline %qtap))
+(defun %qtap (a b c d e f g h rnd)
+  (declare (type fixnum a b c d e f g h rnd) (optimize (speed 3) (safety 0)))
+  (reel.mpeg2:clamp255
+   (ash (+ (* 20 (+ d e)) (* -6 (+ c f)) (* 3 (+ b g)) (- (+ a h)) 15 rnd) -5)))
+
+(declaim (inline %mirror))
+(defun %mirror (k n)
+  "The index a tap at K reads, reflected back inside a window of N+1 samples.
+
+   BOTH REFLECTIONS ARE ABOUT THE OUTER HALF-SAMPLE POSITIONS, which makes them look asymmetric
+   written down: below the window the mirror is about -0.5, so s[-1] is s[0]; above it the mirror is
+   about n+0.5, so s[n+1] is s[n].  Reflecting the top about n instead — which is the natural guess,
+   and matches the bottom if you read that as reflecting about 0 — is wrong by one sample in three
+   of the eight taps, at every block edge."
+  (declare (type fixnum k n) (optimize (speed 3) (safety 0)))
+  (cond ((minusp k) (- -1 k)) ((> k n) (- (* 2 n) k -1)) (t k)))
+
+(defun %qpel-h (dst dstride src soff sstride n rows rnd)
+  "The horizontal half-sample filter: ROWS rows of N+1 samples in, N out per row."
+  (declare (type octets dst src) (type fixnum dstride soff sstride n rows rnd)
+           (optimize (speed 3) (safety 1)))
+  (dotimes (r rows)
+    (declare (type fixnum r))
+    (let ((so (+ soff (* r sstride))) (dof (* r dstride)))
+      (declare (type fixnum so dof))
+      (macrolet ((s (k) `(aref src (+ so (%mirror ,k n)))))
+        (dotimes (j n)
+          (declare (type fixnum j))
+          (setf (aref dst (+ dof j))
+                (%qtap (s (- j 3)) (s (- j 2)) (s (- j 1)) (s j)
+                       (s (+ j 1)) (s (+ j 2)) (s (+ j 3)) (s (+ j 4)) rnd)))))))
+
+(defun %qpel-v (dst dstride src soff sstride n cols rnd)
+  "The vertical half-sample filter: COLS columns of N+1 samples in, N out per column."
+  (declare (type octets dst src) (type fixnum dstride soff sstride n cols rnd)
+           (optimize (speed 3) (safety 1)))
+  (dotimes (c cols)
+    (declare (type fixnum c))
+    (macrolet ((s (k) `(aref src (+ soff c (* (%mirror ,k n) sstride)))))
+      (dotimes (j n)
+        (declare (type fixnum j))
+        (setf (aref dst (+ c (* j dstride)))
+              (%qtap (s (- j 3)) (s (- j 2)) (s (- j 1)) (s j)
+                     (s (+ j 1)) (s (+ j 2)) (s (+ j 3)) (s (+ j 4)) rnd))))))
+
+(defun predict-block-qpel (st dst dstride dbase plane stride w h px py bw mvx mvy rounding avg-p)
+  "Predict a BW x BW block with the quarter-sample vector (MVX, MVY).
+
+   SIXTEEN CASES, AND THEY CASCADE.  The obvious reading of the specification — average the integer
+   samples, the horizontally filtered ones, the vertically filtered ones and the doubly filtered
+   ones, four ways — is what the diagonal quarter positions look like, and it is not what they are.
+   They are built in stages: the horizontal filter is averaged with the integer samples FIRST, the
+   vertical filter is then applied to that average, and the result is averaged with it.  The
+   difference is only in the rounding, and only at the diagonal positions, but it is a difference."
+  (declare (type octets dst plane)
+           (type fixnum dstride dbase stride w h px py bw mvx mvy rounding)
+           (optimize (speed 3) (safety 1)))
+  (let* ((sx (+ px (ash mvx -2))) (sy (+ py (ash mvy -2)))
+         (dx (logand mvx 3)) (dy (logand mvy 3))
+         (rnd (- 1 rounding))
+         (fs (1+ bw))
+         (full (st-qfull st)) (hb (st-qh st)) (vb (st-qv st)) (hv (st-qhv st)))
+    (declare (type fixnum sx sy dx dy rnd fs))
+    ;; the window: one sample wider and taller than the block, with the PICTURE's edges extended
+    ;; outwards — a different rule from the filter's own mirroring inside it
+    (dotimes (r fs)
+      (declare (type fixnum r))
+      (let ((yy (* (min (1- h) (max 0 (+ sy r))) stride)) (row (* r fs)))
+        (declare (type fixnum yy row))
+        (dotimes (c fs)
+          (declare (type fixnum c))
+          (setf (aref full (+ row c))
+                (aref plane (+ yy (min (1- w) (max 0 (+ sx c)))))))))
+    (when (plusp dx)
+      (%qpel-h hb bw full 0 fs bw fs rnd)
+      ;; A QUARTER POSITION HORIZONTALLY AVERAGES WITH THE INTEGER SAMPLES — but only when there is
+      ;; a vertical stage after it, because then everything downstream works from that average
+      ;; rather than from the filter output.  With no vertical stage the average happens once, at
+      ;; the end; doing it here as well averages twice and softens every such block.
+      (when (and (/= dx 2) (plusp dy))
+        (let ((off (if (= dx 3) 1 0)))
+          (declare (type fixnum off))
+          (dotimes (r fs)
+            (declare (type fixnum r))
+            (dotimes (c bw)
+              (declare (type fixnum c))
+              (setf (aref hb (+ (* r bw) c))
+                    (ash (+ (aref hb (+ (* r bw) c)) (aref full (+ (* r fs) c off)) rnd) -1)))))))
+    (when (and (zerop dx) (plusp dy)) (%qpel-v vb bw full 0 fs bw bw rnd))
+    (when (and (plusp dx) (plusp dy)) (%qpel-v hv bw hb 0 bw bw bw rnd))
+    (let ((frow (if (= dy 3) 1 0)) (fcol (if (= dx 3) 1 0)) (hrow (if (= dy 3) 1 0)))
+      (declare (type fixnum frow fcol hrow))
+      (macrolet ((emit (form)
+                   `(dotimes (y bw)
+                      (declare (type fixnum y))
+                      (let ((o (+ dbase (* y dstride))))
+                        (declare (type fixnum o))
+                        (dotimes (x bw)
+                          (declare (type fixnum x))
+                          (let ((v ,form))
+                            (declare (type fixnum v))
+                            (setf (aref dst (+ o x))
+                                  (if avg-p (ash (+ (aref dst (+ o x)) v 1) -1) v)))))))
+                 (f () '(aref full (+ (* (+ y frow) fs) x fcol)))
+                 (hh () '(aref hb (+ (* (+ y hrow) bw) x)))
+                 (vv () '(aref vb (+ (* y bw) x)))
+                 (hvv () '(aref hv (+ (* y bw) x)))
+                 (a2 (p q) `(ash (+ ,p ,q rnd) -1)))
+        (case (+ (* 4 dy) dx)
+          (0 (emit (f)))
+          ((1 3) (emit (a2 (f) (hh))))
+          (2 (emit (hh)))
+          ((4 12) (emit (a2 (f) (vv))))
+          (8 (emit (vv)))
+          ;; dy = 2 is the vertical filter of whatever the horizontal stage produced
+          ((9 10 11) (emit (hvv)))
+          ;; and every other diagonal is that averaged with the horizontal stage itself
+          (t (emit (a2 (hh) (hvv)))))))))

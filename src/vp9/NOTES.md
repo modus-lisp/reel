@@ -88,13 +88,54 @@ or under the wrong condition leaves the coder somewhere else. Across seventy hea
 bytes to nearly three hundred, landing on the last byte every time is not a coincidence — it is as
 strong a check as a decoded picture would be, and it is available now.
 
+## Tiles, the partition quadtree, and coefficients
+
+Stage three. A frame is a grid of 64x64 superblocks and each is a quadtree: at every level a block
+may be left whole, split in two across, split in two down, or split into four and the question asked
+again. Thirteen block sizes result, most of them not square, which is why so much of `block.lisp` is
+a table indexed by size.
+
+**Tiles are independent and that is the point.** A frame may be cut into tile columns and rows, each
+its own arithmetic-coded partition with its own left-edge context, so they can be decoded in parallel
+and a lost one damages only its own rectangle. Every tile but the last carries its length in four
+bytes in front of it — findable, like the frame header, without decoding anything.
+
+The contexts are most of the work. Nearly every symbol is coded against what the blocks above and to
+the left did, at a granularity that differs per symbol: per 4 samples for prediction modes and
+coefficient counts, per 8 for skip and transform size, and a packed bitfield per superblock level for
+the partition. The above contexts span the frame and the left ones span one superblock row of one
+tile, and that asymmetry is exactly what makes a tile independent.
+
+Three things that cost time:
+
+- **A block writes its full width to the context, not the part inside the picture.** A block hanging
+  over the right edge still writes what the block below it will read.
+- **The band counter runs one past the end.** It advances after the last coefficient of a block as
+  well as between them, so the band-count table needs two trailing zeros — landing on one advances it
+  no further. ffmpeg gets this from array padding; here it is written down.
+- **A 32x32 transform's coefficients are halved** on the way out of the entropy decoder, because its
+  own scaling is one bit larger than the other sizes' and the inverse transform wants them all in one
+  range.
+
+### How this is verified, still without a picture
+
+The same invariant as the compressed header, one level down and much sharper: a tile is an
+arithmetic-coded partition of a stated length, so a correct walk of the quadtree — every partition
+decision, every block mode, every transform size, every coefficient of every transform block — ends
+on its last byte. A 1280x720 key frame is thirty-four thousand bytes and twenty-three hundred blocks;
+one symbol read at the wrong width anywhere in it does not land there.
+
 ## What is next
 
-1. Tiles, and the superblock partition tree.
-2. Intra modes and reconstruction — ten modes, four transform sizes, four transform types.
-3. Motion vectors and inter prediction, including compound.
-4. The loop filter, which in VP9 is applied per transform-block edge rather than per macroblock.
-5. Backward probability adaptation, which is what makes a frame's counts the next frame's model.
+1. Reconstruction: ten intra modes across four sizes, and the inverse transforms — DCT and ADST in
+   four sizes each, plus the Walsh-Hadamard a lossless frame uses.
+2. Motion vectors and inter prediction, including compound.
+3. The loop filter, which in VP9 is applied per transform-block edge rather than per macroblock.
+4. Backward probability adaptation, which is what makes a frame's counts the next frame's model.
+
+Not yet exercised by any fixture: **compound prediction**. It needs references whose sign biases
+differ — an alt-ref pointing forward — and libvpx here does not emit one for these clips. The path is
+transcribed and unproven, and it is the first thing to check against real-world content.
 
 Not yet exercised by any fixture: **compound prediction**. It needs references whose sign biases
 differ — an alt-ref pointing forward — and libvpx here does not emit one for these clips. The path is

@@ -104,12 +104,16 @@ because nobody knows to disbelieve it.
 The other half of what the web actually serves. Big, but the better target than HEVC if the goal is
 playing what people link you.
 
-Underway. Both headers are in and verified. The uncompressed one parses on every frame of three
-encodes and agrees with the container about the size and the tiling; the compressed one — the
-probability updates, read through the arithmetic coder — consumes its partition to the byte on all
-seventy of them, which is as strong a check as a decoded picture would be and is available before
-there is one. `reel/src/vp9/NOTES.md` says what remains: the partition tree, reconstruction, motion,
-and the loop filter.
+Underway, and further than it looks. Both headers parse and verify; so do the tiles, the partition
+quadtree, every block's modes, and every coefficient of every transform block of an intra frame.
+
+The check throughout is that an arithmetic-coded partition of a stated length is consumed to the
+byte. A 1280x720 key frame is thirty-four thousand bytes and twenty-three hundred blocks, and one
+symbol read at the wrong width anywhere in it does not land on the last one. So the entropy layer is
+as verified as a decoded picture would make it, before there is a picture.
+
+What remains is reconstruction: the intra modes, the inverse transforms, motion, and the loop
+filter. `reel/src/vp9/NOTES.md` has the detail.
 
 ## Not worth it, and why
 

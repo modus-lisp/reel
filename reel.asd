@@ -110,7 +110,9 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
        (:file "bits")        ; the plain bit reader, and VP8's arithmetic coder above it
        (:file "probs")       ; GENERATED: the default probability models
        (:file "headers")     ; the superframe index and the uncompressed frame header
-       (:file "compressed")) ; the second header, read through the arithmetic coder
+       (:file "compressed")  ; the second header, read through the arithmetic coder
+       (:file "scans")       ; GENERATED: the coefficient scans and their neighbour tables
+       (:file "block"))      ; tiles, the partition quadtree, block modes and coefficients
       )
      ;; ---- Theora, a VP3 descendant, in Ogg
      (:module "theora"

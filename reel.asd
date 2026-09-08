@@ -111,6 +111,7 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
        (:file "probs")       ; GENERATED: the default probability models
        (:file "headers")     ; the superframe index and the uncompressed frame header
        (:file "compressed")  ; the second header, read through the arithmetic coder
+       (:file "counts")      ; symbol counts, and the backward adaptation they feed
        (:file "scans")       ; GENERATED: the coefficient scans and their neighbour tables
        (:file "picture")     ; the decoded picture, ahead of everything that writes into it
        (:file "transform")   ; GENERATED (one dimension at a time) plus the two-pass wrapper

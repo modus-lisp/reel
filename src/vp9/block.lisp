@@ -114,6 +114,9 @@
   segmap-prev
   ;; the three reference frames this frame may predict from
   (ref-frames (make-array 3 :initial-element nil) :type simple-vector)
+  ;; and how often each symbol was decoded, which a non-parallel stream turns into the next
+  ;; frame's probability model
+  (counts (make-counts) :type counts)
   (tile-col-start 0 :type fixnum) (tile-col-end 0 :type fixnum)
   ;; coefficients of one block, and how many each of its transform blocks held
   (coeffs (make-array 4096 :element-type 'fixnum) :type (simple-array fixnum (4096)))
@@ -287,8 +290,11 @@
     ;; ---- skip: a segment may force it, and otherwise it is coded against the two neighbours
     (setf (st-skip st) (plusp (aref (st-seg-skip st) (st-seg-id st))))
     (unless (st-skip st)
-      (let ((k (+ (aref (st-left-skip st) row7) (aref (st-above-skip st) col))))
-        (setf (st-skip st) (plusp (bool-bit c (aref (pr-skip p) k))))))
+      (let* ((k (+ (aref (st-left-skip st) row7) (aref (st-above-skip st) col)))
+             (bit (bool-bit c (aref (pr-skip p) k))))
+        (declare (type fixnum k bit))
+        (incf (aref (cn-skip (st-counts st)) k bit))
+        (setf (st-skip st) (plusp bit))))
     ;; ---- intra or inter
     (setf (st-intra st)
           (cond (keyish t)
@@ -303,7 +309,10 @@
                                       (have-l (* 2 (aref (st-left-intra st) row7)))
                                       (t 0)))))
                      (declare (type fixnum k))
-                     (zerop (bool-bit c (aref (pr-intra p) k)))))))
+                     (let ((bit (bool-bit c (aref (pr-intra p) k))))
+                       (declare (type fixnum bit))
+                       (incf (aref (cn-intra (st-counts st)) k bit))
+                       (zerop bit))))))
     ;; ---- transform size, whose context is `did my neighbours use a big one'
     (if (and (or (st-intra st) (not (st-skip st))) (= (fp-tx-mode (st-fp st)) +tx-switchable+))
         (let ((k (cond ((and have-a have-l)
@@ -325,11 +334,15 @@
                        (when (plusp v)
                          (incf v (bool-bit c (aref (pr-tx32p p) k 1)))
                          (when (= v 2) (incf v (bool-bit c (aref (pr-tx32p p) k 2)))))
+                       (incf (aref (cn-tx32p (st-counts st)) k v))
                        v))
                   (2 (let ((v (bool-bit c (aref (pr-tx16p p) k 0))))
                        (when (plusp v) (incf v (bool-bit c (aref (pr-tx16p p) k 1))))
+                       (incf (aref (cn-tx16p (st-counts st)) k v))
                        v))
-                  (1 (bool-bit c (aref (pr-tx8p p) k)))
+                  (1 (let ((v (bool-bit c (aref (pr-tx8p p) k))))
+                       (incf (aref (cn-tx8p (st-counts st)) k v))
+                       v))
                   (t 0))))
         (setf (st-tx st) (min max-tx (fp-tx-mode (st-fp st)))))
     ;; ---- the modes themselves
@@ -340,22 +353,23 @@
        (let ((m (st-mode st)))
          (if (> bs +bs-8x8+)
              (progn
-               (setf (aref m 0) (bool-tree c +intramode-tree+ (pr-y-mode p) 0))
-               (setf (aref m 1) (if (/= bs +bs-8x4+)
-                                    (bool-tree c +intramode-tree+ (pr-y-mode p) 0)
-                                    (aref m 0)))
-               (if (/= bs +bs-4x8+)
-                   (progn
-                     (setf (aref m 2) (bool-tree c +intramode-tree+ (pr-y-mode p) 0))
-                     (setf (aref m 3) (if (/= bs +bs-8x4+)
-                                          (bool-tree c +intramode-tree+ (pr-y-mode p) 0)
-                                          (aref m 2))))
-                   (setf (aref m 2) (aref m 0) (aref m 3) (aref m 1))))
-             (let ((v (bool-tree c +intramode-tree+ (pr-y-mode p)
-                                 (* 9 (aref +size-group+ bs)))))
+               (macrolet ((ym () '(let ((v (bool-tree c +intramode-tree+ (pr-y-mode p) 0)))
+                                    (incf (aref (cn-y-mode (st-counts st)) 0 v)) v)))
+                 (setf (aref m 0) (ym))
+                 (setf (aref m 1) (if (/= bs +bs-8x4+) (ym) (aref m 0)))
+                 (if (/= bs +bs-4x8+)
+                     (progn
+                       (setf (aref m 2) (ym))
+                       (setf (aref m 3) (if (/= bs +bs-8x4+) (ym) (aref m 2))))
+                     (setf (aref m 2) (aref m 0) (aref m 3) (aref m 1)))))
+             (let* ((sz (aref +size-group+ bs))
+                    (v (bool-tree c +intramode-tree+ (pr-y-mode p) (* 9 sz))))
+               (declare (type fixnum sz v))
+               (incf (aref (cn-y-mode (st-counts st)) sz v))
                (dotimes (i 4) (setf (aref m i) v))))
          (setf (st-uvmode st)
-               (bool-tree c +intramode-tree+ (pr-uv-mode p) (* 9 (aref m 3))))))
+               (bool-tree c +intramode-tree+ (pr-uv-mode p) (* 9 (aref m 3))))
+         (incf (aref (cn-uv-mode (st-counts st)) (aref m 3) (st-uvmode st)))))
       (t (setf vref (%decode-inter-mode st h p c bs row row7 col have-a have-l))))
     ;; ---- and what this block leaves for its neighbours.  THE FULL BLOCK WIDTH, not the part
     ;; inside the picture: a block that hangs over the edge still writes the context a block below
@@ -482,7 +496,8 @@
 
 ;;; ---- one transform block's coefficients ----------------------------------------------------------
 
-(defun %decode-coeffs-block (st probs pbase nnz scan nb bands qdc qac out base n-coeffs is32)
+(defun %decode-coeffs-block (st probs pbase nnz scan nb bands qdc qac out base n-coeffs is32
+                             tx plane inter)
   "One transform block, from its first coefficient to its end-of-block (6.4.24).
 
    Every coefficient is coded against a probability chosen by TWO things: which BAND of the scan it
@@ -494,23 +509,27 @@
    much of the block to transform, and what the NEXT block's context is."
   (declare (type state st)
            (type (simple-array (unsigned-byte 8) (4 2 2 6 6 11)) probs)
-           (type fixnum pbase nnz base n-coeffs qdc qac)
+           (type fixnum pbase nnz base n-coeffs qdc qac tx plane inter)
            (type (simple-array (unsigned-byte 16) (*)) scan)
            (type (simple-array (unsigned-byte 16) (* 2)) nb)
            (type (simple-array fixnum (*)) bands)
            (type (simple-array fixnum (*)) out)
            (optimize (speed 3) (safety 1)))
-  (let* ((c (st-c st))
+  (let* ((c (st-c st)) (cnt (st-counts st))
          (cache (make-array 1024 :element-type '(unsigned-byte 8) :initial-element 0))
          (i 0) (band 0) (band-left (aref bands 0)))
     (declare (type fixnum i band band-left) (dynamic-extent cache))
     (macrolet ((tp (k) `(row-major-aref probs (+ pbase (* 66 band) (* 11 nnz) ,k))))
       (loop
         ;; ---- is this the end of the block?
-        (when (zerop (bool-bit c (tp 0))) (return))
+        (let ((v (bool-bit c (tp 0))))
+          (declare (type fixnum v))
+          (incf (aref (cn-eob cnt) tx plane inter band nnz v))
+          (when (zerop v) (return)))
         ;; ---- runs of zeros, each still costing a decision but not a value
         (loop
           (when (plusp (bool-bit c (tp 1))) (return))
+          (incf (aref (cn-coef cnt) tx plane inter band nnz 0))
           (setf (aref cache (aref scan i)) 0)
           (when (zerop (decf band-left)) (setf band-left (aref bands (incf band))))
           (setf nnz (ash (+ 1 (aref cache (aref nb i 0)) (aref cache (aref nb i 1))) -1))
@@ -520,8 +539,10 @@
         (let ((rc (aref scan i)) (val 0))
           (declare (type fixnum rc val))
           (if (zerop (bool-bit c (tp 2)))
-              (setf val 1 (aref cache rc) 1)
+              (progn (incf (aref (cn-coef cnt) tx plane inter band nnz 1))
+                     (setf val 1 (aref cache rc) 1))
               (progn
+                (incf (aref (cn-coef cnt) tx plane inter band nnz 2))
                 (if (zerop (bool-bit c (tp 3)))
                     (if (zerop (bool-bit c (tp 4)))
                         (setf val 2 (aref cache rc) 2)
@@ -628,7 +649,8 @@
                                          st p (%coef-base tx 0 inter)
                                          (+ (aref a (+ ao x)) (aref l (+ lo y)))
                                          scan nb ybands qdc qac
-                                         (st-coeffs st) (* 16 n) (* 16 step step) (= tx 3))))
+                                         (st-coeffs st) (* 16 n) (* 16 step step) (= tx 3)
+                                         tx 0 inter)))
                               (declare (type fixnum mi txtp got))
                               (setf (aref a (+ ao x)) (if (plusp got) 1 0)
                                     (aref l (+ lo y)) (if (plusp got) 1 0))
@@ -659,7 +681,8 @@
                                             st p (%coef-base uvtx 1 inter)
                                             (+ (aref a (+ ao x)) (aref l (+ lo y)))
                                             scan nb uvbands qdc qac
-                                            out (* 16 n) (* 16 step step) (= uvtx 3))))
+                                            out (* 16 n) (* 16 step step) (= uvtx 3)
+                                            uvtx 1 inter)))
                                   (declare (type fixnum got))
                                   (setf (aref a (+ ao x)) (if (plusp got) 1 0)
                                         (aref l (+ lo y)) (if (plusp got) 1 0))
@@ -785,13 +808,17 @@
          (base (* 3 (+ (* 4 bl) k)))
          (hbs (ash 4 (- bl))))
     (declare (type fixnum k base hbs))
-    (cond
+    (macrolet ((count-bp (bp) `(incf (aref (cn-partition (st-counts st)) bl k ,bp))))
+     (cond
       ((= bl 3)
-       (%decode-block st row col bl (bool-tree c +partition-tree+ probs base)))
+       (let ((bp (bool-tree c +partition-tree+ probs base)))
+         (count-bp bp)
+         (%decode-block st row col bl bp)))
       ((< (+ col hbs) (st-cols st))
        (if (< (+ row hbs) (st-rows st))
            (let ((bp (bool-tree c +partition-tree+ probs base)))
              (declare (type fixnum bp))
+             (count-bp bp)
              (case bp
                (0 (%decode-block st row col bl bp))
                (1 (%decode-block st row col bl bp)
@@ -804,16 +831,18 @@
                   (%decode-sb st (+ row hbs) (+ col hbs) (1+ bl)))))
            ;; the bottom half is outside: split, or one wide block
            (if (plusp (bool-bit c (row-major-aref probs (+ base 1))))
-               (progn (%decode-sb st row col (1+ bl))
+               (progn (count-bp 3)
+                      (%decode-sb st row col (1+ bl))
                       (%decode-sb st row (+ col hbs) (1+ bl)))
-               (%decode-block st row col bl 1))))
+               (progn (count-bp 1) (%decode-block st row col bl 1)))))
       ((< (+ row hbs) (st-rows st))
        ;; the right half is outside: split, or one tall block
        (if (plusp (bool-bit c (row-major-aref probs (+ base 2))))
-           (progn (%decode-sb st row col (1+ bl))
+           (progn (count-bp 3)
+                  (%decode-sb st row col (1+ bl))
                   (%decode-sb st (+ row hbs) col (1+ bl)))
-           (%decode-block st row col bl 2)))
-      (t (%decode-sb st row col (1+ bl))))))
+           (progn (count-bp 2) (%decode-block st row col bl 2))))
+      (t (count-bp 3) (%decode-sb st row col (1+ bl)))))))
 
 ;;; ---- tiles ---------------------------------------------------------------------------------------
 

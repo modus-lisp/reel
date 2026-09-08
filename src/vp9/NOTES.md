@@ -246,22 +246,43 @@ transform edges inside it**, only its own boundary: there is no residual, so not
 and nothing needs smoothing. Together those two were half a percent of samples wrong on the first
 inter frame, growing with each frame after it as the error propagated through the references.
 
-## What is next
+## Backward probability adaptation
 
-1. **Backward probability adaptation.** A stream that does not set frame-parallel mode refreshes its
-   probability context from the symbol COUNTS of the frame just decoded, not from the forward
-   updates. It is refused loudly rather than skipped — skipping it decodes every frame after the
-   first against probabilities that drift from the encoder's, which looks like a coefficient bug.
-2. **Reference scaling.** A frame may predict from a reference of a different size. Refused.
-3. **Compound prediction** is implemented and NOT exercised by any fixture: it needs references whose
-   sign biases differ, and libvpx here does not emit one for these clips.
-3. The loop filter, which in VP9 is applied per transform-block edge rather than per macroblock.
-4. Backward probability adaptation, which is what makes a frame's counts the next frame's model.
+Stage seven, and the last. A stream that does not set frame-parallel mode refreshes its probability
+context from the symbol **counts** of the frame just decoded rather than from the forward updates in
+its header. So the decoder tallies every decision it makes — which coefficient token, which
+partition, which intra mode, which motion vector class — and at the end of the frame nudges each
+probability towards what the counts say it should have been.
 
-Not yet exercised by any fixture: **compound prediction**. It needs references whose sign biases
-differ — an alt-ref pointing forward — and libvpx here does not emit one for these clips. The path is
-transcribed and unproven, and it is the first thing to check against real-world content.
+The nudge is proportional to confidence: a context seen twice moves a little, one seen twenty times
+or more moves the full step. The threshold is twenty-four for coefficients and twenty for everything
+else, because coefficients are seen so much more often that they would otherwise saturate on the
+first superblock. And a frame that is or follows a key frame trusts its counts a little less — a
+factor of 112 rather than 128 — because the models it started from were the defaults rather than
+something learned.
 
-Not yet exercised by any fixture: **compound prediction**. It needs references whose sign biases
-differ — an alt-ref pointing forward — and libvpx here does not emit one for these clips. The path is
-transcribed and unproven, and it is the first thing to check against real-world content.
+Two things in the counting are not what a careful implementer would write.
+
+**The sixteenth of a motion vector is counted even when it is not coded.** ffmpeg marks it as a bug
+in libvpx; it is therefore the format, because a decoder that counts honestly adapts differently from
+every encoder in existence.
+
+**The inter modes are counted in bitstream order and adapted in tree order**, so the indices in the
+adaptation look shuffled against the ones in the decoder: zero motion is the tree's first branch and
+the third symbol.
+
+A probability that splits a tree node is adapted against the counts of everything *below* that node
+on each side, so the sums are taken as the tree is descended and each is the previous minus what has
+just been used. That is why the intra-mode adaptation reads as a running subtraction rather than as
+nine independent ratios.
+
+## What is left
+
+- **Reference scaling.** A frame may predict from a reference of a different size, rescaling as it
+  goes. Refused, on the size comparison, with the sizes named.
+- **Profiles 1, 2 and 3** — anything but eight bits and 4:2:0 — refused on the profile field, and an
+  sRGB colour space refused on its own field because that implies 4:4:4 whatever the profile says.
+- **Compound prediction is implemented and NOT exercised by any fixture.** It needs two references
+  whose sign biases differ — an alt-ref pointing forward in time — and libvpx here does not emit one
+  for any encoder setting tried. The path is transcribed and unproven, and it is the first thing to
+  check against real-world content.

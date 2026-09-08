@@ -1,8 +1,12 @@
-# What plays, what does not, and what it would take
+# What plays, what does not, and why
 
-This is the road map for the media stack: [reel](.) decodes pictures, [cassette](../cassette)
-holds the containers they arrive in, [reed](../reed) does audio. It exists because "can it play
-this file?" is the only question anyone actually asks, and the answer lives in three repositories.
+This is the map of the media stack: [reel](.) decodes pictures, [cassette](../cassette) holds the
+containers they arrive in, [reed](../reed) does audio. It exists because "can it play this file?" is
+the only question anyone actually asks, and the answer lives in three repositories.
+
+It began as a road map with six gaps in it. They are all closed. What is left below is the record of
+what plays, what is turned away and on what grounds, and the two or three things that would be worth
+doing next if anything were.
 
 Proportions below are from experience, not from measuring a corpus. Treat them as ordering, not
 as data.
@@ -21,7 +25,7 @@ as data.
 | **AVI**, including OpenDML | `.avi` opens and plays, whatever codec is inside |
 | **FFV1**, the preservation codec | ffmpeg, bit-exact on twelve configurations, every frame |
 | **Theora** in Ogg | ffmpeg, bit-exact on six fixtures, every frame |
-| **VP9** | ffmpeg, bit-exact on five clips, every picture |
+| **VP9** | ffmpeg, bit-exact on six clips, every picture |
 | **Opus, AAC, MP3, MPEG audio Layer II, Vorbis** | reed's own suites; Layer II within 0.0002 RMS of ffmpeg |
 
 H.264 covers CAVLC and CABAC, P and B slices, both direct modes, weighted and implicit weighted
@@ -92,28 +96,32 @@ because nobody knows to disbelieve it.
 - FFV1: version 2, which was experimental and never shipped; more than 8 bits per sample; and Bayer. The player additionally
   refuses anything but 4:2:0, because one picture type serves every codec here and it is 4:2:0 —
   the decoder itself handles the others.
-- VP9: profiles 1, 2 and 3 — anything but eight bits and 4:2:0 — prediction from a reference of a
-  different size, and backward probability adaptation, which a stream that does not set
-  frame-parallel mode needs.
+- VP9: profiles 1, 2 and 3 — anything but eight bits and 4:2:0, refused on the profile field, and an
+  sRGB colour space refused on its own — and prediction from a reference of a different size.
 - AC-3 and DTS, which a DVD may carry instead of MPEG audio. A file's video plays and the audio
   track is named as undecodable rather than guessed at.
 
-## The gaps, in the order I would close them
+## The gaps
 
-### 1. VP9
+None left. What was here — H.264 High profile, MPEG-2 in program and transport streams, AVI with
+MPEG-4 Part 2, FFV1, Theora, VP9 — is above.
 
-Plays. A hundred and ten pictures across five clips decode bit-exact against ffmpeg, including
-1280x720 across four tile columns, a lossless encode, and a stream with alt-ref frames. `.webm` with
-VP9 opens and plays.
+### VP9 — the last one, and the largest
+
+A hundred and thirty pictures across six clips decode bit-exact against ffmpeg: 176x144, 352x288
+with a switchable transform mode, 1280x720 across four tile columns, a lossless encode, a stream
+with alt-ref frames, and one that refreshes its probabilities by backward adaptation rather than
+forward. `.webm` with VP9 opens and plays.
 
 That covers both headers, superframes, tiles, the partition quadtree, every block mode, every
 coefficient, all four transform sizes with both the DCT and the ADST, the fifteen intra predictors,
 motion vector prediction with its eight-neighbour search, the three eight-tap interpolation filters,
-the eight reference slots, and the loop filter with all three of its widths.
+the eight reference slots, the loop filter with all three of its widths, and both ways a frame may
+refresh its probability context.
 
-Two things are refused rather than approximated, and both are named in `reel/src/vp9/NOTES.md`:
-backward probability adaptation, which a stream that does not set frame-parallel mode needs, and
-prediction from a reference of a different size.
+`reel/src/vp9/NOTES.md` names what is not covered: prediction from a reference of a different size,
+which is refused; and compound prediction, which is implemented and which no fixture exercises,
+because libvpx here will not emit two references whose sign biases differ.
 
 ## Not worth it, and why
 
@@ -126,8 +134,13 @@ prediction from a reference of a different size.
 - **Microsoft's pre-standard MPEG-4** (DIV3, MP42, MPG4). Named like MPEG-4 Part 2 and not the same
   bitstream. A separate decoder for a format that existed for about three years.
 
-## Small things that are nearly free
+## Worth doing next, if anything
 
 - **A serial H.264 stream is still a serial decode.** Concurrency here is per PICTURE, so it does
-  nothing for a stream with P or B pictures — which is every real stream. Slice-level or
-  wavefront parallelism would, and neither is small.
+  nothing for a stream with P or B pictures — which is every real stream. VP9 has the same shape and
+  the same limit. Slice-level or wavefront parallelism would help both, and neither is small.
+- **VP9 speed.** It has had none of the attention H.264's motion path got: the eight-tap filter
+  gathers a clamped window for every block whether or not the block is anywhere near an edge, which
+  is the same mistake H.264's six-tap made until this week.
+- **VP9's compound prediction, proven.** It is written and no fixture reaches it. Real-world content
+  would settle it in an afternoon.

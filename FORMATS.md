@@ -25,7 +25,7 @@ as data.
 | **AVI**, including OpenDML | `.avi` opens and plays, whatever codec is inside |
 | **FFV1**, the preservation codec | ffmpeg, bit-exact on twelve configurations, every frame |
 | **Theora** in Ogg | ffmpeg, bit-exact on six fixtures, every frame |
-| **VP9** | ffmpeg, bit-exact on six clips, every picture |
+| **VP9** | ffmpeg, bit-exact on seven clips, every picture |
 | **Opus, AAC, MP3, MPEG audio Layer II, Vorbis** | reed's own suites; Layer II within 0.0002 RMS of ffmpeg |
 
 H.264 covers CAVLC and CABAC, P and B slices, both direct modes, weighted and implicit weighted
@@ -108,20 +108,20 @@ MPEG-4 Part 2, FFV1, Theora, VP9 — is above.
 
 ### VP9 — the last one, and the largest
 
-A hundred and thirty pictures across six clips decode bit-exact against ffmpeg: 176x144, 352x288
+A hundred and ninety pictures across seven clips decode bit-exact against ffmpeg: 176x144, 352x288
 with a switchable transform mode, 1280x720 across four tile columns, a lossless encode, a stream
-with alt-ref frames, and one that refreshes its probabilities by backward adaptation rather than
-forward. `.webm` with VP9 opens and plays.
+with alt-ref frames, one that refreshes its probabilities by backward adaptation rather than
+forward, and one where fifty-three of sixty-five inter frames predict from two references at once.
+`.webm` with VP9 opens and plays.
 
 That covers both headers, superframes, tiles, the partition quadtree, every block mode, every
 coefficient, all four transform sizes with both the DCT and the ADST, the fifteen intra predictors,
 motion vector prediction with its eight-neighbour search, the three eight-tap interpolation filters,
-the eight reference slots, the loop filter with all three of its widths, and both ways a frame may
-refresh its probability context.
+the eight reference slots, compound prediction, the loop filter with all three of its widths, and
+both ways a frame may refresh its probability context.
 
-`reel/src/vp9/NOTES.md` names what is not covered: prediction from a reference of a different size,
-which is refused; and compound prediction, which is implemented and which no fixture exercises,
-because libvpx here will not emit two references whose sign biases differ.
+The one thing left out is prediction from a reference of a different size, which is refused with the
+sizes named.
 
 ## Not worth it, and why
 
@@ -142,5 +142,3 @@ because libvpx here will not emit two references whose sign biases differ.
 - **VP9 speed.** It has had none of the attention H.264's motion path got: the eight-tap filter
   gathers a clamped window for every block whether or not the block is anywhere near an edge, which
   is the same mistake H.264's six-tap made until this week.
-- **VP9's compound prediction, proven.** It is written and no fixture reaches it. Real-world content
-  would settle it in an afternoon.

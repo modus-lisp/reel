@@ -282,7 +282,24 @@ nine independent ratios.
   goes. Refused, on the size comparison, with the sizes named.
 - **Profiles 1, 2 and 3** — anything but eight bits and 4:2:0 — refused on the profile field, and an
   sRGB colour space refused on its own field because that implies 4:4:4 whatever the profile says.
-- **Compound prediction is implemented and NOT exercised by any fixture.** It needs two references
-  whose sign biases differ — an alt-ref pointing forward in time — and libvpx here does not emit one
-  for any encoder setting tried. The path is transcribed and unproven, and it is the first thing to
-  check against real-world content.
+## Compound prediction, and why it took so long to prove
+
+A block may predict from **two** references and average them, and that needs two references whose
+sign biases differ — one pointing back in time and one forward. Which needs an alt-ref. Which needs
+`-auto-alt-ref`, which libvpx accepts and then silently ignores unless the encode is **two-pass**.
+The only place that is written down is the option's own help text, in parentheses.
+
+So for a long stretch this path was written and unreachable: every fixture had sign biases of
+`(0 0 0)`, every inter frame refreshed only slot zero, and there was no way to tell from a passing
+test whether the code had ever run. What settled it was not searching for a clip but instrumenting
+the question — printing the reference indices, the sign biases and the refresh mask per frame, at
+which point `refresh 00000001` on every single inter frame said plainly that no alt-ref existed and
+the search should be for an encoder setting rather than for content.
+
+A two-pass encode gives sign biases of `(0 0 1)`, fifty-three of sixty-five inter frames choosing
+compound prediction, and — on the first run, with no correction needed — sixty pictures bit-exact.
+
+The fixture now **counts** the blocks that used two references and the test asserts the count is
+positive. That is the real fix: a stream re-encoded with different settings would otherwise stop
+covering the path and nothing would say so, which is exactly how it went unproven for as long as it
+did.

@@ -311,6 +311,7 @@
                       (declare (type fixnum k2 b2))
                       (incf (aref (cn-single-ref (st-counts st)) k2 1 b2))
                       (setf (aref (st-bref st) 0) (1+ b2))))))))
+    (when (st-bcomp st) (incf (st-comp-blocks st)))
     ;; ---- a sub-8x8 block has one mode for all four of its partitions, read here
     (when (<= bs +bs-8x8+)
       (if (and (h-seg-enabled h) (plusp (aref (st-seg-skip st) (st-seg-id st))))

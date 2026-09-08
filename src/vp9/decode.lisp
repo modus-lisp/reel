@@ -24,7 +24,8 @@
   mvref-prev segmap-prev                        ; and its motion field and segment map
   (last-invisible nil)
   (last-keyframe nil)                           ; whether the frame before this one was a key frame
-  (frames 0 :type fixnum))
+  (frames 0 :type fixnum)
+  (comp-blocks 0 :type fixnum))                 ; how many blocks used two references
 
 (defun make-vp9-decoder ()
   (let ((d (%make-decoder)))
@@ -93,6 +94,7 @@
           (when (logbitp i (h-refresh-mask h))
             (setf (aref (d-refs d) i) f
                   (aref (d-ref-sizes d) i) (cons (h-width h) (h-height h)))))
+        (incf (d-comp-blocks d) (st-comp-blocks st))
         (setf (d-last-frame d) f
               (d-last-keyframe d) (h-keyframe h)
               (d-mvref-prev d) (st-mvref st)

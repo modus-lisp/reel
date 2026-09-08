@@ -117,6 +117,11 @@
   ;; and how often each symbol was decoded, which a non-parallel stream turns into the next
   ;; frame's probability model
   (counts (make-counts) :type counts)
+  ;; How many blocks predicted from TWO references.  Kept because compound prediction is reachable
+  ;; only from a stream whose alt-ref points forward in time, which most encoder settings do not
+  ;; produce — so a test that merely decodes such a stream correctly cannot tell whether it
+  ;; exercised the path at all.  This lets it say so.
+  (comp-blocks 0 :type fixnum)
   (tile-col-start 0 :type fixnum) (tile-col-end 0 :type fixnum)
   ;; coefficients of one block, and how many each of its transform blocks held
   (coeffs (make-array 4096 :element-type 'fixnum) :type (simple-array fixnum (4096)))

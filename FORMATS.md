@@ -19,7 +19,7 @@ as data.
 | **MP4**, including fragmented | ffprobe, packet for packet |
 | **MPEG program and transport streams** | `.mpg`, `.vob`, `.ts` open and play, end to end |
 | **AVI**, including OpenDML | `.avi` opens and plays, whatever codec is inside |
-| **Opus, AAC, MP3, Vorbis** | reed's own suites |
+| **Opus, AAC, MP3, MPEG audio Layer II, Vorbis** | reed's own suites; Layer II within 0.0002 RMS of ffmpeg |
 
 H.264 covers CAVLC and CABAC, P and B slices, both direct modes, weighted and implicit weighted
 prediction, reference list reordering, adaptive reference marking, the 8x8 transform, Intra_8x8,
@@ -58,8 +58,8 @@ because nobody knows to disbelieve it.
 - MPEG-4 Part 2: sprites and global motion, interlaced objects, data partitioning, scalability, and
   arbitrary shapes. Also Microsoft's pre-standard MPEG-4 variants (DIV3, MP42), which share a name
   and not a bitstream.
-- MPEG audio (Layer II) and AC-3, which broadcast and DVD carry. A transport stream's video plays
-  and its audio track is named as undecodable rather than guessed at.
+- AC-3 and DTS, which a DVD may carry instead of MPEG audio. A file's video plays and the audio
+  track is named as undecodable rather than guessed at.
 
 ## The gaps, in the order I would close them
 
@@ -93,8 +93,5 @@ playing what people link you.
 
 ## Small things that are nearly free
 
-- **MPEG audio, Layer II.** reed decodes Layer III; Layer II is a different and simpler subband
-  layout in the same framing. It is what a DVD and most broadcast carry, so it is worth more than
-  its size suggests.
 - **H.264 decode speed at 1080p.** 71 fps concurrently, but single-threaded it is 10.6, and the
   deblocking filter is a third of that. Matters for a single-core or latency-bound path.

@@ -15,6 +15,11 @@
   (sps (make-hash-table) :type hash-table)
   (pps (make-hash-table) :type hash-table)
   (picture nil)
+  ;; The slice header of the picture currently being assembled.  A picture may be several slices,
+  ;; and everything that happens once the picture is COMPLETE — the loop filter, reference marking,
+  ;; reordering — needs one of its headers to work from; any of them will do for the parts that are
+  ;; picture-wide.  See %END-PICTURE.
+  (cur-sh nil)
   ;; Decoded pictures kept as references, most recent first.  Baseline marking is a sliding
   ;; window: a new reference picture goes on the front and the oldest falls off the back once
   ;; there are more than the sequence parameter set allows.  An IDR empties it.
@@ -115,10 +120,36 @@
   "Move whatever is ready from the reorder buffer onto the output queue."
   (loop for p = (%bump d flush) while p do (setf (h264-out d) (append (h264-out d) (list p)))))
 
+(declaim (ftype function %mark-references))
+
+(defun %end-picture (d)
+  "Finish the picture currently open, if there is one.
+
+   EVERYTHING HERE IS ONCE PER PICTURE, NOT ONCE PER SLICE, and the difference is invisible until
+   a stream splits a picture into several slices.  Running the loop filter after each slice filters
+   the whole picture again every time: in a three-slice picture the first slice's macroblocks come
+   out filtered three times over, which is a small error everywhere rather than an obvious one
+   somewhere, and it survives every single-slice conformance stream there is."
+  (let ((pic (h264-picture d))
+        (sh (h264-cur-sh d)))
+    (when (and pic sh)
+      (deblock-picture pic sh)
+      (incf (h264-frames d))
+      ;; the filtered picture is what later pictures predict from, so this happens after the
+      ;; loop filter and not before it
+      (when (nal-idr-p (sh-nal sh)) (setf (h264-refs d) '()))
+      (when (plusp (nal-ref-idc (sh-nal sh)))
+        (%mark-references d sh (sh-sps sh)))
+      (push pic (h264-pending d))
+      (%drain d)
+      (setf (h264-picture d) nil (h264-cur-sh d) nil)
+      pic)))
+
 (defun flush-decoder (d)
   "Every picture still held, in display order.  Call at the end of a stream: without it the last
    few pictures of every file stay in the reorder buffer, which is a real bug and an easy one to
    not notice, because it only ever loses the ending."
+  (%end-picture d)
   (%drain d t)
   (prog1 (h264-out d) (setf (h264-out d) '())))
 
@@ -268,6 +299,8 @@
        ;; a new picture starts at first_mb_in_slice 0; with one slice per picture that is every
        ;; slice, but the test is the right one for a stream that splits pictures into several
        (when (zerop (sh-first-mb sh))
+         ;; a new picture starting means the previous one is complete
+         (%end-picture d)
          ;; an IDR restarts the order counts from zero, so everything already decoded has to be
          ;; handed out before it, or the two sequences interleave by number and come out shuffled
          (when (nal-idr-p nal) (%drain d t))
@@ -277,24 +310,15 @@
                (pic-ref-p (h264-picture d)) (plusp (nal-ref-idc nal)))
          (setf (h264-reorder d) (%reorder-depth sps)))
        (unless (h264-picture d) (%err "a slice arrived before any picture was started"))
+       (setf (h264-cur-sh d) sh)
        (if (sh-b-slice-p sh)
            (multiple-value-bind (l0 l1) (build-ref-lists-b d sh)
              (decode-slice (h264-picture d) sh br l0 l1))
            (decode-slice (h264-picture d) sh br (build-ref-list-0 d sh)))
-       ;; the loop filter runs over the whole picture once its macroblocks are reconstructed, and
-       ;; never during: intra prediction reads UNFILTERED neighbours (8.3), so filtering as we go
-       ;; would feed the next macroblock samples the encoder never predicted from
-       (deblock-picture (h264-picture d) sh)
-       (incf (h264-frames d))
-       ;; the filtered picture is what later pictures predict from, so this happens after the
-       ;; loop filter and not before it
-       (when (nal-idr-p nal) (setf (h264-refs d) '()))
-       (when (plusp (nal-ref-idc nal))
-         (%mark-references d sh sps))
-       ;; into the reorder buffer, and out comes whichever picture's turn it now is — which is
-       ;; usually not this one
-       (push (h264-picture d) (h264-pending d))
-       (%drain d)
+       ;; The loop filter, reference marking and reordering all wait for the picture to END —
+       ;; %END-PICTURE, run by the next picture's first slice or by FLUSH-DECODER.  So what comes
+       ;; out here is whatever an EARLIER picture's turn made ready, which is what the reorder
+       ;; buffer was always handing back anyway.
        (pop (h264-out d))))
     (t nil)))                                   ; SEI, AUD, and everything else: not our business
 

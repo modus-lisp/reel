@@ -246,10 +246,13 @@
         ;; just established, and FLOOR on an unknown sign is a call
         (let ((mbx (ash bx -2)) (mby (ash by -2)))
           (declare (type fixnum mbx mby))
-          ;; the neighbour must be decoded already; raster order and one slice per picture make
-          ;; that the same test macroblock availability uses everywhere else
+          ;; the neighbour must be decoded already AND be in this slice, the same two conditions
+          ;; MB-AVAILABLE-P applies; this open-codes them only to stay in the fixnum fast path
           (cond
-            ((= -1 (aref (pic-mb-types pic) (+ (* mby mbw) mbx))) (values 0 0 -1 nil))
+            ((let ((n (+ (* mby mbw) mbx)))
+               (or (= -1 (aref (pic-mb-types pic) n))
+                   (/= (the fixnum (aref (pic-mb-slice pic) n)) (ss-slice-id ss))))
+             (values 0 0 -1 nil))
             ;; inside the macroblock being decoded, a block whose partition has not been reached
             ;; yet is NOT AVAILABLE (6.4.11.7) — not merely zero.  See SS-MB-DONE.
             ((and (= mbx (ss-mbx ss)) (= mby (ss-mby ss))

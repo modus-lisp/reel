@@ -228,27 +228,39 @@ negative slice offset still lands inside the array instead of before it.")
    4:2:0 chroma is half resolution and takes its strength from the luma edge it lies on."
   (declare (optimize (speed 3) (safety 1)))
   (when *skip-loop-filter* (return-from deblock-picture pic))
-  (let* ((idc (sh-disable-deblocking sh)))
-    (when (= idc 1) (return-from deblock-picture pic))
+  ;; The filter's controls are per SLICE, not per picture, so they are read per macroblock from
+  ;; what DECODE-SLICE recorded.  Only the PPS is taken from the header passed in: every slice of
+  ;; a picture refers to the same one in any stream that exists.
+  (progn
     (let* ((pps (sh-pps sh))
-           (alpha-off (sh-alpha-offset sh))
-           (beta-off (sh-beta-offset sh))
            (mbw (pic-mb-width pic)) (mbh (pic-mb-height pic))
            (ys (pic-ystride pic)) (cs (pic-cstride pic)))
       (dotimes (mby mbh)
         (dotimes (mbx mbw)
           (let* ((mbi (+ (* mby mbw) mbx))
+                 (idc (aref (pic-dbf-idc pic) mbi))
+                 (alpha-off (aref (pic-dbf-alpha pic) mbi))
+                 (beta-off (aref (pic-dbf-beta pic) mbi))
                  (qp (aref (pic-mb-qps pic) mbi))
                  (ybase (pic-y-base pic mbx mby))
                  (cbase (pic-c-base pic mbx mby))
                  (bx0 (* 4 mbx)) (by0 (* 4 mby))
-                 (left-p (plusp mbx))
-                 (up-p (plusp mby))
+                 ;; idc 2 keeps the filter on but stops it at the slice boundary, so an edge
+                 ;; whose other side was coded by a different slice is simply not there
+                 (left-p (and (plusp mbx)
+                              (or (/= idc 2)
+                                  (= (aref (pic-mb-slice pic) mbi)
+                                     (aref (pic-mb-slice pic) (1- mbi))))))
+                 (up-p (and (plusp mby)
+                            (or (/= idc 2)
+                                (= (aref (pic-mb-slice pic) mbi)
+                                   (aref (pic-mb-slice pic) (- mbi mbw))))))
                  (qp-left (and left-p (aref (pic-mb-qps pic) (1- mbi))))
                  (qp-up (and up-p (aref (pic-mb-qps pic) (- mbi mbw))))
                  ;; an 8x8-transformed macroblock has no internal 4x4 edges to soften: filtering
                  ;; at 4 and 12 would be removing a blocking artifact that was never created
                  (tf8 (plusp (aref (pic-mb-tf8 pic) mbi))))
+           (unless (= idc 1)
             (flet ((cqp (a b plane)
                      ;; chroma filters at the CHROMA quantiser, derived per side then averaged
                      (ash (+ (chroma-qp a (pps-chroma-qp-offset-for pps plane))
@@ -303,5 +315,5 @@ negative slice offset still lands inside the array instead of before it.")
                     (dotimes (plane 2)
                       (%filter-edge (if (zerop plane) (pic-u pic) (pic-v pic))
                                     (+ cbase (* 4 cs) (* 2 k)) cs 1 2 bs
-                                    (cqp qp qp plane) alpha-off beta-off t)))))))))
+                                    (cqp qp qp plane) alpha-off beta-off t))))))))))
       pic)))

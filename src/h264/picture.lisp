@@ -86,6 +86,20 @@ the thirty-two bits the array is, which is why it is not MOST-NEGATIVE-FIXNUM.")
   ;; intra type, and an inter one is stored negative.  That keeps availability and Intra4x4 mode
   ;; prediction correct without either of them having to learn about inter macroblocks.
   (mb-types (%emptyfx) :type fixnums)
+  ;; Which SLICE coded each macroblock, as that slice's first_mb_in_slice — distinct per slice by
+  ;; construction, so it needs no counter.  A neighbour in a different slice is NOT available: the
+  ;; whole point of slices is that each decodes without reference to the others, so intra
+  ;; prediction, nC and motion prediction must all stop at the boundary.  Getting this wrong does
+  ;; not degrade quality, it DESYNCHRONISES: a stale nC picks the wrong coeff_token table and the
+  ;; bitstream is lost from the second slice's first macroblock onward.
+  (mb-slice (%emptyfx) :type fixnums)
+  ;; The loop filter's three per-SLICE parameters, recorded per macroblock because one picture may
+  ;; be several slices and each carries its own: disable_deblocking_filter_idc and the two offsets.
+  ;; idc 1 turns the filter off for that slice's macroblocks, idc 2 keeps it on but stops it at the
+  ;; slice boundary.
+  (dbf-idc (%emptyfx) :type fixnums)
+  (dbf-alpha (%emptyfx) :type fixnums)
+  (dbf-beta (%emptyfx) :type fixnums)
   (mb-qps (%emptyfx) :type fixnums)
   (frame-num 0 :type dim)               ; this picture's frame_num, which is its PicNum for a frame
   (poc 0 :type (signed-byte 30))                  ; picture order count: where it goes on SCREEN, not in the stream
@@ -135,6 +149,10 @@ the thirty-two bits the array is, which is why it is not MOST-NEGATIVE-FIXNUM.")
      :nz-v (make-array (* mbw 2 mbh 2) :element-type '(signed-byte 32) :initial-element 0)
      :modes (make-array (* mbw 4 mbh 4) :element-type '(signed-byte 32) :initial-element 2)
      :mb-types (make-array (* mbw mbh) :element-type '(signed-byte 32) :initial-element -1)
+     :mb-slice (make-array (* mbw mbh) :element-type '(signed-byte 32) :initial-element -1)
+     :dbf-idc (make-array (* mbw mbh) :element-type '(signed-byte 32) :initial-element 0)
+     :dbf-alpha (make-array (* mbw mbh) :element-type '(signed-byte 32) :initial-element 0)
+     :dbf-beta (make-array (* mbw mbh) :element-type '(signed-byte 32) :initial-element 0)
      :mb-qps (make-array (* mbw mbh) :element-type '(signed-byte 32) :initial-element 0)
      :mvs (make-array (* mbw 4 mbh 4 4) :element-type '(signed-byte 32) :initial-element 0)
      :refs (make-array (* mbw 4 mbh 4 2) :element-type '(signed-byte 32) :initial-element -1)
@@ -170,6 +188,11 @@ the thirty-two bits the array is, which is why it is not MOST-NEGATIVE-FIXNUM.")
   (mb-done 0 :type fixnum)
   cabac                                         ; the arithmetic decoder, or NIL for CAVLC
   (mbx 0 :type fixnum) (mby 0 :type fixnum)
+  ;; this slice's first_mb_in_slice, used as its identity when testing neighbour availability
+  (slice-id 0 :type fixnum)
+  ;; constrained_intra_pred_flag, lifted out of the PPS because INTRA-MB-AVAILABLE-P asks for it
+  ;; several times per block and SS-SH is an untyped slot
+  (constrained-intra nil)
   (qp 26 :type fixnum)
   ;; typed for the same reason the picture's planes are: these are read and written per block
   (coeffs (make-array 16 :element-type '(signed-byte 32)) :type fixnums)   ; scan-order scratch
@@ -205,14 +228,18 @@ the thirty-two bits the array is, which is why it is not MOST-NEGATIVE-FIXNUM.")
 (defun mb-available-p (ss dx dy)
   "Is the macroblock at (mbx+DX, mby+DY) decoded and in this slice?
 
-   Raster order and one slice per picture, so this is `is it inside, and is it before us'.  A
-   decoder with several slices per picture must also compare slice numbers here, which is why
-   this is one function and not an inline test in six places."
+   Three conditions, and the third is the one that is easy to leave out: it must be inside the
+   picture, it must already be decoded, and it must belong to the SAME SLICE as the macroblock
+   asking.  A slice is defined to be independently decodable, so a neighbour across a slice
+   boundary is unavailable even though it is sitting right there, fully decoded, in the same
+   picture buffer."
   (declare (optimize (speed 3) (safety 1)))
   (let* ((x (+ (ss-mbx ss) dx)) (y (+ (ss-mby ss) dy))
          (pic (ss-pic ss)))
     (and (>= x 0) (>= y 0) (< x (pic-mb-width pic)) (< y (pic-mb-height pic))
-         (/= -1 (aref (pic-mb-types pic) (+ (* y (pic-mb-width pic)) x))))))
+         (let ((n (+ (* y (pic-mb-width pic)) x)))
+           (and (/= -1 (aref (pic-mb-types pic) n))
+                (= (the fixnum (aref (pic-mb-slice pic) n)) (ss-slice-id ss)))))))
 
 ;;; EVERY ONE OF THESE IS INLINE AND FULLY DECLARED, and that is the whole point of them being
 ;;; here.  They are read a few times per 4x4 block by motion prediction and again by the loop

@@ -15,6 +15,7 @@
 ;;;;     --non-interactive --load t/conformance.lisp
 (require :asdf)
 (push (truename "../cassette/") asdf:*central-registry*)
+(push (truename "../reed/") asdf:*central-registry*)
 (asdf:load-asd (merge-pathnames "reel.asd" (or *load-truename* *default-pathname-defaults*)))
 (handler-bind ((warning #'muffle-warning)) (asdf:load-system :cassette))
 

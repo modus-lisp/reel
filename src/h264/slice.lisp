@@ -73,6 +73,28 @@
 
 ;;; ---- Intra4x4 prediction modes (8.3.1.1) ------------------------------------------------------------
 
+(defun intra-mb-available-p (ss dx dy)
+  "MB-AVAILABLE-P, narrowed by constrained_intra_pred_flag.
+
+   When that flag is set, an INTER-coded neighbour is unavailable to intra prediction even though
+   it is decoded and in this slice.  The point is error resilience: an intra macroblock that never
+   reads a predicted sample is a clean restart, so a lost reference picture cannot leak through the
+   intra macroblocks that were supposed to repair it.
+
+   This is deliberately NOT the predicate the coefficient counts use.  nC only ignores inter
+   neighbours when the stream is slice-data-partitioned (9.2.1), which is a coding tool this
+   decoder does not accept, so applying the flag there would desynchronise streams that are
+   otherwise fine.  Prediction and entropy context ask different questions of the same neighbour."
+  (declare (optimize (speed 3) (safety 1)))
+  (and (mb-available-p ss dx dy)
+       (or (not (ss-constrained-intra ss))
+           ;; MB-TYPES stores intra types as non-negative and inter ones as negative
+           (let ((pic (ss-pic ss)))
+             (>= (the fixnum
+                      (aref (pic-mb-types pic)
+                            (+ (* (+ (ss-mby ss) dy) (pic-mb-width pic)) (ss-mbx ss) dx)))
+                 0)))))
+
 (defun neighbour-mb-available-p (ss blk dx dy)
   "Is the MACROBLOCK containing the neighbour DX,DY away from BLK available?"
   (declare (optimize (speed 3) (safety 1)))
@@ -80,7 +102,7 @@
          (mbdx (cond ((minusp lx) -1) ((> lx 3) 1) (t 0)))
          (mbdy (cond ((minusp ly) -1) ((> ly 3) 1) (t 0))))
     (or (and (zerop mbdx) (zerop mbdy))          ; inside this macroblock
-        (mb-available-p ss mbdx mbdy))))
+        (intra-mb-available-p ss mbdx mbdy))))
 
 (defun neighbour-mode (ss blk dx dy)
   "The Intra4x4 mode of the block DX,DY away from BLK, or 2 (DC) when the macroblock it lives in
@@ -214,7 +236,7 @@
          (nx (1+ bx)) (ny (1- by)))
     (cond
       ;; the row above this macroblock
-      ((minusp ny) (if (> nx 3) (mb-available-p ss 1 -1) (mb-available-p ss 0 -1)))
+      ((minusp ny) (if (> nx 3) (intra-mb-available-p ss 1 -1) (intra-mb-available-p ss 0 -1)))
       ;; the macroblock to the right, which is always later in raster order
       ((> nx 3) nil)
       ;; inside this macroblock: only if that block comes earlier in decoding order
@@ -301,19 +323,19 @@
 (defun %i8x8-neighbours (ss i8)
   "Availability of the four reference directions for 8x8 block I8, in decoding order 0..3."
   (let ((bx (logand i8 1)) (by (ash i8 -1)))
-    (values (or (plusp by) (mb-available-p ss 0 -1))                 ; above
-            (or (plusp bx) (mb-available-p ss -1 0))                 ; left
+    (values (or (plusp by) (intra-mb-available-p ss 0 -1))                 ; above
+            (or (plusp bx) (intra-mb-available-p ss -1 0))                 ; left
             ;; above-right: outside for 0 and 1, block 1 itself for 2, and never for 3, whose
             ;; above-right lies in the macroblock to the right and so is always still undecoded
             (case i8
-              (0 (mb-available-p ss 0 -1))
-              (1 (mb-available-p ss 1 -1))
+              (0 (intra-mb-available-p ss 0 -1))
+              (1 (intra-mb-available-p ss 1 -1))
               (2 t)
               (t nil))
             (cond ((and (plusp bx) (plusp by)) t)                    ; above-left
-                  ((plusp bx) (mb-available-p ss 0 -1))
-                  ((plusp by) (mb-available-p ss -1 0))
-                  (t (mb-available-p ss -1 -1))))))
+                  ((plusp bx) (intra-mb-available-p ss 0 -1))
+                  ((plusp by) (intra-mb-available-p ss -1 0))
+                  (t (intra-mb-available-p ss -1 -1))))))
 
 (defun %luma-residual-8x8 (ss base i8 intra-p)
   "Read, dequantise, transform and add one 8x8 luma residual.
@@ -424,12 +446,12 @@
                         (* (aref +blk-y+ blk) 4 (pic-ystride pic))
                         (* (aref +blk-x+ blk) 4)))
                (bx (aref +blk-x+ blk)) (by (aref +blk-y+ blk))
-               (up-p (or (plusp by) (mb-available-p ss 0 -1)))
-               (left-p (or (plusp bx) (mb-available-p ss -1 0)))
+               (up-p (or (plusp by) (intra-mb-available-p ss 0 -1)))
+               (left-p (or (plusp bx) (intra-mb-available-p ss -1 0)))
                (up-left-p (cond ((and (plusp bx) (plusp by)) t)
-                                ((plusp bx) (mb-available-p ss 0 -1))
-                                ((plusp by) (mb-available-p ss -1 0))
-                                (t (mb-available-p ss -1 -1))))
+                                ((plusp bx) (intra-mb-available-p ss 0 -1))
+                                ((plusp by) (intra-mb-available-p ss -1 0))
+                                (t (intra-mb-available-p ss -1 -1))))
                (up-right-p (up-right-available-p ss blk)))
           (gather-4x4-neighbours (pic-y pic) (pic-ystride pic) base (ss-pt ss) (ss-pl ss)
                                  up-p left-p up-right-p up-left-p)
@@ -484,7 +506,7 @@
       (incf (ss-qp ss) (%read-qp-delta ss))
       (setf (ss-qp ss) (mod (+ (ss-qp ss) 52) 52))
       (intra16x16-predict (pic-y pic) (pic-ystride pic) base pred-mode
-                          (mb-available-p ss 0 -1) (mb-available-p ss -1 0))
+                          (intra-mb-available-p ss 0 -1) (intra-mb-available-p ss -1 0))
       ;; the DC block: sixteen coefficients, one per 4x4, transformed again
       (let ((dc (ss-luma-dc ss)))
         (let ((n (%residual ss (ss-coeffs ss) :cat +cat-luma-dc+ :nc (luma-nc ss 0) :max-coeff 16)))
@@ -533,8 +555,8 @@
   (let* ((br (ss-br ss)) (sh (ss-sh ss)) (pps (sh-pps sh)) (pic (ss-pic ss))
          (cbp-chroma (ash cbp -4))
          (base (pic-c-base pic (ss-mbx ss) (ss-mby ss)))
-         (up-p (mb-available-p ss 0 -1))
-         (left-p (mb-available-p ss -1 0))
+         (up-p (intra-mb-available-p ss 0 -1))
+         (left-p (intra-mb-available-p ss -1 0))
          (planes (vector (pic-u pic) (pic-v pic)))
          (qps (vector (chroma-qp (ss-qp ss) (pps-chroma-qp-offset-for pps 0))
                       (chroma-qp (ss-qp ss) (pps-chroma-qp-offset-for pps 1))))
@@ -851,6 +873,8 @@
          (b-slice (sh-b-slice-p sh))
          (p-slice (sh-p-slice-p sh))
          (ss (make-slice-state :pic pic :sh sh :br br :qp (sh-qp sh)
+                               :slice-id (sh-first-mb sh)
+                               :constrained-intra (pps-constrained-intra (sh-pps sh))
                                :reflist (or refs #())
                                :reflist1 (or refs1 #())
                                :ref0 (and refs (plusp (length refs)) (aref refs 0))
@@ -864,7 +888,14 @@
          (inter (or p-slice b-slice)))
     (unless (or (sh-i-slice-p sh) inter)
       (%err "slice_type ~a is not supported" (slice-type-name (sh-slice-type sh))))
-    (flet ((at (n) (setf (ss-mbx ss) (mod n mbw) (ss-mby ss) (floor n mbw)))
+    (flet ((at (n)
+             ;; every macroblock passes through here, skipped ones included, so this is the one
+             ;; place that has to record which slice coded it
+             (setf (aref (pic-mb-slice pic) n) (ss-slice-id ss)
+                   (aref (pic-dbf-idc pic) n) (sh-disable-deblocking sh)
+                   (aref (pic-dbf-alpha pic) n) (sh-alpha-offset sh)
+                   (aref (pic-dbf-beta pic) n) (sh-beta-offset sh))
+             (setf (ss-mbx ss) (mod n mbw) (ss-mby ss) (floor n mbw)))
            (skip-one ()
              (if b-slice (decode-b-skip-macroblock ss) (decode-skip-macroblock ss)))
            (coded-one ()

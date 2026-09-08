@@ -61,7 +61,7 @@
 
 ;;; ---- the arithmetic coder ------------------------------------------------------------------------
 
-(defstruct (bool (:conc-name bd-))
+(defstruct (bool (:conc-name bd-) (:constructor %make-bool))
   (data (make-array 0 :element-type '(unsigned-byte 8)) :type octets)
   (pos 0 :type fixnum) (end 0 :type fixnum)
   (high 255 :type fixnum)                       ; the interval, eight bits
@@ -72,7 +72,7 @@
   "A decoder over BYTES[START,END).  The first three bytes prime the code word."
   (declare (type octets bytes) (type fixnum start end))
   (when (< (- end start) 1) (%err "an empty arithmetic-coded partition"))
-  (let ((c (make-bool :data bytes :pos (+ start 3) :end end)))
+  (let ((c (%make-bool :data bytes :pos (+ start 3) :end end)))
     (setf (bd-code c)
           (logior (ash (if (< start end) (aref bytes start) 0) 16)
                   (ash (if (< (+ start 1) end) (aref bytes (+ start 1)) 0) 8)
@@ -134,17 +134,21 @@
   (let ((v (bool-literal c n)))
     (if (plusp (bool-flag c)) (- v) v)))
 
-(defun bool-tree (c tree probs &key (offset 0))
+(defun bool-tree (c tree probs base)
   "One symbol, by walking TREE with one probability per node.
 
    A strictly positive entry is the next node; anything else is the negated symbol.  Node zero is
-   the root and is never a branch target, which is what frees zero to mean symbol zero."
+   the root and is never a branch target, which is what frees zero to mean symbol zero.
+
+   PROBS is any probability array and BASE the row-major index of the row this tree reads, because
+   VP9\'s models are indexed by three and four dimensions of context and a tree walks one row of
+   whichever of them the caller has already selected."
   (declare (type bool c) (type (simple-array fixnum (* 2)) tree)
-           (type (simple-array (unsigned-byte 8) (*)) probs) (type fixnum offset)
+           (type (simple-array (unsigned-byte 8)) probs) (type fixnum base)
            (optimize (speed 3) (safety 1)))
   (let ((i 0))
     (declare (type fixnum i))
-    (loop (setf i (aref tree i (bool-bit c (aref probs (+ offset i)))))
+    (loop (setf i (aref tree i (bool-bit c (row-major-aref probs (+ base i)))))
           (unless (plusp i) (return (- i))))))
 
 (defun bool-end-p (c)

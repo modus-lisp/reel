@@ -104,11 +104,12 @@ because nobody knows to disbelieve it.
 The other half of what the web actually serves. Big, but the better target than HEVC if the goal is
 playing what people link you.
 
-Underway. The tables, both readers and the uncompressed frame header are in and verified: every
-frame of a 176x144 and a 1280x720 encode parses, the header agrees with the container about the
-size and the tiling, and superframes split. `reel/src/vp9/NOTES.md` says what remains, which is
-most of it: the compressed header, the partition tree, reconstruction, motion, and the loop
-filter.
+Underway. Both headers are in and verified. The uncompressed one parses on every frame of three
+encodes and agrees with the container about the size and the tiling; the compressed one — the
+probability updates, read through the arithmetic coder — consumes its partition to the byte on all
+seventy of them, which is as strong a check as a decoded picture would be and is available before
+there is one. `reel/src/vp9/NOTES.md` says what remains: the partition tree, reconstruction, motion,
+and the loop filter.
 
 ## Not worth it, and why
 

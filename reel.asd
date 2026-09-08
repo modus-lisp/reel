@@ -108,7 +108,9 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
       :components
       ((:file "tables")      ; GENERATED: the quantiser lookups and the symbol trees
        (:file "bits")        ; the plain bit reader, and VP8's arithmetic coder above it
-       (:file "headers"))    ; the superframe index and the uncompressed frame header
+       (:file "probs")       ; GENERATED: the default probability models
+       (:file "headers")     ; the superframe index and the uncompressed frame header
+       (:file "compressed")) ; the second header, read through the arithmetic coder
       )
      ;; ---- Theora, a VP3 descendant, in Ogg
      (:module "theora"

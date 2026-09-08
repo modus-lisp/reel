@@ -94,4 +94,12 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
       :serial t
       :components
       ((:file "rangecoder")  ; the binary range coder, and integers spelled through it
-       (:file "decode")))))));  the configuration record, slices, and prediction
+       (:file "decode"))   ; the configuration record, slices, and prediction
+      )
+     ;; ---- Theora, a VP3 descendant, in Ogg
+     (:module "theora"
+      :serial t
+      :components
+      ((:file "tables")      ; GENERATED: the fixed codes and VP3's defaults
+       (:file "bits")        ; the bit reader and two kinds of Huffman table
+       (:file "headers")))))));  the three packets that configure a decoder

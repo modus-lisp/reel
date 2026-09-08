@@ -66,6 +66,14 @@
    #:picture #:pic-width #:pic-height #:pic-y #:pic-u #:pic-v #:picture->yuv420
    #:deblock-picture #:as-picture))
 
+(defpackage #:reel.theora
+  (:use #:cl)
+  (:export
+   #:theora-error #:theora-error-message
+   #:info #:parse-headers #:parse-identification #:parse-setup
+   #:inf-width #:inf-height #:inf-picture-width #:inf-picture-height
+   #:inf-offset-x #:inf-offset-y #:inf-fps-num #:inf-fps-den #:inf-version))
+
 (defpackage #:reel.ffv1
   (:use #:cl)
   (:export

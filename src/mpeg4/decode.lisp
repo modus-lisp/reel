@@ -13,7 +13,16 @@
   last next
   (out '())
   (frames 0 :type fixnum)
-  (display 0 :type fixnum))
+  (display 0 :type fixnum)
+  ;; THE CLOCK, which a B picture's direct mode needs and nothing else does.  MPEG-4 counts time in
+  ;; two parts: a whole number of seconds sent as a run of ones, and a fraction of a second in the
+  ;; resolution the layer declared.  Direct mode scales the future picture's motion by how far along
+  ;; between the two references this picture sits, so those two distances have to be kept.
+  (time-base 0 :type fixnum)
+  (last-time-base 0 :type fixnum)
+  (last-non-b-time 0 :type fixnum)
+  (pp-time 1 :type fixnum)
+  (pb-time 1 :type fixnum))
 
 (defun decoder-width (d) (and (d-vol d) (vol-width (d-vol d))))
 (defun decoder-height (d) (and (d-vol d) (vol-height (d-vol d))))
@@ -59,21 +68,44 @@
                        (when (d-next d)
                          (%retire d (%repeat-frame (d-next d) (vop-coding-type p)))))
                       (t
+                       (when (= (vop-coding-type p) +vop-s+)
+                         (%err "sprite VOPs are not supported"))
+                       (%advance-clock d p)
                        (let* ((cur (make-frame-for (d-vol d)))
-                              (fwd (if (= (vop-coding-type p) +vop-b+) (d-last d) (d-next d)))
-                              (bwd (and (= (vop-coding-type p) +vop-b+) (d-next d))))
-                         (when (= (vop-coding-type p) +vop-b+)
-                           (%err "B-VOPs are not supported yet"))
-                         (when (= (vop-coding-type p) +vop-s+)
-                           (%err "sprite VOPs are not supported"))
+                              (b-p (= (vop-coding-type p) +vop-b+))
+                              (fwd (if b-p (d-last d) (d-next d)))
+                              (bwd (and b-p (d-next d))))
                          (setf (fr-coding-type cur) (vop-coding-type p))
                          (let ((st (make-state (d-vol d) p cur fwd bwd)))
-                           (setf (st-br st) br)
+                           (setf (st-br st) br
+                                 (st-pp-time st) (max 1 (d-pp-time d))
+                                 (st-pb-time st) (max 1 (d-pb-time d)))
                            (decode-vop st))
                          (%retire d cur))))))
                  (t nil))
                (setf i (if (< next end) next nil))))
     (let ((o (nreverse (d-out d)))) (setf (d-out d) '()) o)))
+
+(defun %advance-clock (d p)
+  "Move the clock on by this picture, and work out the two distances direct mode needs.
+
+   PP-TIME is the whole span between the two reference pictures; PB-TIME is how far along it this
+   B picture sits.  A reference picture moves the clock; a B picture only reads it, which is why
+   its arrival must not disturb the base."
+  (let* ((v (d-vol d))
+         (res (vol-time-resolution v))
+         (incr (vop-time-base p))
+         (frac (vop-time-increment p)))
+    (declare (type fixnum res incr frac))
+    (if (= (vop-coding-type p) +vop-b+)
+        (let ((time (+ (* (+ (d-last-time-base d) incr) res) frac)))
+          (setf (d-pb-time d) (- (d-pp-time d) (- (d-last-non-b-time d) time))))
+        (let ((time 0))
+          (setf (d-last-time-base d) (d-time-base d))
+          (incf (d-time-base d) incr)
+          (setf time (+ (* (d-time-base d) res) frac))
+          (setf (d-pp-time d) (- time (d-last-non-b-time d))
+                (d-last-non-b-time d) time)))))
 
 (defun %repeat-frame (f type)
   "A picture the stream declined to code: the last one, again, as a picture of its own."

@@ -68,6 +68,10 @@
   ;; the motion of every 8x8 block, so that a B-VOP's direct mode can read it back
   (mvx (make-array 0 :element-type 'fixnum) :type fixnums)
   (mvy (make-array 0 :element-type 'fixnum) :type fixnums)
+  ;; and two facts per macroblock that direct mode also asks: was it skipped, and did it carry four
+  ;; vectors rather than one
+  (mb-skip (make-array 0 :element-type 'fixnum) :type fixnums)
+  (mb-4mv (make-array 0 :element-type 'fixnum) :type fixnums)
   (timestamp nil))
 
 (defun make-frame-for (v)
@@ -82,7 +86,9 @@
                                :initial-element 128)
                 :ystride cw :cstride (ash cw -1)
                 :mvx (make-array nb :element-type 'fixnum :initial-element 0)
-                :mvy (make-array nb :element-type 'fixnum :initial-element 0))))
+                :mvy (make-array nb :element-type 'fixnum :initial-element 0)
+                :mb-skip (make-array (ash nb -2) :element-type 'fixnum :initial-element 0)
+                :mb-4mv (make-array (ash nb -2) :element-type 'fixnum :initial-element 0))))
 
 ;;; ---- the state one picture carries -------------------------------------------------------------
 
@@ -120,7 +126,12 @@
   (ac-u (make-array 0 :element-type 'fixnum) :type fixnums)
   (ac-v (make-array 0 :element-type 'fixnum) :type fixnums)
   (block (make-array 64 :element-type 'fixnum) :type (simple-array fixnum (64)))
-  (mv (make-array 8 :element-type 'fixnum) :type fixnums))   ; four (x,y) pairs
+  (mv (make-array 8 :element-type 'fixnum) :type fixnums)    ; four (x,y) pairs, list 0
+  (mv1 (make-array 8 :element-type 'fixnum) :type fixnums)   ; and list 1, for a B picture
+  ;; A B picture predicts its vectors from a RUNNING predictor per direction, reset at the start of
+  ;; every row — not from the median of neighbours the way P pictures do.
+  (last-mv (make-array 4 :element-type 'fixnum) :type fixnums)
+  (pp-time 1 :type fixnum) (pb-time 1 :type fixnum))
 
 (defun make-state (v p cur forward backward)
   (let* ((mbw (vol-mb-width v)) (mbh (vol-mb-height v))
@@ -535,7 +546,8 @@
 
 ;;; ---- motion compensation --------------------------------------------------------------------------
 
-(defun predict-block (dst dstride dbase plane stride w h px py bw bh mvx mvy rounding)
+(defun predict-block (dst dstride dbase plane stride w h px py bw bh mvx mvy rounding
+                      &optional avg-p)
   "Predict a BW x BH block at (PX,PY) with the half-pel vector (MVX,MVY).
 
    ROUNDING is the picture's rounding_type, and it is not a detail: it flips the tie-break in every
@@ -557,7 +569,13 @@
                       (declare (type fixnum o))
                       (dotimes (,xv bw)
                         (declare (type fixnum ,xv))
-                        (setf (aref dst (+ o ,xv)) ,form))))))
+                        (let ((v ,form))
+                          (declare (type fixnum v))
+                          ;; AVERAGING IS OF THE TWO FINISHED PREDICTIONS, not of the references:
+                          ;; each side is interpolated to its own half-pel position first, and only
+                          ;; then are the two combined.  Interpolating once from both rounds once.
+                          (setf (aref dst (+ o ,xv))
+                                (if avg-p (ash (+ (aref dst (+ o ,xv)) v 1) -1) v))))))))
       (if inside
           (let ((b (+ (* sy stride) sx)))
             (declare (type fixnum b))
@@ -573,15 +591,15 @@
                   ((and (zerop hx) (= 1 hy)) (each (y x) (ash (+ (p 0 0) (p 1 0) r) -1)))
                   (t (each (y x) (ash (+ (p 0 0) (p 0 1) (p 1 0) (p 1 1) r 1) -2)))))))))
 
-(defun %predict-macroblock (st ref four-mv-p)
-  "Motion compensate this macroblock from REF."
+(defun %predict-macroblock (st ref four-mv-p &key (list 0) (avg-p nil))
+  "Motion compensate this macroblock from REF, optionally averaging onto what is already there."
   (declare (optimize (speed 3) (safety 1)))
   (let* ((cur (st-cur st)) (mbx (st-mbx st)) (mby (st-mby st))
          (ys (fr-ystride cur)) (cs (fr-cstride cur))
          (cw (fr-cwidth cur)) (ch (fr-cheight cur))
          (ccw (ash cw -1)) (cch (ash ch -1))
          (r (vop-rounding (st-vop st)))
-         (mv (st-mv st))
+         (mv (if (zerop list) (st-mv st) (st-mv1 st)))
          (ybase (+ (* mby 16 ys) (* mbx 16)))
          (cbase (+ (* mby 8 cs) (* mbx 8))))
     (declare (type fixnum ys cs cw ch ccw cch r ybase cbase))
@@ -590,9 +608,9 @@
           (let ((bx (* 8 (logand i 1))) (by (* 8 (ash i -1))))
             (predict-block (fr-y cur) ys (+ ybase (* by ys) bx) (fr-y ref) ys cw ch
                            (+ (* mbx 16) bx) (+ (* mby 16) by) 8 8
-                           (aref mv (* 2 i)) (aref mv (1+ (* 2 i))) r)))
+                           (aref mv (* 2 i)) (aref mv (1+ (* 2 i))) r avg-p)))
         (predict-block (fr-y cur) ys ybase (fr-y ref) ys cw ch
-                       (* mbx 16) (* mby 16) 16 16 (aref mv 0) (aref mv 1) r))
+                       (* mbx 16) (* mby 16) 16 16 (aref mv 0) (aref mv 1) r avg-p))
     ;; ONE RULE FOR ONE VECTOR AND FOR FOUR.  The chroma vector is the SUM of the four luma vectors
     ;; put through a rounding table, and a macroblock with one vector simply has four copies of it.
     ;; Halving the single vector instead looks equivalent and is not: at a luma vector of one they
@@ -605,9 +623,9 @@
             (values (%round-chroma (* 4 (aref mv 0))) (%round-chroma (* 4 (aref mv 1)))))
       (declare (type fixnum cx cy))
       (predict-block (fr-u cur) cs cbase (fr-u ref) cs ccw cch
-                     (* mbx 8) (* mby 8) 8 8 cx cy r)
+                     (* mbx 8) (* mby 8) 8 8 cx cy r avg-p)
       (predict-block (fr-v cur) cs cbase (fr-v ref) cs ccw cch
-                     (* mbx 8) (* mby 8) 8 8 cx cy r))))
+                     (* mbx 8) (* mby 8) 8 8 cx cy r avg-p))))
 
 ;;; ---- one macroblock ------------------------------------------------------------------------------
 
@@ -714,9 +732,12 @@
                           until (/= v 8) finally (return v))))
          (declare (type fixnum mcbpc))
          (decode-intra-macroblock st mcbpc (logbitp 2 mcbpc))))
+      ((= type +vop-b+) (decode-b-macroblock st))
       (t
        (when (= 1 (read-bit br))
          (decode-skip-macroblock st)
+         (setf (aref (fr-mb-skip (st-cur st))
+                     (+ (* (st-mby st) (vol-mb-width (st-vol st))) (st-mbx st))) 1)
          (return-from decode-macroblock))
        (let ((mcbpc (loop for v = (or (%vlc br +mcbpc-p-table+ +mcbpc-p-bits+)
                                       (%err "MCBPC at macroblock (~d,~d)" (st-mbx st) (st-mby st)))
@@ -724,7 +745,11 @@
          (declare (type fixnum mcbpc))
          (if (logbitp 2 mcbpc)
              (decode-intra-macroblock st mcbpc (logbitp 3 mcbpc))
-             (decode-inter-macroblock st mcbpc (logbitp 3 mcbpc))))))))
+             (progn
+               (setf (aref (fr-mb-4mv (st-cur st))
+                           (+ (* (st-mby st) (vol-mb-width (st-vol st))) (st-mbx st)))
+                     (if (logbitp 4 mcbpc) 1 0))
+               (decode-inter-macroblock st mcbpc (logbitp 3 mcbpc)))))))))
 
 (defun decode-vop (st)
   "Every macroblock of one video object plane, across however many video packets it was cut into."
@@ -734,7 +759,7 @@
     (let ((mb 0))
       (declare (type fixnum mb))
       (loop while (< mb total)
-            do (when (%at-resync-p st)
+            do (when (%at-resync-p st mb)
                  (setf mb (%read-packet-header st))
                  (setf (st-resync-mbx st) (mod mb mbw)
                        (st-resync-mby st) (floor mb mbw)
@@ -781,10 +806,22 @@
       (#.+vop-b+ (+ 15 (max (vop-f-code p) (vop-b-code p) 2)))
       (t (+ 15 (vop-f-code p))))))
 
-(defun %at-resync-p (st)
+(defun %at-resync-p (st mb)
+  "Is a video packet boundary here, at macroblock MB?
+
+   THE B PICTURE EXCEPTION IS NOT A DETAIL.  A skipped B macroblock costs no bits at all, so a run
+   of them at the end of a packet leaves the marker sitting immediately after the last CODED
+   macroblock — several macroblocks before the decoder's count reaches it.  A decoder that takes the
+   marker as soon as it sees one silently drops that run, and the packet after it decodes perfectly
+   into the wrong place.  So while the macroblock about to be decoded is one the future reference
+   skipped, the marker is not yet ours."
+  (declare (type fixnum mb))
   (and (vol-resync-marker (st-vol st))
        (= (peek-bits (st-br st) 16)
-          (aref +resync-prefix+ (logand (br-pos (st-br st)) 7)))))
+          (aref +resync-prefix+ (logand (br-pos (st-br st)) 7)))
+       (not (and (= (vop-coding-type (st-vop st)) +vop-b+)
+                 (st-backward st)
+                 (plusp (aref (fr-mb-skip (st-backward st)) mb))))))
 
 (defun %read-packet-header (st)
   "The header that follows a resync marker (6.2.5.2).  Returns the macroblock it restarts at.
@@ -820,3 +857,114 @@
         (unless (= (vop-coding-type p) +vop-i+) (read-bits br 3))
         (when (= (vop-coding-type p) +vop-b+) (read-bits br 3)))
       n)))
+
+;;; ---- B pictures ------------------------------------------------------------------------------
+
+(defconstant +bmb-direct+ 0)
+(defconstant +bmb-interp+ 1)
+(defconstant +bmb-backward+ 2)
+(defconstant +bmb-forward+ 3)
+
+(defun %scale-direct (st pmv d)
+  "One component of a direct-mode vector pair (7.6.2).
+
+   The co-located macroblock of the FUTURE reference moved by PMV over the whole distance between
+   the two references; this picture sits part way along, so the forward vector is that motion scaled
+   by how far along, and the backward vector is what is left over.  D is a correction the stream may
+   send, and when it is nonzero the backward vector is defined as a DIFFERENCE rather than as the
+   remaining fraction — which is not the same number and is the part that is easy to write wrongly."
+  (declare (type fixnum pmv d) (optimize (speed 3) (safety 1)))
+  (let* ((pp (st-pp-time st)) (pb (st-pb-time st))
+         (f (+ (truncate (* pmv pb) pp) d))
+         (b (if (zerop d) (truncate (* pmv (- pb pp)) pp) (- f pmv))))
+    (declare (type fixnum pp pb f b))
+    (values f b)))
+
+(defun %set-direct-mv (st mx my)
+  "Both directions' vectors for a direct-mode macroblock.  Returns T if it is a four-vector one."
+  (declare (type fixnum mx my) (optimize (speed 3) (safety 1)))
+  (let* ((ref (st-backward st))
+         (mbw (vol-mb-width (st-vol st)))
+         (mbi (+ (* (st-mby st) mbw) (st-mbx st)))
+         (four (and ref (plusp (aref (fr-mb-4mv ref) mbi))))
+         (mv (st-mv st)) (mv1 (st-mv1 st)))
+    (unless ref (%err "a direct-mode macroblock with no future reference"))
+    (dotimes (i 4)
+      (let* ((src (if four (+ (* 4 mbi) i) (* 4 mbi)))
+             (px (aref (fr-mvx ref) src)) (py (aref (fr-mvy ref) src)))
+        (multiple-value-bind (fx bx) (%scale-direct st px mx)
+          (multiple-value-bind (fy by) (%scale-direct st py my)
+            (setf (aref mv (* 2 i)) fx (aref mv (1+ (* 2 i))) fy
+                  (aref mv1 (* 2 i)) bx (aref mv1 (1+ (* 2 i))) by)))))
+    four))
+
+(defun decode-b-macroblock (st)
+  "One macroblock of a B picture.
+
+   A B macroblock is skipped when the CO-LOCATED macroblock of the future reference was skipped —
+   a fact the stream does not repeat, so a decoder has to have kept it.  That is why a P picture
+   records which of its macroblocks were skipped even though nothing in that picture needs to know."
+  (declare (optimize (speed 3) (safety 1)))
+  (let* ((br (st-br st)) (mbw (vol-mb-width (st-vol st)))
+         (mbi (+ (* (st-mby st) mbw) (st-mbx st)))
+         (ref (st-backward st))
+         (mv (st-mv st)) (mv1 (st-mv1 st))
+         (last (st-last-mv st)))
+    (setf (st-ac-pred st) nil (st-intra-p st) nil)
+    (when (zerop (st-mbx st)) (fill last 0))
+    (when (and ref (plusp (aref (fr-mb-skip ref) mbi)))
+      (dotimes (i 8) (setf (aref mv i) 0 (aref mv1 i) 0))
+      (%predict-macroblock st (st-forward st) nil :list 0)
+      (%predict-macroblock st ref nil :list 1 :avg-p t)
+      (return-from decode-b-macroblock))
+    (let ((mode +bmb-direct+) (cbp 0) (direct t) (four nil) (bare-direct nil))
+      (declare (type fixnum mode cbp))
+      (if (= 1 (read-bit br))
+          ;; one bit is the whole macroblock: direct prediction with no correction and no residual
+          (setf mode +bmb-direct+ cbp 0 bare-direct t)
+          (let ((no-cbp (= 1 (read-bit br))))
+            (setf mode (or (%vlc br +btype-table+ +btype-bits+)
+                           (%err "a B macroblock type at (~d,~d)" (st-mbx st) (st-mby st))))
+            (setf direct (= mode +bmb-direct+))
+            (setf cbp (if no-cbp 0 (read-bits br 6)))
+            (when (and (not direct) (plusp cbp))
+              (when (= 1 (read-bit br))
+                (%set-qscale st (- (* 4 (read-bit br)) 2))))
+            (unless direct
+              (when (or (= mode +bmb-interp+) (= mode +bmb-forward+))
+                (let ((x (decode-mv-component st (aref last 0) (vop-f-code (st-vop st))))
+                      (y 0))
+                  (setf y (decode-mv-component st (aref last 1) (vop-f-code (st-vop st))))
+                  (setf (aref last 0) x (aref last 1) y)
+                  (dotimes (i 4) (setf (aref mv (* 2 i)) x (aref mv (1+ (* 2 i))) y))))
+              (when (or (= mode +bmb-interp+) (= mode +bmb-backward+))
+                (let ((x (decode-mv-component st (aref last 2) (vop-b-code (st-vop st))))
+                      (y 0))
+                  (setf y (decode-mv-component st (aref last 3) (vop-b-code (st-vop st))))
+                  (setf (aref last 2) x (aref last 3) y)
+                  (dotimes (i 4) (setf (aref mv1 (* 2 i)) x (aref mv1 (1+ (* 2 i))) y)))))))
+      (when direct
+        ;; A DIRECT MACROBLOCK NAMED BY THE TYPE CODE STILL SENDS A CORRECTION — two components, at
+        ;; f_code 1, applied to all four derived vectors.  The one named by the single leading bit
+        ;; sends nothing at all.  Reading the correction in the second case, or skipping it in the
+        ;; first, loses the bitstream rather than the vectors.
+        (let ((mx 0) (my 0))
+          (unless bare-direct
+            (setf mx (decode-mv-component st 0 1))
+            (setf my (decode-mv-component st 0 1)))
+          (setf four (%set-direct-mv st mx my))))
+      ;; the prediction, forward then backward averaged onto it
+      (let ((fwd (or direct (= mode +bmb-interp+) (= mode +bmb-forward+)))
+            (bwd (or direct (= mode +bmb-interp+) (= mode +bmb-backward+))))
+        (when fwd
+          (unless (st-forward st) (%err "a B macroblock with no past reference"))
+          (%predict-macroblock st (st-forward st) four :list 0))
+        (when bwd
+          (unless ref (%err "a B macroblock with no future reference"))
+          (%predict-macroblock st ref four :list 1 :avg-p fwd)))
+      (dotimes (n 6)
+        (when (logbitp (- 5 n) cbp)
+          (decode-block st n nil t nil)
+          (if (vol-mpeg-quant (st-vol st)) (dequant-inter-mpeg st) (dequant-inter st))
+          (multiple-value-bind (plane stride base) (%block-base st n)
+            (reel.mpeg2:idct-add plane stride base (st-block st))))))))

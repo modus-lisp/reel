@@ -85,4 +85,6 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
       :components
       ((:file "tables")      ; GENERATED: the scans, the matrices and seven Huffman tables
        (:file "bits")        ; start codes, the bit reader, the Huffman machinery
-       (:file "headers"))))))) ; the video object layer and the video object plane
+       (:file "headers")     ; the video object layer and the video object plane
+       (:file "slice")       ; the macroblock layer: prediction, motion, coefficients
+       (:file "decode")))))));  start codes in, pictures out

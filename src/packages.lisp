@@ -72,7 +72,11 @@
    #:mpeg4-error #:mpeg4-error-message
    #:find-start-code #:bitreader #:make-br
    #:vol #:parse-vol-header #:vol-width #:vol-height #:vol-mb-width #:vol-mb-height
-   #:vop #:parse-vop-header #:vop-coding-type #:vop-type-name))
+   #:vop #:parse-vop-header #:vop-coding-type #:vop-type-name
+   #:decoder #:make-decoder #:feed-bytes #:flush-decoder #:decode-elementary-stream
+   #:decoder-width #:decoder-height
+   #:frame #:fr-width #:fr-height #:fr-y #:fr-u #:fr-v #:fr-ystride #:fr-cstride
+   #:fr-coding-type #:fr-timestamp #:picture->yuv420 #:as-picture))
 
 (defpackage #:reel.mpeg2
   (:use #:cl)

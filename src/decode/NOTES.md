@@ -38,9 +38,39 @@ them once per coefficient block, was spending about four per cent of the decode 
 Typing the slots — and giving each an empty array of the right type as its default, so the type is
 unconditional rather than `(or null ...)` — removed all of it.
 
-## What is left
+## The edge is the unit of work, not the line
 
-`KERNEL-MB` is still 38 per cent of a VP8 decode, and it is now genuinely the arithmetic RFC 6386
-§15 specifies rather than anything the compiler was failing to see. Going further would mean
-filtering more than one line at a time — for a vertical edge the eight samples are contiguous and
-could be loaded as one machine word — which is a different kind of change from any of the above.
+The kernels filtered one line and the caller drove them along the edge. That made about a hundred
+and seventy thousand calls a frame at 640x360, each of which set up its arguments and recomputed the
+seven sample offsets from the edge step it had been handed — none of which varies along an edge.
+Passing the edge instead of the line turns those into nine hundred calls and hoists all of it: ten
+per cent at 640x360.
+
+## The ±128 was not doing anything
+
+RFC 6386 §15.2 is written on SIGNED bytes: subtract 128 from each sample, filter, add 128 back.
+Written that way the kernel did twelve additions per line that cancel. Every place a sample appears
+in the filter's arithmetic it appears as a DIFFERENCE of two of them — `(p1 - q1)`, `(q0 - p0)` —
+and the offsets cancel there; and at the other end `c8(x - 128) + 128` is exactly `clamp255(x)` for
+every integer x, because `c8` clamps to [-128,127] and the 128 puts that range back at [0,255]. So
+the conversion is unnecessary at both ends. Five per cent, and the kernel is shorter for it.
+
+## What is left, and why it stops here
+
+`%EDGE-MB` is about forty per cent of a VP8 decode and it is now the arithmetic §15 specifies.
+
+Two things were considered and are not worth doing, both for reasons worth writing down.
+
+**Reordering the gate does nothing, because the gate almost always passes.** Counted over sixty
+pictures of 640x360: 3,708,640 edges tested, 3,195,749 filtered — **86.2 per cent** — of which only
+13.8 per cent take the narrow high-edge-variance path. Short-circuiting an `AND` helps when it
+short-circuits; this one does not.
+
+**Filtering several lines at once needs a load this implementation cannot make.** For a horizontal
+edge the eight lines are contiguous, so the eight rows `p3..q3` are laid out exactly as eight
+eight-lane words — the arrangement libvpx's SSE2 version uses. SBCL has no unaligned sixty-four bit
+load from a `(unsigned-byte 8)` array: `%vector-raw-bits` is indexed in whole words, and the edge
+offsets are arbitrary. Assembling each word from eight byte loads and shifts costs more than the
+lane-parallel arithmetic saves, and the arithmetic itself would need signed saturating add emulated
+by hand — a great deal of intricate masking, in the one function where being wrong diverges the
+picture everywhere. It wants a vector primitive, not more cleverness.

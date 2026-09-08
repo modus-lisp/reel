@@ -9,23 +9,26 @@
 (declaim (inline c8))
 (defun c8 (v) (declare (type fixnum v) (optimize (speed 3) (safety 0))) (cond ((< v -128) -128) ((> v 127) 127) (t v)))
 
-;;; common_adjust (RFC §15.2), on SIGNED sample values rather than on the plane.
+;;; ---- the kernels work on UNSIGNED samples, because the offsets cancel -------------------------
 ;;;
-;;; THE KERNELS BELOW LOAD THEIR EIGHT SAMPLES ONCE.  Written the obvious way — a LF-DIFF that
-;;; takes the array and two indices, called seven times for the gate, twice more for the high-edge
-;;; variance test, and again for the filter itself — the same eight samples were loaded about
-;;; twenty-four times per line.  They are in L1 either way, but a load is still a load, and this is
-;;; the busiest function in the decoder by a wide margin: a macroblock edge is filtered sixty-four
-;;; times per macroblock and there are nine hundred macroblocks in a 640x360 picture.
+;;; RFC 6386 §15.2 is written on SIGNED bytes: subtract 128 from each sample, filter, add 128 back.
+;;; Written that way this file did twelve additions per line that were not doing anything.  Every
+;;; place a sample appears in the arithmetic it appears as a DIFFERENCE of two of them — (p1 - q1),
+;;; (q0 - p0) — and the two 128s cancel; and at the other end, c8(x - 128) + 128 is exactly
+;;; clamp255(x) for every integer x, because c8 clamps to [-128,127] and the 128 puts that back at
+;;; [0,255].  So the conversion is not needed at either end, and what is left is the specification's
+;;; arithmetic with two fewer operations per sample touched.
+
 (declaim (inline %adjust))
 (defun %adjust (use-outer p1 p0 q0 q1)
-  "Returns the new P0 and Q0, and the shift the sub-block filter needs afterwards."
-  (declare (type (signed-byte 16) p1 p0 q0 q1) (optimize (speed 3) (safety 0)))
+  "The common adjustment (§15.2).  Returns the new P0 and Q0 and the shift the sub-block filter
+   needs afterwards, all in unsigned sample space."
+  (declare (type (unsigned-byte 8) p1 p0 q0 q1) (optimize (speed 3) (safety 0)))
   (let* ((a (c8 (+ (if use-outer (c8 (- p1 q1)) 0) (* 3 (- q0 p0)))))
          (b (ash (c8 (+ a 3)) -3))
          (a2 (ash (c8 (+ a 4)) -3)))
     (declare (type fixnum a b a2))
-    (values (c8 (+ p0 b)) (c8 (- q0 a2)) a2)))
+    (values (clamp255 (+ p0 b)) (clamp255 (- q0 a2)) a2)))
 
 (declaim (inline %edge-ok %hev))
 (defun %edge-ok (ilim elim p3 p2 p1 p0 q0 q1 q2 q3)
@@ -45,86 +48,101 @@
            (optimize (speed 3) (safety 0)))
   (or (> (abs (- p1 p0)) thr) (> (abs (- q1 q0)) thr)))
 
-;;; simple filter segment (luma only)
-(defun kernel-simple (data q0i s elim)
-  (declare (type u8vec data) (type dim q0i s) (type (signed-byte 16) elim)
-           (optimize (speed 3) (safety 0)))
-  (let* ((p1i (- q0i s s)) (p0i (- q0i s)) (q1i (+ q0i s))
-         (p1 (aref data p1i)) (p0 (aref data p0i))
-         (q0 (aref data q0i)) (q1 (aref data q1i)))
-    (declare (type dim p1i p0i q1i) (type (unsigned-byte 8) p1 p0 q0 q1))
-    (when (<= (+ (* 2 (abs (- p0 q0))) (ash (abs (- p1 q1)) -1)) elim)
-      (multiple-value-bind (np0 nq0)
-          (%adjust t (- p1 128) (- p0 128) (- q0 128) (- q1 128))
-        (setf (aref data p0i) (+ np0 128)
-              (aref data q0i) (+ nq0 128))))))
+;;; ---- one whole edge per call ------------------------------------------------------------------
+;;;
+;;; THE LINE LOOP LIVES INSIDE THE KERNEL, and that is the second thing this file learned.  Written
+;;; the natural way — a kernel that filters one line, driven along the edge by the caller — a
+;;; 640x360 picture makes about a hundred and seventy thousand calls a frame, each of which sets up
+;;; its arguments and recomputes the seven sample offsets from the edge step it was handed.  None of
+;;; that varies along an edge.  Passing the edge instead of the line hoists all of it and turns the
+;;; hundred and seventy thousand calls into nine hundred.
+;;;
+;;; START is the index of q0 on the first line, ALONG the step from one line to the next, and S the
+;;; step ACROSS the edge — one for a vertical edge, the stride for a horizontal one, and the caller
+;;; passes them the other way round for the two directions.
 
-;;; normal inter-subblock filter
-(defun kernel-sub (data q0i s hthr ilim elim)
-  (declare (type u8vec data) (type dim q0i s) (type (signed-byte 16) hthr ilim elim)
-           (optimize (speed 3) (safety 0)))
-  (let* ((p3i (- q0i (* 4 s))) (p2i (- q0i (* 3 s))) (p1i (- q0i (* 2 s))) (p0i (- q0i s))
-         (q1i (+ q0i s)) (q2i (+ q0i (* 2 s))) (q3i (+ q0i (* 3 s)))
-         (p3 (aref data p3i)) (p2 (aref data p2i)) (p1 (aref data p1i)) (p0 (aref data p0i))
-         (q0 (aref data q0i)) (q1 (aref data q1i)) (q2 (aref data q2i)) (q3 (aref data q3i)))
-    (declare (type dim p3i p2i p1i p0i q1i q2i q3i)
-             (type (unsigned-byte 8) p3 p2 p1 p0 q0 q1 q2 q3)
-             (ignorable p3i q3i))
-    (when (%edge-ok ilim elim p3 p2 p1 p0 q0 q1 q2 q3)
-      (let ((hv (%hev hthr p1 p0 q0 q1)))
-        (multiple-value-bind (np0 nq0 a0)
-            (%adjust hv (- p1 128) (- p0 128) (- q0 128) (- q1 128))
-          (declare (type fixnum a0))
-          (setf (aref data p0i) (+ np0 128)
-                (aref data q0i) (+ nq0 128))
-          (unless hv
-            (let ((a (ash (+ a0 1) -1)))
-              (declare (type fixnum a))
-              (setf (aref data q1i) (+ (c8 (- (- q1 128) a)) 128)
-                    (aref data p1i) (+ (c8 (+ (- p1 128) a)) 128)))))))))
+(defmacro %along ((q0i start along count) &body body)
+  `(do ((k 0 (1+ k)) (,q0i ,start (+ ,q0i ,along)))
+       ((>= k ,count))
+     (declare (type (integer 0 64) k) (type dim ,q0i))
+     ,@body))
 
-;;; normal inter-macroblock filter
-(defun kernel-mb (data q0i s hthr ilim elim)
-  (declare (type u8vec data) (type dim q0i s) (type (signed-byte 16) hthr ilim elim)
-           (optimize (speed 3) (safety 0)))
-  (let* ((p3i (- q0i (* 4 s))) (p2i (- q0i (* 3 s))) (p1i (- q0i (* 2 s))) (p0i (- q0i s))
-         (q1i (+ q0i s)) (q2i (+ q0i (* 2 s))) (q3i (+ q0i (* 3 s)))
-         (p3 (aref data p3i)) (p2 (aref data p2i)) (p1 (aref data p1i)) (p0 (aref data p0i))
-         (q0 (aref data q0i)) (q1 (aref data q1i)) (q2 (aref data q2i)) (q3 (aref data q3i)))
-    (declare (type dim p3i p2i p1i p0i q1i q2i q3i)
-             (type (unsigned-byte 8) p3 p2 p1 p0 q0 q1 q2 q3)
-             (ignorable p3i q3i))
-    (when (%edge-ok ilim elim p3 p2 p1 p0 q0 q1 q2 q3)
-      (if (%hev hthr p1 p0 q0 q1)
-          (multiple-value-bind (np0 nq0)
-              (%adjust t (- p1 128) (- p0 128) (- q0 128) (- q1 128))
-            (setf (aref data p0i) (+ np0 128)
-                  (aref data q0i) (+ nq0 128)))
-          (let* ((sp2 (- p2 128)) (sp1 (- p1 128)) (sp0 (- p0 128))
-                 (sq0 (- q0 128)) (sq1 (- q1 128)) (sq2 (- q2 128))
-                 (w (c8 (+ (c8 (- sp1 sq1)) (* 3 (- sq0 sp0))))))
-            (declare (type (signed-byte 16) sp2 sp1 sp0 sq0 sq1 sq2) (type fixnum w))
-            (let ((a (c8 (ash (+ (* 27 w) 63) -7))))
-              (setf (aref data q0i) (+ (c8 (- sq0 a)) 128)
-                    (aref data p0i) (+ (c8 (+ sp0 a)) 128)))
-            (let ((a (c8 (ash (+ (* 18 w) 63) -7))))
-              (setf (aref data q1i) (+ (c8 (- sq1 a)) 128)
-                    (aref data p1i) (+ (c8 (+ sp1 a)) 128)))
-            (let ((a (c8 (ash (+ (* 9 w) 63) -7))))
-              (setf (aref data q2i) (+ (c8 (- sq2 a)) 128)
-                    (aref data p2i) (+ (c8 (+ sp2 a)) 128))))))))
+;;; simple filter (luma only): two samples either side, no interior test
+(defun %edge-simple (data start along s count elim)
+  (declare (type u8vec data) (type dim start along s) (type (integer 0 64) count)
+           (type (signed-byte 16) elim) (optimize (speed 3) (safety 0)))
+  (let ((s2 (* 2 s)))
+    (declare (type dim s2))
+    (%along (q0i start along count)
+      (let* ((p1i (- q0i s2)) (p0i (- q0i s)) (q1i (+ q0i s))
+             (p1 (aref data p1i)) (p0 (aref data p0i))
+             (q0 (aref data q0i)) (q1 (aref data q1i)))
+        (declare (type dim p1i p0i q1i) (type (unsigned-byte 8) p1 p0 q0 q1))
+        (when (<= (+ (* 2 (abs (- p0 q0))) (ash (abs (- p1 q1)) -1)) elim)
+          (multiple-value-bind (np0 nq0) (%adjust t p1 p0 q0 q1)
+            (setf (aref data p0i) np0
+                  (aref data q0i) nq0)))))))
 
-;;; run a kernel along an edge: COUNT segments starting at index Q0, advancing
-;;; ALONG per segment, with cross step CROSS (perpendicular to the edge).
-(defmacro along-edge ((q0 along count) &body body)
-  `(let ((idx ,q0))
-     (declare (type fixnum idx))
-     (dotimes (k ,count)
-       (progn ,@body)
-       (incf idx ,along))))
+;;; normal filter, sub-block edge: p1..q1 may move
+(defun %edge-sub (data start along s count hthr ilim elim)
+  (declare (type u8vec data) (type dim start along s) (type (integer 0 64) count)
+           (type (signed-byte 16) hthr ilim elim) (optimize (speed 3) (safety 0)))
+  (let ((s2 (* 2 s)) (s3 (* 3 s)) (s4 (* 4 s)))
+    (declare (type dim s2 s3 s4))
+    (%along (q0i start along count)
+      (let* ((p3i (- q0i s4)) (p2i (- q0i s3)) (p1i (- q0i s2)) (p0i (- q0i s))
+             (q1i (+ q0i s)) (q2i (+ q0i s2)) (q3i (+ q0i s3))
+             (p3 (aref data p3i)) (p2 (aref data p2i)) (p1 (aref data p1i)) (p0 (aref data p0i))
+             (q0 (aref data q0i)) (q1 (aref data q1i)) (q2 (aref data q2i)) (q3 (aref data q3i)))
+        (declare (type dim p3i p2i p1i p0i q1i q2i q3i)
+                 (type (unsigned-byte 8) p3 p2 p1 p0 q0 q1 q2 q3))
+        (when (%edge-ok ilim elim p3 p2 p1 p0 q0 q1 q2 q3)
+          (let ((hv (%hev hthr p1 p0 q0 q1)))
+            (multiple-value-bind (np0 nq0 a0) (%adjust hv p1 p0 q0 q1)
+              (declare (type fixnum a0))
+              (setf (aref data p0i) np0
+                    (aref data q0i) nq0)
+              (unless hv
+                (let ((a (ash (+ a0 1) -1)))
+                  (declare (type fixnum a))
+                  (setf (aref data q1i) (clamp255 (- q1 a))
+                        (aref data p1i) (clamp255 (+ p1 a))))))))))))
+
+;;; normal filter, macroblock edge: p2..q2 may move, by three different weights
+(defun %edge-mb (data start along s count hthr ilim elim)
+  (declare (type u8vec data) (type dim start along s) (type (integer 0 64) count)
+           (type (signed-byte 16) hthr ilim elim) (optimize (speed 3) (safety 0)))
+  (let ((s2 (* 2 s)) (s3 (* 3 s)) (s4 (* 4 s)))
+    (declare (type dim s2 s3 s4))
+    (%along (q0i start along count)
+      (let* ((p3i (- q0i s4)) (p2i (- q0i s3)) (p1i (- q0i s2)) (p0i (- q0i s))
+             (q1i (+ q0i s)) (q2i (+ q0i s2)) (q3i (+ q0i s3))
+             (p3 (aref data p3i)) (p2 (aref data p2i)) (p1 (aref data p1i)) (p0 (aref data p0i))
+             (q0 (aref data q0i)) (q1 (aref data q1i)) (q2 (aref data q2i)) (q3 (aref data q3i)))
+        (declare (type dim p3i p2i p1i p0i q1i q2i q3i)
+                 (type (unsigned-byte 8) p3 p2 p1 p0 q0 q1 q2 q3))
+        (when (%edge-ok ilim elim p3 p2 p1 p0 q0 q1 q2 q3)
+          (if (%hev hthr p1 p0 q0 q1)
+              (multiple-value-bind (np0 nq0) (%adjust t p1 p0 q0 q1)
+                (setf (aref data p0i) np0
+                      (aref data q0i) nq0))
+              (let ((w (c8 (+ (c8 (- p1 q1)) (* 3 (- q0 p0))))))
+                (declare (type fixnum w))
+                (let ((a (c8 (ash (+ (* 27 w) 63) -7))))
+                  (setf (aref data q0i) (clamp255 (- q0 a))
+                        (aref data p0i) (clamp255 (+ p0 a))))
+                (let ((a (c8 (ash (+ (* 18 w) 63) -7))))
+                  (setf (aref data q1i) (clamp255 (- q1 a))
+                        (aref data p1i) (clamp255 (+ p1 a))))
+                (let ((a (c8 (ash (+ (* 9 w) 63) -7))))
+                  (setf (aref data q2i) (clamp255 (- q2 a))
+                        (aref data p2i) (clamp255 (+ p2 a)))))))))))
 
 (defun filter-plane-edges (pl mbx mby is-luma simple hthr ilim mbelim subelim do-inner)
-  "Filter the four edge groups for one plane block of the current MB."
+  "Filter the four edge groups for one plane block of the current MB.
+
+   THE ORDER IS NORMATIVE: every vertical edge left to right, then every horizontal edge top to
+   bottom, and each one sees the samples the last one left behind."
   (declare (type plane pl) (type dim mbx mby)
            (type (signed-byte 16) hthr ilim mbelim subelim)
            (optimize (speed 3) (safety 1)))
@@ -132,31 +150,32 @@
          (len (if is-luma 16 8))
          (bx (if is-luma (* mbx 16) (* mbx 8)))
          (by (if is-luma (* mby 16) (* mby 8)))
-         (inner (if is-luma '(4 8 12) '(4))))
-    (declare (type dim stride len bx by))
-    (flet ((vidx (x y) (declare (type dim x y)) (+ (* (+ y 1) stride) (+ x 1))))
-      ;; step 1: left MB edge (vertical), cross step 1, along = stride
-      (when (> mbx 0)
-        (along-edge ((vidx bx by) stride len)
-          (if simple (kernel-simple data idx 1 mbelim)
-              (kernel-mb data idx 1 hthr ilim mbelim))))
-      ;; step 2: inner vertical edges
-      (when do-inner
-        (dolist (dx inner)
-          (along-edge ((vidx (+ bx dx) by) stride len)
-            (if simple (kernel-simple data idx 1 subelim)
-                (kernel-sub data idx 1 hthr ilim subelim)))))
-      ;; step 3: top MB edge (horizontal), cross step = stride, along = 1
-      (when (> mby 0)
-        (along-edge ((vidx bx by) 1 len)
-          (if simple (kernel-simple data idx stride mbelim)
-              (kernel-mb data idx stride hthr ilim mbelim))))
-      ;; step 4: inner horizontal edges
-      (when do-inner
-        (dolist (dy inner)
-          (along-edge ((vidx bx (+ by dy)) 1 len)
-            (if simple (kernel-simple data idx stride subelim)
-                (kernel-sub data idx stride hthr ilim subelim))))))))
+         (inner (if is-luma '(4 8 12) '(4)))
+         (base (+ (* (+ by 1) stride) bx 1)))   ; the block's top-left visible sample
+    (declare (type dim stride len bx by base))
+    (if simple
+        (progn
+          (when (> mbx 0) (%edge-simple data base stride 1 len mbelim))
+          (when do-inner
+            (dolist (dx inner)
+              (declare (type (integer 0 12) dx))
+              (%edge-simple data (+ base dx) stride 1 len subelim)))
+          (when (> mby 0) (%edge-simple data base 1 stride len mbelim))
+          (when do-inner
+            (dolist (dy inner)
+              (declare (type (integer 0 12) dy))
+              (%edge-simple data (+ base (* dy stride)) 1 stride len subelim))))
+        (progn
+          (when (> mbx 0) (%edge-mb data base stride 1 len hthr ilim mbelim))
+          (when do-inner
+            (dolist (dx inner)
+              (declare (type (integer 0 12) dx))
+              (%edge-sub data (+ base dx) stride 1 len hthr ilim subelim)))
+          (when (> mby 0) (%edge-mb data base 1 stride len hthr ilim mbelim))
+          (when do-inner
+            (dolist (dy inner)
+              (declare (type (integer 0 12) dy))
+              (%edge-sub data (+ base (* dy stride)) 1 stride len hthr ilim subelim)))))))
 
 (defun filter-strength (d seg i4x4)
   "Return (values level interior-limit hev-threshold) for a MB, or level 0."

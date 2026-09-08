@@ -44,7 +44,7 @@ after the type work described below:
 | MPEG-2 | 283 fps | 611 |
 | MPEG-4 Part 2 | 255 fps | 556 |
 | Theora | 308 fps | 398 |
-| VP8 | 184 fps | 302 |
+| VP8 | 184 fps | 348 |
 | VP9 | 125 fps | 238 |
 | H.264, P and B pictures | 43 fps | 57 |
 | FFV1, lossless | 23.5 fps | 32 |
@@ -70,7 +70,10 @@ per cent of a VP8 decode — that turned out to carry no optimisation declaratio
 VP8 then went further, because its planes were holding one sample per machine word: an octet plane
 is 3.1 MB at 1920x1080 where a thirty-two bit one is 12.3 and the `fixnum` one it started as was
 24.6. That is worth about 1.25 times at 640x360 and 1.37 at 1920x1080 — the gain grows with the
-picture, which is what a memory-traffic change looks like. `src/decode/NOTES.md` has that one.
+picture, which is what a memory-traffic change looks like. Its deblocking filter then took an edge
+per call rather than a line, and stopped converting every sample to signed and back for arithmetic
+in which the offsets cancel. `src/decode/NOTES.md` has all of it, including the two further steps
+that were costed and declined.
 
 Nothing about the decoded pictures changed: every fixture in every suite is still bit-exact against
 ffmpeg. `src/vp9/NOTES.md` has the long version, including the two changes that were measured,
@@ -164,8 +167,9 @@ sizes named.
 - **A serial H.264 stream is still a serial decode.** Concurrency here is per PICTURE, so it does
   nothing for a stream with P or B pictures — which is every real stream. VP9 has the same shape and
   the same limit. Slice-level or wavefront parallelism would help both, and neither is small.
-- **The profiles that are still one function.** FFV1 spends 84 per cent of its time in
-  `%decode-line` and VP8 nearly forty per cent in its deblocking kernel, and in both cases that is
-  now the arithmetic the format specifies rather than anything the compiler was failing to see.
-  Going further would mean filtering or coding more than one sample at a time, which is a different
-  kind of change from anything above.
+- **A vector primitive.** FFV1 spends 84 per cent of its time in `%decode-line` and VP8 about forty
+  in its deblocking kernel, and in both cases that is now the arithmetic the format specifies. The
+  next step for either is lane-parallel work on several samples at once, which needs an unaligned
+  machine-word load from an octet array — something SBCL does not offer, since `%vector-raw-bits`
+  is indexed in whole words. That is the wall, and it is a different kind of wall from the ones
+  above.

@@ -13,7 +13,7 @@
 (in-package #:reel.vp9)
 
 (defparameter +subpel-filters+
-  (make-array '(3 16 8) :element-type 'fixnum :initial-contents
+  (make-array '(3 16 8) :element-type '(signed-byte 32) :initial-contents
    '(
     (  ; smooth
      (   0    0    0  128    0    0    0    0)
@@ -72,4 +72,4 @@
 ))
   "[filter][phase][tap].  The filters are in the order the bitstream numbers them — smooth, regular,
    sharp — which is not the order ffmpeg declares them in.")
-(declaim (type (simple-array fixnum (3 16 8)) +subpel-filters+))
+(declaim (type (simple-array (signed-byte 32) (3 16 8)) +subpel-filters+))

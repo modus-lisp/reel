@@ -3,7 +3,7 @@
 (in-package #:reel.vp9)
 
 (defparameter +inter-mode-ctx-lut+
-  (make-array '(14 14) :element-type 'fixnum :initial-contents
+  (make-array '(14 14) :element-type '(signed-byte 32) :initial-contents
    '(
      (6 6 6 6 6 6 6 6 6 6 5 5 5 5)
      (6 6 6 6 6 6 6 6 6 6 5 5 5 5)
@@ -25,7 +25,7 @@
    of this table is the two `a neighbour was intra' answers, five and six.")
 
 (defparameter +mv-ref-blk-off+
-  (make-array '(13 8 2) :element-type 'fixnum :initial-contents
+  (make-array '(13 8 2) :element-type '(signed-byte 32) :initial-contents
    '(
      (( 3 -1) (-1  3) ( 4 -1) (-1  4) (-1 -1) ( 0 -1) (-1  0) ( 6 -1))
      (( 0 -1) (-1  0) ( 4 -1) (-1  2) (-1 -1) ( 0 -3) (-3  0) ( 2 -1))
@@ -46,5 +46,5 @@
    tall one: the first two entries are always the immediate above and left neighbours, nearer edge
    first, because that is the one most likely to agree.")
 
-(declaim (type (simple-array fixnum (14 14)) +inter-mode-ctx-lut+)
-         (type (simple-array fixnum (13 8 2)) +mv-ref-blk-off+))
+(declaim (type (simple-array (signed-byte 32) (14 14)) +inter-mode-ctx-lut+)
+         (type (simple-array (signed-byte 32) (13 8 2)) +mv-ref-blk-off+))

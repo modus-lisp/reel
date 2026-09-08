@@ -108,7 +108,7 @@
 ;;; into an infinite loop rather than a wrong answer, which is at least loud.
 
 (defparameter +partition-tree+
-  (make-array '(3 2) :element-type 'fixnum :initial-contents
+  (make-array '(3 2) :element-type '(signed-byte 32) :initial-contents
    '(
      (  0   1)
      ( -1   2)
@@ -117,7 +117,7 @@
   "How a block is split: not at all, into two across, into two down, or into four.")
 
 (defparameter +segmentation-tree+
-  (make-array '(7 2) :element-type 'fixnum :initial-contents
+  (make-array '(7 2) :element-type '(signed-byte 32) :initial-contents
    '(
      (  1   2)
      (  3   4)
@@ -130,7 +130,7 @@
   "Which of the eight segments a block belongs to.")
 
 (defparameter +intramode-tree+
-  (make-array '(9 2) :element-type 'fixnum :initial-contents
+  (make-array '(9 2) :element-type '(signed-byte 32) :initial-contents
    '(
      ( -2   1)
      ( -9   2)
@@ -145,7 +145,7 @@
   "The ten intra prediction modes, in the order their codes are assigned.")
 
 (defparameter +inter-mode-tree+
-  (make-array '(3 2) :element-type 'fixnum :initial-contents
+  (make-array '(3 2) :element-type '(signed-byte 32) :initial-contents
    '(
      (-12   1)
      (-10   2)
@@ -156,7 +156,7 @@
    the ten intra ones, so subtract ten to index anything counted from NEARESTMV.")
 
 (defparameter +filter-tree+
-  (make-array '(2 2) :element-type 'fixnum :initial-contents
+  (make-array '(2 2) :element-type '(signed-byte 32) :initial-contents
    '(
      (  0   1)
      ( -1  -2)
@@ -164,7 +164,7 @@
   "Which of the three eight-tap interpolation filters this block uses.")
 
 (defparameter +mv-joint-tree+
-  (make-array '(3 2) :element-type 'fixnum :initial-contents
+  (make-array '(3 2) :element-type '(signed-byte 32) :initial-contents
    '(
      (  0   1)
      ( -1   2)
@@ -173,7 +173,7 @@
   "Which components of a motion vector are non-zero: neither, one, the other, or both.")
 
 (defparameter +mv-class-tree+
-  (make-array '(10 2) :element-type 'fixnum :initial-contents
+  (make-array '(10 2) :element-type '(signed-byte 32) :initial-contents
    '(
      (  0   1)
      ( -1   2)
@@ -190,7 +190,7 @@
    bits that follow.")
 
 (defparameter +mv-fp-tree+
-  (make-array '(3 2) :element-type 'fixnum :initial-contents
+  (make-array '(3 2) :element-type '(signed-byte 32) :initial-contents
    '(
      (  0   1)
      ( -1   2)

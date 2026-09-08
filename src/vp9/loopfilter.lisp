@@ -19,14 +19,14 @@
 (in-package #:reel.vp9)
 
 (defparameter +wide-filter-col-mask+
-  (make-array 2 :element-type 'fixnum :initial-contents '(#x11 #x01)))
+  (make-array 2 :element-type '(signed-byte 32) :initial-contents '(#x11 #x01)))
 (defparameter +wide-filter-row-mask+
-  (make-array 2 :element-type 'fixnum :initial-contents '(#x03 #x07)))
+  (make-array 2 :element-type '(signed-byte 32) :initial-contents '(#x03 #x07)))
 (defparameter +row-masks+
-  (make-array 4 :element-type 'fixnum :initial-contents '(#xff #x55 #x11 #x01))
+  (make-array 4 :element-type '(signed-byte 32) :initial-contents '(#xff #x55 #x11 #x01))
   "Which columns of an eight-wide step carry an edge, by transform size.")
-(declaim (type (simple-array fixnum (2)) +wide-filter-col-mask+ +wide-filter-row-mask+)
-         (type (simple-array fixnum (4)) +row-masks+))
+(declaim (type (simple-array (signed-byte 32) (2)) +wide-filter-col-mask+ +wide-filter-row-mask+)
+         (type (simple-array (signed-byte 32) (4)) +row-masks+))
 
 ;;; ---- the two limits, from the level ---------------------------------------------------------------
 
@@ -36,8 +36,8 @@
    SHARPNESS narrows the inner limit — it is the encoder saying `filter less across detail' — and it
    is the only knob in VP9's filter that a stream sets globally rather than per block."
   (declare (type fixnum sharpness))
-  (let ((lim (make-array 64 :element-type 'fixnum :initial-element 0))
-        (mblim (make-array 64 :element-type 'fixnum :initial-element 0)))
+  (let ((lim (make-array 64 :element-type '(signed-byte 32) :initial-element 0))
+        (mblim (make-array 64 :element-type '(signed-byte 32) :initial-element 0)))
     (loop for i of-type fixnum from 1 to 63
           do (let ((limit i))
                (declare (type fixnum limit))
@@ -65,12 +65,18 @@
    each side by a clipped difference; the eight-wide one replaces six samples with a seven-tap
    average; the sixteen-wide one replaces fourteen with a fifteen-tap average.  Which applies is not
    the caller's choice alone — the caller says how wide it MAY be, and the samples decide, by two
-   flatness tests, whether they are smooth enough to deserve it."
+   flatness tests, whether they are smooth enough to deserve it.
+
+   ONE OF THE TWO STRIDES IS ALWAYS ONE — a vertical edge has the samples across it adjacent, a
+   horizontal edge is the transpose — and specialising on which, so that the thirty index multiplies
+   per line become constant offsets, makes this SLOWER by about three per cent.  Two copies of a
+   kernel this size do not fit where one does.  What the indices needed was not to be duplicated but
+   to be declared: the THE FIXNUM below is the whole of the win, and it is worth eight per cent."
   (declare (type octets dst) (type fixnum at stridea strideb e i h wd count)
-           (optimize (speed 3) (safety 1)))
-  (macrolet ((s (k) `(aref dst (+ p (* ,k strideb)))))
+           (optimize (speed 3) (safety 0)))
+  (macrolet ((s (k) `(aref dst (the fixnum (+ p (the fixnum (* ,k strideb)))))))
     (dotimes (n count)
-      (let ((p (+ at (* n stridea))))
+      (let ((p (the fixnum (+ at (the fixnum (* n stridea))))))
         (declare (type fixnum p))
         (let ((p3 (s -4)) (p2 (s -3)) (p1 (s -2)) (p0 (s -1))
               (q0 (s 0)) (q1 (s 1)) (q2 (s 2)) (q3 (s 3)))
@@ -148,7 +154,7 @@
    blocks at a time and uses only the top-left one's information.  That is why a block smaller than
    16x16 contributes nothing from its odd half, and why the first thing here is a set of early
    returns that look like they are discarding information.  They are: the format discards it."
-  (declare (type (simple-array fixnum (* 2 2 8 4)) mask)
+  (declare (type (simple-array (signed-byte 32) (* 2 2 8 4)) mask)
            (type fixnum sb uv ss-h ss-v row7 col7 w h col-end row-end tx)
            (optimize (speed 3) (safety 1)))
   (macrolet ((m (dir y k) `(aref mask sb uv ,dir ,y ,k)))
@@ -241,9 +247,9 @@
 
 (defun %filter-cols (mask sb uv level col ss-h ss-v dst stride base lim mblim)
   "Every vertical edge in one superblock of one plane: the boundaries between columns."
-  (declare (type (simple-array fixnum (* 2 2 8 4)) mask)
-           (type (simple-array fixnum (* 8 8)) level)
-           (type octets dst) (type (simple-array fixnum (64)) lim mblim)
+  (declare (type (simple-array (signed-byte 32) (* 2 2 8 4)) mask)
+           (type (simple-array (signed-byte 32) (* 8 8)) level)
+           (type octets dst) (type (simple-array (signed-byte 32) (64)) lim mblim)
            (type fixnum sb uv col ss-h ss-v stride base)
            (optimize (speed 3) (safety 1)))
   (macrolet ((hm (y k) `(aref mask sb uv 0 ,y ,k))
@@ -320,9 +326,9 @@
 
 (defun %filter-rows (mask sb uv level row ss-h ss-v dst stride base lim mblim)
   "And every horizontal edge: the boundaries between rows."
-  (declare (type (simple-array fixnum (* 2 2 8 4)) mask)
-           (type (simple-array fixnum (* 8 8)) level)
-           (type octets dst) (type (simple-array fixnum (64)) lim mblim)
+  (declare (type (simple-array (signed-byte 32) (* 2 2 8 4)) mask)
+           (type (simple-array (signed-byte 32) (* 8 8)) level)
+           (type octets dst) (type (simple-array (signed-byte 32) (64)) lim mblim)
            (type fixnum sb uv row ss-h ss-v stride base)
            (optimize (speed 3) (safety 1)))
   (macrolet ((vm (y k) `(aref mask sb uv 1 ,y ,k))

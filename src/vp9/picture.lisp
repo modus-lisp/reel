@@ -14,8 +14,8 @@
 (defstruct (frame (:conc-name fr-))
   (width 0 :type fixnum) (height 0 :type fixnum)
   (planes (vector (%o 0) (%o 0) (%o 0)) :type simple-vector)
-  (stride (make-array 3 :element-type 'fixnum) :type (simple-array fixnum (3)))
-  (pheight (make-array 3 :element-type 'fixnum) :type (simple-array fixnum (3)))
+  (stride (make-array 3 :element-type '(signed-byte 32)) :type (simple-array (signed-byte 32) (3)))
+  (pheight (make-array 3 :element-type '(signed-byte 32)) :type (simple-array (signed-byte 32) (3)))
   (timestamp nil))
 
 (defun make-frame-for (h)

@@ -68,23 +68,23 @@
   (subsampling-x 1 :type fixnum) (subsampling-y 1 :type fixnum)
   (colorspace 0 :type fixnum) (full-range nil)
   (refresh-mask 0 :type fixnum)                 ; which of the eight reference slots this updates
-  (ref-idx (make-array 3 :element-type 'fixnum :initial-element 0) :type (simple-array fixnum (3)))
-  (sign-bias (make-array 3 :element-type 'fixnum :initial-element 0)
-             :type (simple-array fixnum (3)))
+  (ref-idx (make-array 3 :element-type '(signed-byte 32) :initial-element 0) :type (simple-array (signed-byte 32) (3)))
+  (sign-bias (make-array 3 :element-type '(signed-byte 32) :initial-element 0)
+             :type (simple-array (signed-byte 32) (3)))
   (high-precision-mv nil)
   (filter-mode 0 :type fixnum)                  ; 0..2 a fixed filter, 3 switchable per block
   (allow-comp-inter nil)
   (fix-comp-ref 0 :type fixnum)
-  (var-comp-ref (make-array 2 :element-type 'fixnum :initial-element 0)
-                :type (simple-array fixnum (2)))
+  (var-comp-ref (make-array 2 :element-type '(signed-byte 32) :initial-element 0)
+                :type (simple-array (signed-byte 32) (2)))
   (refresh-context nil) (parallel-mode nil) (frame-context 0 :type fixnum)
   ;; loop filter
   (filter-level 0 :type fixnum) (sharpness 0 :type fixnum)
   (lf-delta-enabled nil) (lf-delta-updated nil)
-  (lf-ref-delta (make-array 4 :element-type 'fixnum :initial-contents '(1 0 -1 -1))
-                :type (simple-array fixnum (4)))
-  (lf-mode-delta (make-array 2 :element-type 'fixnum :initial-element 0)
-                 :type (simple-array fixnum (2)))
+  (lf-ref-delta (make-array 4 :element-type '(signed-byte 32) :initial-contents '(1 0 -1 -1))
+                :type (simple-array (signed-byte 32) (4)))
+  (lf-mode-delta (make-array 2 :element-type '(signed-byte 32) :initial-element 0)
+                 :type (simple-array (signed-byte 32) (2)))
   ;; quantiser
   (base-q 0 :type fixnum)
   (ydc-delta 0 :type fixnum) (uvdc-delta 0 :type fixnum) (uvac-delta 0 :type fixnum)
@@ -95,10 +95,10 @@
                   :type (simple-array (unsigned-byte 8) (7)))
   (seg-pred-probs (make-array 3 :element-type '(unsigned-byte 8) :initial-element 255)
                   :type (simple-array (unsigned-byte 8) (3)))
-  (seg-feature (make-array '(8 4) :element-type 'fixnum :initial-element 0)
-               :type (simple-array fixnum (8 4)))     ; q, loop filter, reference, skip
-  (seg-feature-on (make-array '(8 4) :element-type 'fixnum :initial-element 0)
-                  :type (simple-array fixnum (8 4)))
+  (seg-feature (make-array '(8 4) :element-type '(signed-byte 32) :initial-element 0)
+               :type (simple-array (signed-byte 32) (8 4)))     ; q, loop filter, reference, skip
+  (seg-feature-on (make-array '(8 4) :element-type '(signed-byte 32) :initial-element 0)
+                  :type (simple-array (signed-byte 32) (8 4)))
   ;; tiling and the compressed header's size
   (log2-tile-cols 0 :type fixnum) (log2-tile-rows 0 :type fixnum)
   (compressed-size 0 :type fixnum)

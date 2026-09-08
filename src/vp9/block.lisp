@@ -26,7 +26,7 @@
 (defconstant +bs-4x8+ 11)
 
 (defparameter +max-tx-for-bs+
-  (make-array 13 :element-type 'fixnum :initial-contents
+  (make-array 13 :element-type '(signed-byte 32) :initial-contents
               '(3 3 3 3 2 2 2 1 1 1 0 0 0))
   "The largest transform each block size may use: a 4x8 block cannot hold an 8x8 transform.")
 
@@ -41,7 +41,7 @@
   "And into the one below it.")
 
 (defparameter +band-counts+
-  (make-array '(4 8) :element-type 'fixnum :initial-contents
+  (make-array '(4 8) :element-type '(signed-byte 32) :initial-contents
               '((1 2 3 4  3    3 0 0)
                 (1 2 3 4 11   43 0 0)
                 (1 2 3 4 11  235 0 0)
@@ -54,9 +54,9 @@
    last coefficient of a block as well as between them, so the counter runs one past the end before
    the loop notices it is finished — and lands on a zero, which advances it no further.")
 
-(declaim (type (simple-array fixnum (13)) +max-tx-for-bs+)
+(declaim (type (simple-array (signed-byte 32) (13)) +max-tx-for-bs+)
          (type (simple-array (unsigned-byte 8) (13)) +left-ctx-for-bs+ +above-ctx-for-bs+)
-         (type (simple-array fixnum (4 8)) +band-counts+))
+         (type (simple-array (signed-byte 32) (4 8)) +band-counts+))
 
 ;;; ---- the decoding state --------------------------------------------------------------------------
 
@@ -77,7 +77,7 @@
   (above-ref (%o 0) :type octets)
   (above-filter (%o 0) :type octets)
   ;; the vectors an inter block's neighbours used, two per eight-sample column, two lists each
-  (above-mv (make-array '(1 2 2) :element-type 'fixnum) :type (simple-array fixnum (* 2 2)))
+  (above-mv (make-array '(1 2 2) :element-type '(signed-byte 32)) :type (simple-array (signed-byte 32) (* 2 2)))
   ;; left contexts: one superblock row of one tile, and reset at the start of each
   (left-partition (%o 8) :type octets)
   (left-mode (%o 16) :type octets)
@@ -90,23 +90,23 @@
   (left-comp (%o 8) :type octets)
   (left-ref (%o 8) :type octets)
   (left-filter (%o 8) :type octets)
-  (left-mv (make-array '(16 2 2) :element-type 'fixnum) :type (simple-array fixnum (16 2 2)))
+  (left-mv (make-array '(16 2 2) :element-type '(signed-byte 32)) :type (simple-array (signed-byte 32) (16 2 2)))
   ;; the block being decoded
   (row 0 :type fixnum) (col 0 :type fixnum) (row7 0 :type fixnum)
   (bs 0 :type fixnum) (bl 0 :type fixnum) (bp 0 :type fixnum)
   (seg-id 0 :type fixnum) (skip nil) (intra t)
   (tx 0 :type fixnum) (uvtx 0 :type fixnum)
-  (mode (make-array 4 :element-type 'fixnum) :type (simple-array fixnum (4)))
+  (mode (make-array 4 :element-type '(signed-byte 32)) :type (simple-array (signed-byte 32) (4)))
   (uvmode 0 :type fixnum)
   ;; an inter block: which references, whether both, which filter, and a vector per sub-block
-  (bref (make-array 2 :element-type 'fixnum) :type (simple-array fixnum (2)))
+  (bref (make-array 2 :element-type '(signed-byte 32)) :type (simple-array (signed-byte 32) (2)))
   (bcomp nil)
   (bfilter 0 :type fixnum) (bfilter-id 0 :type fixnum)
-  (bmv (make-array '(4 2 2) :element-type 'fixnum) :type (simple-array fixnum (4 2 2)))
+  (bmv (make-array '(4 2 2) :element-type '(signed-byte 32)) :type (simple-array (signed-byte 32) (4 2 2)))
   (min-mvx 0 :type fixnum) (min-mvy 0 :type fixnum)
   (max-mvx 0 :type fixnum) (max-mvy 0 :type fixnum)
   ;; the reference and vector of every eight-sample block of this frame, and of the last one
-  (mvref (make-array 6 :element-type 'fixnum) :type (simple-array fixnum (*)))
+  (mvref (make-array 6 :element-type '(signed-byte 32)) :type (simple-array (signed-byte 32) (*)))
   mvref-prev
   (use-last-mvs nil)
   ;; the segment each block belongs to, this frame and last
@@ -122,19 +122,25 @@
   ;; produce — so a test that merely decodes such a stream correctly cannot tell whether it
   ;; exercised the path at all.  This lets it say so.
   (comp-blocks 0 :type fixnum)
+  ;; Scratch for motion compensation, allocated once for the largest block a frame can hold rather
+  ;; than per call.  A 64x64 block needs seventy-one rows of intermediate, and allocating that on
+  ;; every one of the thousands of predictions in a frame costs more than the filtering does.
+  (mc-tmp (make-array (* 64 71) :element-type '(signed-byte 32)) :type (simple-array (signed-byte 32) (4544)))
+  (mc-win (make-array (* 71 71) :element-type '(unsigned-byte 8))
+          :type (simple-array (unsigned-byte 8) (5041)))
   (tile-col-start 0 :type fixnum) (tile-col-end 0 :type fixnum)
   ;; coefficients of one block, and how many each of its transform blocks held
-  (coeffs (make-array 4096 :element-type 'fixnum) :type (simple-array fixnum (4096)))
-  (uvcoeffs (vector (make-array 1024 :element-type 'fixnum)
-                    (make-array 1024 :element-type 'fixnum))
+  (coeffs (make-array 4096 :element-type '(signed-byte 32)) :type (simple-array (signed-byte 32) (4096)))
+  (uvcoeffs (vector (make-array 1024 :element-type '(signed-byte 32))
+                    (make-array 1024 :element-type '(signed-byte 32)))
             :type simple-vector)
-  (eob (make-array 256 :element-type 'fixnum) :type (simple-array fixnum (256)))
-  (uveob (vector (make-array 64 :element-type 'fixnum) (make-array 64 :element-type 'fixnum))
+  (eob (make-array 256 :element-type '(signed-byte 32)) :type (simple-array (signed-byte 32) (256)))
+  (uveob (vector (make-array 64 :element-type '(signed-byte 32)) (make-array 64 :element-type '(signed-byte 32)))
          :type simple-vector)
   ;; the dequantiser, per segment: [seg][plane][dc? ac?]
-  (qmul (make-array '(8 2 2) :element-type 'fixnum) :type (simple-array fixnum (8 2 2)))
+  (qmul (make-array '(8 2 2) :element-type '(signed-byte 32)) :type (simple-array (signed-byte 32) (8 2 2)))
   ;; per-segment skip and reference features, read out of the header once
-  (seg-skip (make-array 8 :element-type 'fixnum) :type (simple-array fixnum (8)))
+  (seg-skip (make-array 8 :element-type '(signed-byte 32)) :type (simple-array (signed-byte 32) (8)))
   frame                                         ; the picture being decoded
   ;; The last line of each superblock row, saved BEFORE the loop filter touched it.  Intra
   ;; prediction is defined on unfiltered samples and the filter has already run over that line by
@@ -143,13 +149,13 @@
   (edge-a (%o 96) :type octets)                 ; the row above, corner at index thirty-one
   (edge-l (%o 64) :type octets)                 ; and the column to the left
   ;; the loop filter's working data: a level per 8x8 block and an edge mask, per superblock column
-  (lf-level (make-array '(1 8 8) :element-type 'fixnum) :type (simple-array fixnum (* 8 8)))
-  (lf-mask (make-array '(1 2 2 8 4) :element-type 'fixnum)
-           :type (simple-array fixnum (* 2 2 8 4)))
-  (lf-lim (make-array 64 :element-type 'fixnum) :type (simple-array fixnum (64)))
-  (lf-mblim (make-array 64 :element-type 'fixnum) :type (simple-array fixnum (64)))
+  (lf-level (make-array '(1 8 8) :element-type '(signed-byte 32)) :type (simple-array (signed-byte 32) (* 8 8)))
+  (lf-mask (make-array '(1 2 2 8 4) :element-type '(signed-byte 32))
+           :type (simple-array (signed-byte 32) (* 2 2 8 4)))
+  (lf-lim (make-array 64 :element-type '(signed-byte 32)) :type (simple-array (signed-byte 32) (64)))
+  (lf-mblim (make-array 64 :element-type '(signed-byte 32)) :type (simple-array (signed-byte 32) (64)))
   ;; [segment][reference + 1, or 0 for intra][the block's vector is non-zero]
-  (lf-lvl (make-array '(8 4 2) :element-type 'fixnum) :type (simple-array fixnum (8 4 2)))
+  (lf-lvl (make-array '(8 4 2) :element-type '(signed-byte 32)) :type (simple-array (signed-byte 32) (8 4 2)))
   c                                             ; the arithmetic coder of the current tile
   (blocks 0 :type fixnum)                       ; how many blocks this frame has decoded
   ;; THE CHECK THAT COSTS NOTHING: how far any tile's coder finished from the end of its own
@@ -199,15 +205,15 @@
                           :above-comp (%o cols)
                           :above-ref (%o cols)
                           :above-filter (%o cols))))
-    (setf (st-above-mv st) (make-array (list (* 2 cols) 2 2) :element-type 'fixnum
+    (setf (st-above-mv st) (make-array (list (* 2 cols) 2 2) :element-type '(signed-byte 32)
                                        :initial-element 0))
-    (setf (st-mvref st) (make-array (* 6 (* 8 sb-rows) (* 8 sb-cols)) :element-type 'fixnum
+    (setf (st-mvref st) (make-array (* 6 (* 8 sb-rows) (* 8 sb-cols)) :element-type '(signed-byte 32)
                                     :initial-element -1)
           (st-segmap st) (%o (* (* 8 sb-rows) (* 8 sb-cols))))
     (setf (st-frame st) (make-frame-for h))
-    (setf (st-lf-level st) (make-array (list (st-sb-cols st) 8 8) :element-type 'fixnum
+    (setf (st-lf-level st) (make-array (list (st-sb-cols st) 8 8) :element-type '(signed-byte 32)
                                        :initial-element 0)
-          (st-lf-mask st) (make-array (list (st-sb-cols st) 2 2 8 4) :element-type 'fixnum
+          (st-lf-mask st) (make-array (list (st-sb-cols st) 2 2 8 4) :element-type '(signed-byte 32)
                                       :initial-element 0))
     (multiple-value-bind (lim mblim) (%filter-luts (h-sharpness h))
       (setf (st-lf-lim st) lim (st-lf-mblim st) mblim))
@@ -517,8 +523,8 @@
            (type fixnum pbase nnz base n-coeffs qdc qac tx plane inter)
            (type (simple-array (unsigned-byte 16) (*)) scan)
            (type (simple-array (unsigned-byte 16) (* 2)) nb)
-           (type (simple-array fixnum (*)) bands)
-           (type (simple-array fixnum (*)) out)
+           (type (simple-array (signed-byte 32) (*)) bands)
+           (type coefs out)
            (optimize (speed 3) (safety 1)))
   (let* ((c (st-c st)) (cnt (st-counts st))
          (cache (make-array 1024 :element-type '(unsigned-byte 8) :initial-element 0))
@@ -632,7 +638,7 @@
          ;; a lossless frame scans and transforms as if 4x4 whatever the block says
          (tx-index (if (h-lossless h) 4 tx)))
     (declare (type fixnum bs row col tx uvtx inter w4 h4 end-x end-y seg tx-index))
-    (macrolet ((band-row (which) `(let ((b (make-array 8 :element-type 'fixnum)))
+    (macrolet ((band-row (which) `(let ((b (make-array 8 :element-type '(signed-byte 32))))
                                     (dotimes (k 8 b) (setf (aref b k) (aref +band-counts+ ,which k))))))
       (let ((ybands (band-row tx)) (uvbands (band-row uvtx)))
         ;; ---- luma
@@ -674,8 +680,8 @@
           (dotimes (pl 2)
             (let ((a (the octets (aref (st-above-uv-nnz st) pl))) (ao col)
                   (l (the octets (aref (st-left-uv-nnz st) pl))) (lo (st-row7 st))
-                  (out (the (simple-array fixnum (*)) (aref (st-uvcoeffs st) pl)))
-                  (eobs (the (simple-array fixnum (*)) (aref (st-uveob st) pl)))
+                  (out (the coefs (aref (st-uvcoeffs st) pl)))
+                  (eobs (the (simple-array (signed-byte 32) (*)) (aref (st-uveob st) pl)))
                   (n 0))
               (declare (type fixnum ao lo n))
               (when (> step 1)

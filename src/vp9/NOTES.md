@@ -303,3 +303,38 @@ The fixture now **counts** the blocks that used two references and the test asse
 positive. That is the real fix: a stream re-encoded with different settings would otherwise stop
 covering the path and nothing would say so, which is exactly how it went unproven for as long as it
 did.
+
+## Twice as fast, and where it came from
+
+Six hundred and twenty pictures of 640x360, 1280x720 and 1920x1080 decode at 1.9 times the rate
+they did, with the output bit-identical at every step. Almost none of it was algorithmic.
+
+**A `fixnum` array is a sixty-four bit array.** SBCL upgrades `(simple-array fixnum (*))` to
+`(signed-byte 64)` storage, so `(aref a i)` on one is typed `(signed-byte 64)` — and a fixnum is
+sixty-two bits, so the compiler cannot prove the value it just loaded is one. Every sum of two such
+values is an out-of-line call into generic arithmetic, and a video decoder is nothing but sums of
+values loaded from arrays. Declaring the arrays thirty-two bits wide — samples, levels, strides,
+motion vectors, coefficients, counts, none of which need more — made all of that inline and halved
+the memory it touches. One `sed`, fourteen files, fourteen per cent.
+
+The same reasoning gives the coefficient buffers `(signed-byte 32)`, which is not a choice but the
+format's own contract: ffmpeg computes the inverse transforms in C `int` and the specification
+constrains a conformant stream so that no intermediate leaves that range. That took the transform
+from ten per cent of the profile to five.
+
+**Variable shifts are calls too.** `(ash x n)` with `n` of unknown magnitude cannot become a machine
+shift. Bounding the range coder's normalisation shift to `(integer 0 8)`, its interval to eight bits
+and its answer to one bit, and the transform's final shift to `(integer 0 6)`, was worth another
+four per cent — most of it in `bool-bit`, which runs once per coded decision and so runs more often
+than anything else here.
+
+**The loop filter got slower when it was specialised.** One of its two strides is always 1 — a
+vertical edge has its samples adjacent, a horizontal edge is the transpose — so generating a copy
+per case turns thirty index multiplies per line into constant offsets. It cost three per cent. Two
+copies of a kernel that size do not fit where one does. The same function got eight per cent from
+declaring the indices `fixnum` and dropping the bounds check, without duplicating anything.
+
+Which is the whole lesson of the exercise: every change here was measured against the previous
+build, two of them were reverted for being slower than what they replaced, and the profile decided
+the order rather than intuition. The one intuition worth keeping is that in this compiler the cost
+is almost never the arithmetic — it is failing to tell the compiler what the arithmetic is on.

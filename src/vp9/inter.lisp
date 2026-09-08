@@ -23,13 +23,13 @@
 (defconstant +zeromv+ 12) (defconstant +newmv+ 13)
 
 (defparameter +size-group+
-  (make-array 13 :element-type 'fixnum :initial-contents '(3 3 3 3 2 2 2 1 1 1 0 0 0))
+  (make-array 13 :element-type '(signed-byte 32) :initial-contents '(3 3 3 3 2 2 2 1 1 1 0 0 0))
   "Which of the four luma-mode probability sets a block size uses, for an intra block inside an
    inter frame.")
 (defparameter +sub8x8-mode-off+
-  (make-array 13 :element-type 'fixnum :initial-contents '(3 0 0 1 0 0 0 0 0 0 0 0 0))
+  (make-array 13 :element-type '(signed-byte 32) :initial-contents '(3 0 0 1 0 0 0 0 0 0 0 0 0))
   "Where inside the block to read the neighbouring mode from, for a sub-8x8 block's single mode.")
-(declaim (type (simple-array fixnum (13)) +size-group+ +sub8x8-mode-off+))
+(declaim (type (simple-array (signed-byte 32) (13)) +size-group+ +sub8x8-mode-off+))
 
 ;;; ---- the predicted vector ------------------------------------------------------------------------
 
@@ -87,7 +87,7 @@
          (cur (st-mvref st)) (prev (st-mvref-prev st))
          (start 0))
     (declare (type fixnum bs row col row7 stride start)
-             (type (simple-array fixnum (*)) cur))
+             (type (simple-array (signed-byte 32) (*)) cur))
     (macrolet ((ref0 (a i) `(aref ,a (+ (* 6 ,i) 0)))
                (ref1 (a i) `(aref ,a (+ (* 6 ,i) 1)))
                (mvx (a i lx) `(aref ,a (+ (* 6 ,i) 2 (* 2 ,lx))))
@@ -138,7 +138,7 @@
           (when (and (st-use-last-mvs st) prev)
             (let ((j (+ (* row stride) col)))
               (declare (type fixnum j))
-              (let ((p (the (simple-array fixnum (*)) prev)))
+              (let ((p (the (simple-array (signed-byte 32) (*)) prev)))
                 (cond ((= (ref0 p j) ref) (candidate (mvx p j 0) (mvy p j 0)))
                       ((= (ref1 p j) ref) (candidate (mvx p j 1) (mvy p j 1)))))))
           ;; ---- the same two passes again, accepting a DIFFERENT reference.  A vector that points
@@ -167,7 +167,7 @@
                                 (/= (aref (h-sign-bias h) r1) (aref (h-sign-bias h) ref)))))))))
             (when (and (st-use-last-mvs st) prev)
               (let ((j (+ (* row stride) col))
-                    (p (the (simple-array fixnum (*)) prev)))
+                    (p (the (simple-array (signed-byte 32) (*)) prev)))
                 (declare (type fixnum j))
                 (let ((r0 (ref0 p j)) (r1 (ref1 p j)))
                   (declare (type fixnum r0 r1))
@@ -383,10 +383,10 @@
         (aref (st-bref st) 0))))
 
 (defparameter +filter-lut+
-  (make-array 3 :element-type 'fixnum :initial-contents '(1 0 2))
+  (make-array 3 :element-type '(signed-byte 32) :initial-contents '(1 0 2))
   "The filter tree's three symbols are not the filter numbers: the tree is ordered by how often each
    is chosen and the filters by how smooth they are.")
-(declaim (type (simple-array fixnum (3)) +filter-lut+))
+(declaim (type (simple-array (signed-byte 32) (3)) +filter-lut+))
 
 (defun %store-mv-contexts (st bs row7 col bw4 bh4)
   "The vectors a later block will read as its above and left neighbours.
@@ -421,7 +421,7 @@
    frame's vector prediction will read."
   (declare (type state st) (type fixnum row col w4 h4))
   (let ((a (st-mvref st)) (stride (* 8 (st-sb-cols st))) (mv (st-bmv st)))
-    (declare (type (simple-array fixnum (*)) a) (type fixnum stride))
+    (declare (type (simple-array (signed-byte 32) (*)) a) (type fixnum stride))
     (dotimes (y h4)
       (let ((o (* 6 (+ (* (+ row y) stride) col))))
         (declare (type fixnum o))

@@ -30,8 +30,8 @@
                  (mv-class0-fp (2 2 4)) (mv-fp (2 4)) (mv-class0-hp (2 2)) (mv-hp (2 2)))))
     `(defstruct (counts (:conc-name cn-))
        ,@(loop for (name dims) in slots
-               collect `(,name (make-array ',dims :element-type 'fixnum :initial-element 0)
-                               :type (simple-array fixnum ,dims))))))
+               collect `(,name (make-array ',dims :element-type '(signed-byte 32) :initial-element 0)
+                               :type (simple-array (signed-byte 32) ,dims))))))
 (%def-counts)
 
 ;;; ---- one probability, moved towards what the counts say -------------------------------------------

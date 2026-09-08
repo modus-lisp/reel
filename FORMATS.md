@@ -51,6 +51,20 @@ the intra rows are unchanged, because nothing that was tuned runs in them.
 That set is what x264 produces with no options at all, which is the point: High is x264's default
 profile, so most H.264 encoded since about 2010 is High rather than Main.
 
+VP9, on the same machine, one thread, sixty pictures of the same synthetic source at each size:
+
+| | before | after |
+|---|---|---|
+| 640x360 | 125 fps | 222 |
+| 1280x720 | 31 fps | 61 |
+| 1920x1080 | 13.7 fps | 26.8 |
+
+About 1.9 times, with the output bit-identical at every step, and almost none of it algorithmic:
+SBCL stores a `fixnum` array as sixty-four bits, so every value read out of one is wider than a
+fixnum and every sum of two of them was an out-of-line call. Declaring the arrays thirty-two bits
+wide — which is what they hold — was fourteen per cent on its own. `src/vp9/NOTES.md` has the rest,
+including the two changes that were reverted for being slower than what they replaced.
+
 MPEG-1 and MPEG-2 are one decoder, because they are one bitstream: an MPEG-2 sequence header is byte
 for byte an MPEG-1 one and everything MPEG-2 added arrives afterwards in extensions. It covers I, P
 and B pictures, both scan orders, both quantiser ladders, custom weight matrices, and interlaced
@@ -139,6 +153,8 @@ sizes named.
 - **A serial H.264 stream is still a serial decode.** Concurrency here is per PICTURE, so it does
   nothing for a stream with P or B pictures — which is every real stream. VP9 has the same shape and
   the same limit. Slice-level or wavefront parallelism would help both, and neither is small.
-- **VP9 speed.** It has had none of the attention H.264's motion path got: the eight-tap filter
-  gathers a clamped window for every block whether or not the block is anywhere near an edge, which
-  is the same mistake H.264's six-tap made until this week.
+- **The same twenty minutes spent on the other decoders.** What doubled VP9's speed was almost
+  entirely telling the compiler what its arrays hold, and nothing about VP9 made that true of it
+  alone: H.264, MPEG-2, MPEG-4 Part 2, Theora and FFV1 all still declare their small-integer arrays
+  `fixnum`, which in SBCL means sixty-four bits and generic arithmetic on everything read out of
+  them.

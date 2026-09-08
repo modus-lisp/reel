@@ -535,25 +535,34 @@
     (%reset-dc ss)
     (%reset-pmv ss)
     (setf (ss-mb-flags ss) 0)
-    (let ((first-p t) (mbx -1))
-      (declare (type fixnum mbx))
-      (loop
-        (let ((inc (%read-increment ss)))
-          (when (null inc) (return))
-          ;; the FIRST increment of a slice positions rather than skips: macroblocks before it were
-          ;; never in this slice at all, and a P picture must not treat them as zero-vector copies
-          (if first-p
-              (setf mbx (1- inc) first-p nil)
-              (progn
-                (dotimes (k (1- inc))
-                  (setf (ss-mbx ss) (+ mbx k 1))
-                  (when (>= (ss-mbx ss) (seq-mb-width seq))
-                    (%err "a macroblock past the end of row ~d" row))
-                  (skip-macroblock ss))
-                (incf mbx inc)))
-          (setf (ss-mbx ss) mbx)
-          (when (>= mbx (seq-mb-width seq))
-            (%err "a macroblock past the end of row ~d" row))
-          (decode-macroblock ss)
-          (when (next-start-code-p br) (return))
-          (when (br-eof-p br) (return)))))))
+    ;; ONE RUNNING ADDRESS, NOT A COLUMN.  A slice in MPEG-2 lies within one macroblock row, and
+    ;; writing the loop in terms of a column and a fixed row is the obvious thing.  MPEG-1 does not
+    ;; have that restriction — a slice there is simply a run of macroblocks in raster order and may
+    ;; cross into the next row — so an encoder that puts eighteen rows into sixteen slices produces
+    ;; a stream that decodes perfectly for three rows and then walks off the end of the fourth.
+    (let ((first-p t) (addr -1) (total (* (seq-mb-width seq) (seq-mb-height seq)))
+          (base (* row (seq-mb-width seq))))
+      (declare (type fixnum addr total base))
+      (flet ((at (a)
+               (setf (ss-mbx ss) (mod a (seq-mb-width seq))
+                     (ss-mby ss) (floor a (seq-mb-width seq)))))
+        (loop
+          (let ((inc (%read-increment ss)))
+            (when (null inc) (return))
+            ;; the FIRST increment of a slice positions rather than skips: macroblocks before it
+            ;; were never in this slice at all, and a P picture must not treat them as zero-vector
+            ;; copies of the reference
+            (if first-p
+                (setf addr (+ base inc -1) first-p nil)
+                (progn
+                  (dotimes (k (1- inc))
+                    (let ((a (+ addr k 1)))
+                      (when (>= a total) (%err "a macroblock past the end of the picture"))
+                      (at a)
+                      (skip-macroblock ss)))
+                  (incf addr inc)))
+            (when (>= addr total) (%err "a macroblock past the end of the picture"))
+            (at addr)
+            (decode-macroblock ss)
+            (when (next-start-code-p br) (return))
+            (when (br-eof-p br) (return))))))))

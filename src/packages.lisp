@@ -80,7 +80,7 @@
    #:decoder #:make-decoder #:feed-bytes #:flush-decoder #:decode-elementary-stream
    #:decoder-width #:decoder-height
    #:frame #:fr-width #:fr-height #:fr-y #:fr-u #:fr-v #:fr-ystride #:fr-cstride
-   #:fr-coding-type #:fr-timestamp #:picture->yuv420))
+   #:fr-coding-type #:fr-timestamp #:picture->yuv420 #:as-picture))
 
 (defpackage #:reel
   (:use #:cl)

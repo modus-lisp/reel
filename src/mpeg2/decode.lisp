@@ -128,3 +128,12 @@
         (replace out p :start1 o :start2 (* y (fr-cstride f)) :end2 (+ (* y (fr-cstride f)) cw))
         (incf o cw)))
     out))
+
+(defun as-picture (f)
+  "This decoder's frame as a REEL.DECODE:PICTURE, so a caller has one picture type whichever codec
+   produced it.  The planes are SHARED, not copied — the same lifetime rule VP8 and H.264 use."
+  (reel.decode::%make-shared-picture
+   :width (fr-width f) :height (fr-height f)
+   :y (fr-y f) :u (fr-u f) :v (fr-v f)
+   :y-stride (fr-ystride f) :uv-stride (fr-cstride f)
+   :y-offset 0 :uv-offset 0))

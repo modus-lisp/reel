@@ -14,9 +14,11 @@ as data.
 | **VP8**, key and inter frames | libvpx, bit-exact on eight clips and on Big Buck Bunny |
 | **H.264 Baseline, Main and High** | ffmpeg, bit-exact on twenty-two fixtures, on a 7672-frame YouTube file and on 300 frames of 640x360 High profile, every frame |
 | **MPEG-1 and MPEG-2 video** | ffmpeg, bit-exact on thirteen fixtures, every frame |
+| **MPEG-4 Part 2** (DivX, XviD) | ffmpeg, bit-exact on eleven fixtures, every frame |
 | **WebM and Matroska** | they are the same demuxer; `.mkv` with H.264 decodes today |
 | **MP4**, including fragmented | ffprobe, packet for packet |
 | **MPEG program and transport streams** | `.mpg`, `.vob`, `.ts` open and play, end to end |
+| **AVI**, including OpenDML | `.avi` opens and plays, whatever codec is inside |
 | **Opus, AAC, MP3, Vorbis** | reed's own suites |
 
 H.264 covers CAVLC and CABAC, P and B slices, both direct modes, weighted and implicit weighted
@@ -38,6 +40,10 @@ by one in a sample. This one matches ffmpeg's `simple` transform exactly, which 
 comparison mean something; `src/mpeg2/idct.lisp` says which three parts of its arithmetic are not
 what the mathematics alone would suggest.
 
+MPEG-4 Part 2 covers Simple and Advanced Simple: one and four motion vectors, both quantisers, B
+pictures with direct mode, video packets, and quarter-sample motion. That is what DivX and XviD
+produce.
+
 ## Refused, and refused loudly
 
 Anything below is turned away with a reason rather than decoded wrong. That distinction is the
@@ -49,30 +55,27 @@ because nobody knows to disbelieve it.
   on rather than on the profile that permits it, so a High profile stream using none of them decodes
   here.
 - MPEG-2: field pictures, dual-prime motion vectors, and anything but 4:2:0.
+- MPEG-4 Part 2: sprites and global motion, interlaced objects, data partitioning, scalability, and
+  arbitrary shapes. Also Microsoft's pre-standard MPEG-4 variants (DIV3, MP42), which share a name
+  and not a bitstream.
 - MPEG audio (Layer II) and AC-3, which broadcast and DVD carry. A transport stream's video plays
   and its audio track is named as undecodable rather than guessed at.
 
 ## The gaps, in the order I would close them
 
-### 1. AVI, and MPEG-4 Part 2
-
-**The DivX and XviD era, which is to say the whole 2000s.** The container is small work. The codec
-is roughly MPEG-2 with extras — global motion, four vectors per macroblock, a different intra
-prediction — so now that MPEG-2 is here it is an addition rather than a fresh start.
-
-### 2. FFV1 in Matroska
+### 1. FFV1 in Matroska
 
 The one people forget. FFV1 is the actual **preservation** codec — lossless, and what national
 libraries and film archives keep masters in. The container is already supported, so this is codec
 work only, and it is a range-coded lossless codec rather than a transform codec, so almost nothing
 in reel is reusable. Worth it for the archival case, not the consumption case.
 
-### 3. Theora in Ogg
+### 2. Theora in Ogg
 
 The Archive's own older open-format derivatives. A VP3 descendant, so genuinely close to the VP8
 code already here.
 
-### 4. VP9
+### 3. VP9
 
 The other half of what the web actually serves. Big, but the better target than HEVC if the goal is
 playing what people link you.
@@ -85,8 +88,8 @@ playing what people link you.
 - **Flash-era video** (Sorenson Spark, VP6 in FLV), **RealVideo**, **Windows Media and VC-1**,
   **MJPEG**. Real content exists in all of them, but each is a separate codec for a shrinking
   audience. Curiosities rather than plans.
-- **MPEG-4 Part 2 without AVI.** The codec is only worth having because of the container it lives
-  in; do them together or not at all.
+- **Microsoft's pre-standard MPEG-4** (DIV3, MP42, MPG4). Named like MPEG-4 Part 2 and not the same
+  bitstream. A separate decoder for a format that existed for about three years.
 
 ## Small things that are nearly free
 

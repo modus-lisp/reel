@@ -185,6 +185,42 @@
               (%apply-list-modification init1 (sh-ref-list-reordering-l1 sh) entries fn max-pic-num
                                         (max 1 (or (sh-num-ref-idx-l1 sh) 1)))))))
 
+(defun %mark-references (d sh sps)
+  "Add the picture just decoded to the reference set, and decide what leaves (8.2.5).
+
+   TWO MARKING PROCESSES, and a stream picks one per picture.  The sliding window simply keeps the
+   most recent max_num_ref_frames pictures, which is what every simple stream does.  Adaptive
+   marking instead names the picture to retire, and it is not an exotic feature: an encoder using a
+   B PYRAMID — B pictures that are themselves references — retires each one this way as soon as the
+   pictures depending on it are decoded.  x264 does this by default.
+
+   Ignoring the operations does not desynchronise anything, which is what makes it so easy to miss.
+   The reference set simply drifts: a picture the encoder dropped stays, the window evicts a
+   different one, and the lists agree with the encoder's for the first few pictures and then quietly
+   do not.  What that looks like is a handful of macroblocks wrong in the later pictures of a
+   sequence — the ones that happened to name a reference index the two sides disagree about."
+  (let ((limit (max 1 (sps-max-ref-frames sps))))
+    (cond
+      ((sh-adaptive-ref-marking sh)
+       (let ((entries (%pic-num-entries d sh))
+             (curr (sh-frame-num sh)))
+         (dolist (op (sh-mmco sh))
+           (when (= 1 (car op))
+             ;; the picture is named by how far back it is, not by where it sits in the buffer
+             (let* ((picnum (- curr (1+ (cdr op))))
+                    (hit (cdr (assoc picnum entries :test #'=))))
+               (unless hit
+                 (%err "reference marking retires PicNum ~d, which is not in the buffer" picnum))
+               (setf (h264-refs d) (remove hit (h264-refs d))))))
+         (push (h264-picture d) (h264-refs d))
+         (when (> (length (h264-refs d)) limit)
+           (%err "~d reference pictures after adaptive marking, but only ~d are allowed"
+                 (length (h264-refs d)) limit))))
+      (t
+       (push (h264-picture d) (h264-refs d))
+       (when (> (length (h264-refs d)) limit)
+         (setf (h264-refs d) (subseq (h264-refs d) 0 limit)))))))
+
 (defun feed-nal (d nal)
   "Give one NAL unit to the decoder.  Returns a PICTURE when this NAL completed one, else NIL."
   (cond
@@ -227,10 +263,7 @@
        ;; loop filter and not before it
        (when (nal-idr-p nal) (setf (h264-refs d) '()))
        (when (plusp (nal-ref-idc nal))
-         (push (h264-picture d) (h264-refs d))
-         (let ((limit (max 1 (sps-max-ref-frames sps))))
-           (when (> (length (h264-refs d)) limit)
-             (setf (h264-refs d) (subseq (h264-refs d) 0 limit)))))
+         (%mark-references d sh sps))
        ;; into the reorder buffer, and out comes whichever picture's turn it now is — which is
        ;; usually not this one
        (push (h264-picture d) (h264-pending d))

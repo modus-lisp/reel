@@ -20,16 +20,48 @@
 (defconstant +cat-luma+ 2)        ; LumaLevel4x4
 (defconstant +cat-chroma-dc+ 3)   ; ChromaDCLevel
 (defconstant +cat-chroma-ac+ 4)   ; ChromaACLevel
+(defconstant +cat-luma-8x8+ 5)    ; LumaLevel8x8, High profile only
 
-(defparameter +cat-cbf-offset+ (make-array 5 :element-type 'fixnum
-                                             :initial-contents '(0 4 8 12 16)))
-(defparameter +cat-sig-offset+ (make-array 5 :element-type 'fixnum
-                                             :initial-contents '(0 15 29 44 47)))
-(defparameter +cat-abs-offset+ (make-array 5 :element-type 'fixnum
-                                             :initial-contents '(0 10 20 30 39)))
-(defparameter +cat-max-coeff+  (make-array 5 :element-type 'fixnum
-                                             :initial-contents '(16 15 16 4 15)))
-(declaim (type (simple-array fixnum (5))
+;;; The 8x8 block's contexts do not continue the others': significance and last-significance sit at
+;;; 402 and 417 rather than at an offset from 105 and 166, which is why they are named here rather
+;;; than added to the offset tables below.
+(defconstant +ctx-significant-8x8+ 402)
+(defconstant +ctx-last-significant-8x8+ 417)
+
+;;; An 8x8 block's significance contexts are not its scan positions.  Sixty-three positions share
+;;; fifteen contexts for significance and NINE for last-significance, by these maps (Table 9-43),
+;;; frame coding.  The 4x4 categories use the position itself and need no table at all.
+;;;
+;;; The context COUNTS are checkable without the tables, and worth checking: last-significance owns
+;;; ctxIdx 417 up to 425, so its map must reach 8 and not merely 4.  A map that stops early parses
+;;; the significance run against the wrong probabilities, lands on the wrong number of coefficients,
+;;; and then reads their magnitudes in the wrong order — which shows up as a residual that is wrong
+;;; from its DC onwards while every syntax element before it is still perfectly correct.
+(defparameter +sig-map-8x8+
+  (make-array 63 :element-type '(unsigned-byte 8) :initial-contents
+   '( 0  1  2  3  4  5  5  4  4  3  3  4  4  4  5  5
+      4  4  4  4  3  3  6  7  7  7  8  9 10  9  8  7
+      7  6 11 12 13 11  6  7  8  9 14 10  9  8  6 11
+     12 13 11  6  9 14 10  9 11 12 13 11 14 10 12)))
+
+(defparameter +last-map-8x8+
+  (make-array 63 :element-type '(unsigned-byte 8) :initial-contents
+   '( 0  1  1  1  1  1  1  1  1  1  1  1  1  1  1  1
+      2  2  2  2  2  2  2  2  2  2  2  2  2  2  2  2
+      3  3  3  3  3  3  3  3  4  4  4  4  4  4  4  4
+      5  5  5  5  6  6  6  6  7  7  7  7  8  8  8)))
+
+(declaim (type (simple-array (unsigned-byte 8) (63)) +sig-map-8x8+ +last-map-8x8+))
+
+(defparameter +cat-cbf-offset+ (make-array 6 :element-type 'fixnum
+                                             :initial-contents '(0 4 8 12 16 0)))
+(defparameter +cat-sig-offset+ (make-array 6 :element-type 'fixnum
+                                             :initial-contents '(0 15 29 44 47 0)))
+(defparameter +cat-abs-offset+ (make-array 6 :element-type 'fixnum
+                                             :initial-contents '(0 10 20 30 39 199)))
+(defparameter +cat-max-coeff+  (make-array 6 :element-type 'fixnum
+                                             :initial-contents '(16 15 16 4 15 64)))
+(declaim (type (simple-array fixnum (6))
                +cat-cbf-offset+ +cat-sig-offset+ +cat-abs-offset+ +cat-max-coeff+))
 
 (defparameter +cabac-range-lps+

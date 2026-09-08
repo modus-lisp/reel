@@ -109,7 +109,11 @@ order count can be negative, so absence needs a value no picture can hold.")
   (blk-direct (%emptyfx) :type fixnums)
   (mb-cbp (%emptyfx) :type fixnums)       ; coded_block_pattern, for the CBP contexts
   (mb-chroma-mode (%emptyfx) :type fixnums) ; intra_chroma_pred_mode
-  (mb-dc-cbf (%emptyfx) :type fixnums))   ; bit 0 luma DC, 1 Cb DC, 2 Cr DC
+  (mb-dc-cbf (%emptyfx) :type fixnums)   ; bit 0 luma DC, 1 Cb DC, 2 Cr DC
+  ;; transform_size_8x8_flag, per macroblock.  Two things read it back: CABAC, whose context for
+  ;; the flag counts how many neighbours set it, and the loop filter, which must not filter the
+  ;; internal 4x4 edges of a macroblock that had no 4x4 edges to begin with.
+  (mb-tf8 (%emptyfx) :type fixnums))
 
 (defun make-picture-for (sps)
   (let* ((mbw (sps-mb-width sps)) (mbh (sps-mb-height sps))
@@ -137,7 +141,8 @@ order count can be negative, so absence needs a value no picture can hold.")
      :blk-direct (make-array (* mbw 4 mbh 4) :element-type 'fixnum :initial-element 0)
      :mb-cbp (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0)
      :mb-chroma-mode (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0)
-     :mb-dc-cbf (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0))))
+     :mb-dc-cbf (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0)
+     :mb-tf8 (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0))))
 
 (declaim (inline pic-y-base pic-c-base))
 (defun pic-y-base (p mbx mby)
@@ -178,6 +183,19 @@ order count can be negative, so absence needs a value no picture can hold.")
   (bi-y (make-array 256 :element-type '(unsigned-byte 8)) :type octets)
   (bi-u (make-array 64 :element-type '(unsigned-byte 8)) :type octets)
   (bi-v (make-array 64 :element-type '(unsigned-byte 8)) :type octets)
+  ;; The 8x8 transform, per macroblock.  Held on the state rather than passed down because it
+  ;; changes what four separate stages do — mode prediction, residual parsing, reconstruction and
+  ;; deblocking — and threading a boolean through all four reads worse than one slot does.
+  (tf8 nil)
+  ;; 8x8 scratch, the 4x4 scratch widened.  PT8 is sixteen wide because the diagonal modes reach
+  ;; past the block into the above-right neighbour, and PTL8 is a one-element array only so that
+  ;; GATHER-8X8-NEIGHBOURS can return the filtered corner by writing to it.
+  (coeffs8 (make-array 64 :element-type 'fixnum) :type fixnums)
+  (block8 (make-array 64 :element-type 'fixnum) :type fixnums)
+  (pred8 (make-array 64 :element-type '(unsigned-byte 8)) :type octets)
+  (pt8 (make-array 16 :element-type '(unsigned-byte 8)) :type octets)
+  (pl8 (make-array 8 :element-type '(unsigned-byte 8)) :type octets)
+  (ptl8 (make-array 1 :element-type '(unsigned-byte 8)) :type octets)
   reflist1                                      ; list 1, for a B slice
   (direct-spatial t))
 
@@ -359,6 +377,13 @@ order count can be negative, so absence needs a value no picture can hold.")
   (let ((m (sh-scale-4x4 (ss-sh ss))))
     (if m (aref m idx) +flat-scale-4x4+)))
 
+(declaim (inline %scale-list-8))
+(defun %scale-list-8 (ss intra-p)
+  "The 8x8 weight matrix, intra luma or inter luma.  Chroma never asks: there is no 8x8 chroma
+   transform in 4:2:0."
+  (let ((m (sh-scale-4x4 (ss-sh ss))))
+    (if m (aref m (if intra-p 6 7)) +flat-scale-8x8+)))
+
 ;;; ---- the two entropy coders, behind one interface ------------------------------------------------
 ;;;
 ;;; CAVLC and CABAC disagree about how every syntax element is spelled, and agree completely about
@@ -467,9 +492,15 @@ order count can be negative, so absence needs a value no picture can hold.")
     (setf (aref (pic-mb-types pic) mbi) mb-type)
     (let ((bx (* 4 (ss-mbx ss))) (by (* 4 (ss-mby ss))))
       (dotimes (j 4) (dotimes (i 4) (clear-blk-motion pic (+ bx i) (+ by j)))))
-    (if (zerop mb-type)
-        (decode-i4x4-macroblock ss)
-        (decode-i16x16-macroblock ss (1- mb-type)))
+    ;; I_NxN is two macroblock kinds wearing one mb_type.  Which one it is arrives here, between
+    ;; the type and the prediction modes, and only when the picture parameter set allowed it.
+    (setf (ss-tf8 ss) (and (zerop mb-type)
+                           (pps-transform-8x8 (sh-pps (ss-sh ss)))
+                           (%read-transform-size-8x8 ss)))
+    (setf (aref (pic-mb-tf8 pic) mbi) (if (ss-tf8 ss) 1 0))
+    (cond ((not (zerop mb-type)) (decode-i16x16-macroblock ss (1- mb-type)))
+          ((ss-tf8 ss) (decode-i8x8-macroblock ss))
+          (t (decode-i4x4-macroblock ss)))
     (setf (aref (pic-mb-qps pic) mbi) (ss-qp ss))
     mb-type))
 
@@ -480,6 +511,129 @@ order count can be negative, so absence needs a value no picture can hold.")
 
 (defun %chroma-pred-mode (br) 
   (declare (optimize (speed 3) (safety 1)))(ue br))
+
+(declaim (ftype function cabac-transform-size-8x8))
+(defun %read-transform-size-8x8 (ss)
+  (= 1 (if (ss-cabac ss) (cabac-transform-size-8x8 ss) (u1 (ss-br ss)))))
+
+(defun %read-intra8x8-mode (ss i8)
+  "prev_intra8x8_pred_mode_flag and its remainder, spelled exactly as the 4x4 pair.
+
+   The prediction is the 4x4 prediction asked about block 4*I8, which is the top-left 4x4 of this
+   8x8.  That works because SET-MODE-8X8 writes one mode into all four of an 8x8's 4x4 slots, so
+   the neighbour to the left of block 4*I8 already holds its own 8x8's mode."
+  (let ((blk (* 4 i8)))
+    (if (ss-cabac ss)
+        (cabac-intra4x4-mode ss blk)
+        (let* ((br (ss-br ss)) (pred (predicted-mode ss blk)) (flag (u1 br)))
+          (if (= flag 1)
+              pred
+              (let ((rem (ub br 3))) (if (< rem pred) rem (1+ rem))))))))
+
+(defun set-mode-8x8 (ss i8 mode)
+  "Record an 8x8 block's mode in all four of its 4x4 slots, so that everything asking a
+   neighbour for a mode — including an Intra_4x4 macroblock next door — gets an answer without
+   learning that 8x8 blocks exist."
+  (declare (optimize (speed 3) (safety 1)))
+  (dotimes (i 4) (set-mode ss (+ (* 4 i8) i) mode)))
+
+(defun %i8x8-neighbours (ss i8)
+  "Availability of the four reference directions for 8x8 block I8, in decoding order 0..3."
+  (let ((bx (logand i8 1)) (by (ash i8 -1)))
+    (values (or (plusp by) (mb-available-p ss 0 -1))                 ; above
+            (or (plusp bx) (mb-available-p ss -1 0))                 ; left
+            ;; above-right: outside for 0 and 1, block 1 itself for 2, and never for 3, whose
+            ;; above-right lies in the macroblock to the right and so is always still undecoded
+            (case i8
+              (0 (mb-available-p ss 0 -1))
+              (1 (mb-available-p ss 1 -1))
+              (2 t)
+              (t nil))
+            (cond ((and (plusp bx) (plusp by)) t)                    ; above-left
+                  ((plusp bx) (mb-available-p ss 0 -1))
+                  ((plusp by) (mb-available-p ss -1 0))
+                  (t (mb-available-p ss -1 -1))))))
+
+(defun %luma-residual-8x8 (ss base i8 intra-p)
+  "Read, dequantise, transform and add one 8x8 luma residual.
+
+   In CAVLC an 8x8 block is not coded as an 8x8 block at all: it arrives as four ordinary 4x4
+   blocks, each with its own coeff_token and its own nC from its own neighbours, and the four are
+   INTERLEAVED into the 8x8 scan afterwards — the k'th coefficient of the i'th sub-block lands at
+   scan position 4k+i.  So the whole of the 4x4 residual reader is reused unchanged, and only what
+   happens to the numbers after it differs."
+  (declare (optimize (speed 3) (safety 1)))
+  (let ((pic (ss-pic ss)) (c8 (ss-coeffs8 ss)) (end -1) (any nil))
+    (declare (type fixnum end))
+    (fill c8 0)
+    (if (ss-cabac ss)
+        (multiple-value-bind (n hi) (%residual ss c8 :cat +cat-luma-8x8+ :max-coeff 64
+                                                     :bx (logand i8 1) :by (ash i8 -1))
+          (declare (type fixnum n hi))
+          ;; CABAC codes the 8x8 block whole, and marks all four of its 4x4 slots non-zero so that
+          ;; the loop filter and the neighbouring contexts see coefficients where there are some
+          (dotimes (i 4) (set-luma-nz ss (+ (* 4 i8) i) (if (plusp n) 16 0)))
+          (when (plusp n) (setf any t end hi)))
+        (dotimes (i 4)
+          (let ((blk (+ (* 4 i8) i)))
+            (multiple-value-bind (n hi)
+                (multiple-value-bind (bx by) (%luma-blk-xy ss blk)
+                  (%residual ss (ss-coeffs ss) :cat +cat-luma+ :nc (luma-nc ss blk)
+                                               :max-coeff 16 :bx bx :by by))
+              (declare (type fixnum n hi))
+              (set-luma-nz ss blk n)
+              (when (plusp n)
+                (setf any t)
+                (setf end (max end (+ (* 4 hi) i)))
+                (dotimes (k 16)
+                  (setf (aref c8 (+ (* 4 k) i)) (aref (ss-coeffs ss) k))))))))
+    (when any
+      (dequant-8x8 c8 (ss-block8 ss) (ss-qp ss) :end end :weights (%scale-list-8 ss intra-p))
+      (idct-8x8 (ss-block8 ss))
+      (add-residual-8x8 (pic-y pic) (pic-ystride pic) base (ss-block8 ss)))))
+
+(defun decode-i8x8-macroblock (ss)
+  "Reconstruct one I_NxN macroblock that chose the 8x8 transform.
+
+   Structurally the Intra_4x4 path with four blocks instead of sixteen, but nothing inside it is
+   shared: different prediction, different neighbours, a filtered reference row, and a different
+   transform.  Only the chroma is the same, because chroma has no 8x8 transform in 4:2:0."
+  (declare (optimize (speed 3) (safety 1)))
+  (let* ((pic (ss-pic ss))
+         (modes (make-array 4 :element-type 'fixnum)))
+    (declare (dynamic-extent modes))
+    (dotimes (i8 4)
+      (let ((mode (%read-intra8x8-mode ss i8)))
+        (setf (aref modes i8) mode)
+        (set-mode-8x8 ss i8 mode)))
+    (let* ((mbi (%mb-index ss))
+           (chroma-mode (%read-chroma-mode ss))
+           (cbp (%read-cbp ss t)))
+      (setf (aref (pic-mb-chroma-mode pic) mbi) chroma-mode
+            (aref (pic-mb-cbp pic) mbi) cbp)
+      (if (plusp cbp)
+          (progn (incf (ss-qp ss) (%read-qp-delta ss))
+                 (setf (ss-qp ss) (mod (+ (ss-qp ss) 52) 52)))
+          (%no-qp-delta ss))
+      (dotimes (i8 4)
+        (let ((base (+ (pic-y-base pic (ss-mbx ss) (ss-mby ss))
+                       (* (ash i8 -1) 8 (pic-ystride pic))
+                       (* (logand i8 1) 8))))
+          (multiple-value-bind (up-p left-p up-right-p up-left-p) (%i8x8-neighbours ss i8)
+            (gather-8x8-neighbours (pic-y pic) (pic-ystride pic) base
+                                   (ss-pt8 ss) (ss-pl8 ss) (ss-ptl8 ss)
+                                   up-p left-p up-right-p up-left-p)
+            (intra8x8-predict (ss-pred8 ss) (aref modes i8) (ss-pt8 ss) (ss-pl8 ss)
+                              (aref (ss-ptl8 ss) 0) up-p left-p))
+          (dotimes (i 8)
+            (dotimes (j 8)
+              (setf (aref (pic-y pic) (+ base (* i (pic-ystride pic)) j))
+                    (aref (ss-pred8 ss) (+ (* i 8) j)))))
+          (if (logbitp i8 cbp)
+              (%luma-residual-8x8 ss base i8 t)
+              (dotimes (i 4) (set-luma-nz ss (+ (* 4 i8) i) 0)))))
+      (decode-chroma ss chroma-mode cbp)
+      cbp)))
 
 (defun decode-i4x4-macroblock (ss)
   
@@ -754,12 +908,41 @@ order count can be negative, so absence needs a value no picture can hold.")
           (apply-weight (pic-v pic) (pic-cstride pic) cbase cw ch
                         (aref cwt ref 1 0) (aref cwt ref 1 1) (sh-chroma-log2-denom sh)))))))
 
+(defun %inter-tf8-p (ss mb-type subs eightp b-slice-p)
+  "Does this inter macroblock carry a transform_size_8x8_flag, and is it set?
+
+   The condition is not simply `the picture parameter set allowed it'.  A macroblock partitioned
+   any finer than 8x8 cannot use an 8x8 transform, because a transform block would then straddle
+   two partitions with different motion, so the flag is not sent at all — and a decoder that reads
+   it anyway is a bit ahead of the encoder for the rest of the slice.  B_Direct_16x16 is the same
+   case wearing a disguise: its motion is per-4x4 unless direct_8x8_inference_flag says otherwise."
+  (declare (optimize (speed 3) (safety 1)))
+  (and (pps-transform-8x8 (sh-pps (ss-sh ss)))
+       (let ((inference (sps-direct-8x8 (sh-sps (ss-sh ss)))))
+         (cond
+           ((and b-slice-p (zerop mb-type)) inference)   ; B_Direct_16x16
+           ((not eightp) t)
+           (b-slice-p (dotimes (i 4 t)
+                        (let ((st (aref subs i)))
+                          (unless (if (zerop st) inference (= 1 (aref +b-sub+ st 0)))
+                            (return nil)))))
+           (t (dotimes (i 4 t) (unless (zerop (aref subs i)) (return nil))))))
+       (%read-transform-size-8x8 ss)))
+
 (defun %inter-luma-residual (ss cbp)
   "The luma residual of an inter macroblock: no prediction step, because motion compensation has
    already written the prediction into the picture."
   (declare (optimize (speed 3) (safety 1)))
   (let* ((br (ss-br ss)) (pic (ss-pic ss))
          (ybase (pic-y-base pic (ss-mbx ss) (ss-mby ss))))
+    (declare (ignorable br))
+    (when (ss-tf8 ss)
+      (return-from %inter-luma-residual
+        (dotimes (i8 4)
+          (let ((base (+ ybase (* (ash i8 -1) 8 (pic-ystride pic)) (* (logand i8 1) 8))))
+            (if (logbitp i8 cbp)
+                (%luma-residual-8x8 ss base i8 nil)
+                (dotimes (i 4) (set-luma-nz ss (+ (* 4 i8) i) 0)))))))
     (dotimes (blk 16)
       (let ((base (+ ybase (* (aref +blk-y+ blk) 4 (pic-ystride pic)) (* (aref +blk-x+ blk) 4))))
         (if (logbitp (ash blk -2) cbp)
@@ -788,6 +971,7 @@ order count can be negative, so absence needs a value no picture can hold.")
          (mbi (+ (* mby (pic-mb-width pic)) mbx)))
     (unless (ss-ref0 ss) (%err "a skipped macroblock with no reference picture"))
     (setf (aref (pic-mb-types pic) mbi) -2)
+    (setf (aref (pic-mb-tf8 pic) mbi) 0)
     (setf (ss-mb-done ss) 0)
     (multiple-value-bind (mvx mvy) (skip-mv ss)
       (%set-partition-mvd ss (* 4 mbx) (* 4 mby) 4 4 0 0)
@@ -889,6 +1073,8 @@ order count can be negative, so absence needs a value no picture can hold.")
     ;; 4. the residual, on top of what motion compensation predicted
     (let ((cbp (%read-cbp ss nil)))
       (setf (aref (pic-mb-cbp pic) mbi) cbp)
+      (setf (ss-tf8 ss) (and (plusp (logand cbp 15)) (%inter-tf8-p ss mb-type subs p8x8 nil)))
+      (setf (aref (pic-mb-tf8 pic) mbi) (if (ss-tf8 ss) 1 0))
       (if (plusp cbp)
           (progn (incf (ss-qp ss) (%read-qp-delta ss))
                  (setf (ss-qp ss) (mod (+ (ss-qp ss) 52) 52)))
@@ -1169,6 +1355,7 @@ order count can be negative, so absence needs a value no picture can hold.")
   "B_Skip: direct prediction and no residual at all."
   (let* ((pic (ss-pic ss)) (mbi (%mb-index ss)))
     (setf (aref (pic-mb-types pic) mbi) -2
+          (aref (pic-mb-tf8 pic) mbi) 0
           (ss-mb-done ss) 0)
     (%direct-16x16 ss)
     (dotimes (blk 16) (set-luma-nz ss blk 0))
@@ -1319,6 +1506,8 @@ order count can be negative, so absence needs a value no picture can hold.")
     ;; the residual, on top of whatever was predicted
     (let ((cbp (%read-cbp ss nil)))
       (setf (aref (pic-mb-cbp pic) mbi) cbp)
+      (setf (ss-tf8 ss) (and (plusp (logand cbp 15)) (%inter-tf8-p ss mb-type subs b8x8 t)))
+      (setf (aref (pic-mb-tf8 pic) mbi) (if (ss-tf8 ss) 1 0))
       (if (plusp cbp)
           (progn (incf (ss-qp ss) (%read-qp-delta ss))
                  (setf (ss-qp ss) (mod (+ (ss-qp ss) 52) 52)))

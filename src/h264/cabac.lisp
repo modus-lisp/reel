@@ -296,6 +296,16 @@
                          2 1)))
       (logior luma (ash chroma 4)))))
 
+(defconstant +ctx-transform-8x8+ 399)
+
+(defun cabac-transform-size-8x8 (ss)
+  "transform_size_8x8_flag: one bin, its context counting how many neighbours also chose 8x8."
+  (let ((c (ss-cabac ss)))
+    (flet ((term (dx dy)
+             (let ((i (%nbr-mbi ss dx dy)))
+               (if (and i (plusp (aref (pic-mb-tf8 (ss-pic ss)) i))) 1 0))))
+      (decode-decision c (+ +ctx-transform-8x8+ (term -1 0) (term 0 -1))))))
+
 (defun cabac-mb-qp-delta (ss)
   "mb_qp_delta: unary, then the signed mapping of 9.3.2.7."
   (let* ((c (ss-cabac ss))
@@ -359,12 +369,23 @@
                              (if (plusp (aref grid (+ (* nby gw) nbx))) 1 0))))))))
       (+ (term (1- bx) by) (* 2 (term bx (1- by)))))))
 
-(declaim (inline %sig-ctx-inc))
+(declaim (inline %sig-ctx-inc %last-ctx-inc))
 (defun %sig-ctx-inc (cat i)
-  "ctxIdxInc for significant_coeff_flag and last_significant_coeff_flag: the scan position itself,
-   except for chroma DC where there are only four positions and they share three contexts."
+  "ctxIdxInc for significant_coeff_flag: the scan position itself, except for chroma DC where
+   there are only four positions and they share three contexts, and for the 8x8 block where
+   sixty-three positions share fifteen contexts by a map."
   (declare (type fixnum cat i))
-  (if (= cat +cat-chroma-dc+) (min i 2) i))
+  (cond ((= cat +cat-chroma-dc+) (min i 2))
+        ((= cat +cat-luma-8x8+) (aref +sig-map-8x8+ i))
+        (t i)))
+
+(defun %last-ctx-inc (cat i)
+  "ctxIdxInc for last_significant_coeff_flag.  The same as significance for every category but
+   the 8x8 one, which has its own coarser map — five contexts rather than fifteen."
+  (declare (type fixnum cat i))
+  (cond ((= cat +cat-chroma-dc+) (min i 2))
+        ((= cat +cat-luma-8x8+) (aref +last-map-8x8+ i))
+        (t i)))
 
 (defun cabac-residual-block (ss cat coeffs bx by plane &key (start 0))
   "One residual block through the arithmetic decoder (9.3.2.3).  Returns (values count highest),
@@ -378,26 +399,34 @@
   (declare (optimize (speed 3) (safety 1)))
   (let* ((c (ss-cabac ss))
          (maxc (aref +cat-max-coeff+ cat))
-         (dc-p (or (= cat +cat-luma-dc+) (= cat +cat-chroma-dc+)))
-         (cbf-ctx (+ +ctx-coded-block-flag+ (aref +cat-cbf-offset+ cat)
-                     (if dc-p
-                         (%cbf-ctx-inc-dc ss cat plane)
-                         (%cbf-ctx-inc-4x4 ss cat bx by plane)))))
-    (declare (type fixnum maxc cbf-ctx))
+         (big-p (= cat +cat-luma-8x8+))
+         (dc-p (or (= cat +cat-luma-dc+) (= cat +cat-chroma-dc+))))
+    (declare (type fixnum maxc))
     (fill coeffs 0)
-    (when (zerop (decode-decision c cbf-ctx))
-      (return-from cabac-residual-block (values 0 -1)))
-    (let ((sig (make-array 16 :element-type 'bit :initial-element 0))
+    ;; The 8x8 luma block carries NO coded_block_flag.  Its coded_block_pattern bit already said
+    ;; the block has coefficients, and 7.3.5.3.3 omits the flag rather than sending it twice; a
+    ;; decoder that reads one anyway is a bin ahead of the encoder from the first coded block.
+    (unless big-p
+      (let ((cbf-ctx (+ +ctx-coded-block-flag+ (aref +cat-cbf-offset+ cat)
+                        (if dc-p
+                            (%cbf-ctx-inc-dc ss cat plane)
+                            (%cbf-ctx-inc-4x4 ss cat bx by plane)))))
+        (declare (type fixnum cbf-ctx))
+        (when (zerop (decode-decision c cbf-ctx))
+          (return-from cabac-residual-block (values 0 -1)))))
+    (let ((sig (make-array 64 :element-type 'bit :initial-element 0))
           (numcoeff maxc)
-          (sig-base (+ +ctx-significant+ (aref +cat-sig-offset+ cat)))
-          (last-base (+ +ctx-last-significant+ (aref +cat-sig-offset+ cat))))
+          (sig-base (if big-p +ctx-significant-8x8+
+                        (+ +ctx-significant+ (aref +cat-sig-offset+ cat))))
+          (last-base (if big-p +ctx-last-significant-8x8+
+                         (+ +ctx-last-significant+ (aref +cat-sig-offset+ cat)))))
       (declare (dynamic-extent sig) (type fixnum numcoeff sig-base last-base))
       (let ((i 0))
         (declare (type fixnum i))
         (loop while (< i (1- numcoeff))
               do (when (= 1 (decode-decision c (+ sig-base (%sig-ctx-inc cat i))))
                    (setf (aref sig i) 1)
-                   (when (= 1 (decode-decision c (+ last-base (%sig-ctx-inc cat i))))
+                   (when (= 1 (decode-decision c (+ last-base (%last-ctx-inc cat i))))
                      (setf numcoeff (1+ i))))
                  (incf i)))
       ;; whatever position we stopped at is significant: either LAST said so, or it is the only

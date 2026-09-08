@@ -145,6 +145,24 @@ negative slice offset still lands inside the array instead of before it.")
             (incf n)))))
     (values n pa ax ay pb bx* by*)))
 
+(defun %nz-for-filter (pic bx by)
+  "Does the TRANSFORM BLOCK containing 4x4 block BX,BY carry coefficients?
+
+   Not the same question as `does this 4x4 block', and the difference only appears under the 8x8
+   transform.  In CAVLC an 8x8 block arrives as four interleaved 4x4 blocks, and one of the four
+   can hold nothing at all while the 8x8 as a whole is full — the coefficients simply landed at
+   scan positions belonging to its siblings.  The filter asks about the 8x8 (8.7.2.1), so the four
+   counts are ORed; the counts themselves must stay per-4x4 because that is what nC reads."
+  (declare (optimize (speed 3) (safety 1)))
+  (let* ((gw (* 4 (pic-mb-width pic)))
+         (nz (pic-nz-y pic))
+         (mbi (+ (* (floor by 4) (pic-mb-width pic)) (floor bx 4))))
+    (if (zerop (aref (pic-mb-tf8 pic) mbi))
+        (aref nz (+ (* by gw) bx))
+        (let ((b0x (logandc2 bx 1)) (b0y (logandc2 by 1)))
+          (logior (aref nz (+ (* b0y gw) b0x)) (aref nz (+ (* b0y gw) b0x 1))
+                  (aref nz (+ (* (1+ b0y) gw) b0x)) (aref nz (+ (* (1+ b0y) gw) b0x 1)))))))
+
 (defun %boundary-strength (pic pbx pby qbx qby mb-edge-p)
   "bS for the pair of 4x4 blocks either side of an edge, P before Q in decoding order.
 
@@ -165,8 +183,8 @@ negative slice offset still lands inside the array instead of before it.")
       ((or p-intra q-intra) (if mb-edge-p 4 3))
       (t
        (let ((gw (* 4 (pic-mb-width pic))))
-         (if (or (plusp (aref (pic-nz-y pic) (+ (* pby gw) pbx)))
-                 (plusp (aref (pic-nz-y pic) (+ (* qby gw) qbx))))
+         (declare (ignorable gw))
+         (if (or (plusp (%nz-for-filter pic pbx pby)) (plusp (%nz-for-filter pic qbx qby)))
              2
              (multiple-value-bind (pn pa pax pay pb pbx* pby*) (%block-motion pic pbx pby)
                (multiple-value-bind (qn qa qax qay qb qbx* qby*) (%block-motion pic qbx qby)
@@ -223,7 +241,10 @@ negative slice offset still lands inside the array instead of before it.")
                  (left-p (plusp mbx))
                  (up-p (plusp mby))
                  (qp-left (and left-p (aref (pic-mb-qps pic) (1- mbi))))
-                 (qp-up (and up-p (aref (pic-mb-qps pic) (- mbi mbw)))))
+                 (qp-up (and up-p (aref (pic-mb-qps pic) (- mbi mbw))))
+                 ;; an 8x8-transformed macroblock has no internal 4x4 edges to soften: filtering
+                 ;; at 4 and 12 would be removing a blocking artifact that was never created
+                 (tf8 (plusp (aref (pic-mb-tf8 pic) mbi))))
             (flet ((cqp (a b plane)
                      ;; chroma filters at the CHROMA quantiser, derived per side then averaged
                      (ash (+ (chroma-qp a (pps-chroma-qp-offset-for pps plane))
@@ -246,7 +267,7 @@ negative slice offset still lands inside the array instead of before it.")
                         (%filter-edge (if (zerop plane) (pic-u pic) (pic-v pic))
                                       (+ cbase (* 2 k cs)) 1 cs 2 bs
                                       (cqp qp qp-left plane) alpha-off beta-off t)))))
-                (loop for dx in '(4 8 12)
+                (loop for dx in (if tf8 '(8) '(4 8 12))
                       do (each-group (k)
                            (let ((bs (bs-v dx k)))
                              (%filter-edge (pic-y pic) (+ ybase dx (* 4 k ys)) 1 ys 4 bs
@@ -268,7 +289,7 @@ negative slice offset still lands inside the array instead of before it.")
                         (%filter-edge (if (zerop plane) (pic-u pic) (pic-v pic))
                                       (+ cbase (* 2 k)) cs 1 2 bs
                                       (cqp qp qp-up plane) alpha-off beta-off t)))))
-                (loop for dy in '(4 8 12)
+                (loop for dy in (if tf8 '(8) '(4 8 12))
                       do (each-group (k)
                            (let ((bs (bs-h dy k)))
                              (%filter-edge (pic-y pic) (+ ybase (* dy ys) (* 4 k)) ys 1 4 bs

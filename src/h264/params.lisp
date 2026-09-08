@@ -76,6 +76,16 @@
   (let ((out (make-array 16 :element-type '(unsigned-byte 8))))
     (dotimes (j 16 out) (setf (aref out j) (aref +default-scale-4x4+ which j)))))
 
+(defun %unscan-8x8 (list)
+  "An 8x8 scaling list from scan order into raster.  A different scan from the 4x4 one, which is
+   why it is a different function and not the same one with a size argument."
+  (let ((out (make-array 64 :element-type '(unsigned-byte 8))))
+    (dotimes (j 64 out) (setf (aref out (aref +zigzag-8x8+ j)) (aref list j)))))
+
+(defun %default-8x8 (which)
+  (let ((out (make-array 64 :element-type '(unsigned-byte 8))))
+    (dotimes (j 64 out) (setf (aref out j) (aref +default-scale-8x8+ which j)))))
+
 (defun parse-scaling-matrices (br n8x8)
   "The lists a parameter set carries: six 4x4, then N8X8 of the 8x8 ones (7.3.2.1.1).
 
@@ -90,16 +100,19 @@
    parameter set to the SEQUENCE parameter set for its answer, and the two are parsed apart.
    RESOLVE-SCALING-MATRICES does it once both are in hand.
 
-   The 8x8 lists are read so the bitstream stays in step and then set aside: they matter only once
-   the 8x8 transform is decoded, and that is still refused."
-  (let ((out (make-array 6 :initial-element nil)))
+   The result is EIGHT long, not six: the two 8x8 lists live at 6 and 7, intra luma then inter
+   luma.  For 4:2:0 those are the only two, because chroma has no 8x8 transform."
+  (let ((out (make-array 8 :initial-element nil)))
     (dotimes (i 6)
       (when (= 1 (u1 br))
         (multiple-value-bind (list use-default) (parse-scaling-list br 16)
           (setf (aref out i)
                 (if use-default (%default-4x4 (if (< i 3) 0 1)) (%unscan-4x4 list))))))
     (dotimes (i n8x8)
-      (when (= 1 (u1 br)) (parse-scaling-list br 64)))
+      (when (= 1 (u1 br))
+        (multiple-value-bind (list use-default) (parse-scaling-list br 64)
+          (setf (aref out (+ 6 i))
+                (if use-default (%default-8x8 (logand i 1)) (%unscan-8x8 list))))))
     out))
 
 (defun resolve-scaling-matrices (sps pps)
@@ -112,16 +125,19 @@
   (let ((pic (and pps (pps-scale-4x4 pps)))
         (seq (and sps (sps-scale-4x4 sps))))
     (when (and (null pic) (null seq)) (return-from resolve-scaling-matrices nil))
-    (let ((out (make-array 6)))
-      (dotimes (i 6 out)
+    (let ((out (make-array 8)))
+      (dotimes (i 8 out)
         (setf (aref out i)
               (or (and pic (aref pic i))
                   ;; a picture parameter set that overrides at all defers to the sequence's list
                   (and (null pic) seq (aref seq i))
-                  (and pic seq (member i '(0 3)) (aref seq i))
+                  (and pic seq (member i '(0 3 6 7)) (aref seq i))
                   (case i
                     (0 (%default-4x4 0))
                     (3 (%default-4x4 1))
+                    ;; the 8x8 lists start their own chains rather than continuing the 4x4 one
+                    (6 (%default-8x8 0))
+                    (7 (%default-8x8 1))
                     (t (aref out (1- i))))))))))
 
 (defun parse-sps (rbsp)
@@ -220,14 +236,6 @@
     ;; the optional tail, present only in High-profile streams
     (when (more-rbsp-data-p br)
       (setf (pps-transform-8x8 p) (= 1 (u1 br)))
-      ;; REFUSED, not merely recorded.  With the 8x8 transform enabled, every macroblock that
-      ;; carries luma residual also carries a transform_size_8x8_flag, and a decoder that does not
-      ;; read that bit does not lose the transform — it loses the bitstream, one bit per macroblock,
-      ;; and produces confident garbage from the first picture.  Note the test is the FLAG and not
-      ;; the profile: a High profile stream that happens to enable neither the 8x8 transform nor
-      ;; scaling matrices is decodable here, and there is no reason to turn it away.
-      (when (pps-transform-8x8 p)
-        (%err "the 8x8 transform is not supported (High profile)"))
       (when (= 1 (u1 br))                              ; pic_scaling_matrix_present_flag
         (setf (pps-scale-4x4 p) (parse-scaling-matrices br (if (pps-transform-8x8 p) 2 0))))
       (setf (pps-second-chroma-qp-offset p) (se br)))
@@ -269,6 +277,10 @@
   (ref-list-reordering '())
   (no-output-of-prior-pics nil) (long-term-reference nil)
   (adaptive-ref-marking nil)
+  ;; the memory_management_control_operations, in the order they were sent.  Acted on, not merely
+  ;; parsed: with a B pyramid an encoder retires its reference B pictures with these, and a decoder
+  ;; that only slides a window keeps a picture the encoder dropped and then evicts the wrong one.
+  (mmco '())
   (qp 26)
   (disable-deblocking 0) (alpha-offset 0) (beta-offset 0)
   (nal nil) (sps nil) (pps nil))
@@ -409,21 +421,26 @@
       (when (plusp (nal-ref-idc nal))
         (cond ((nal-idr-p nal)
                (setf (sh-no-output-of-prior-pics sh) (= 1 (u1 br))
-                     (sh-long-term-reference sh) (= 1 (u1 br))))
+                     (sh-long-term-reference sh) (= 1 (u1 br)))
+               (when (sh-long-term-reference sh)
+                 (%err "long-term reference pictures are not supported")))
               (t
                (setf (sh-adaptive-ref-marking sh) (= 1 (u1 br)))
                (when (sh-adaptive-ref-marking sh)
-                 ;; memory_management_control_operation loop; the operations are read so the
-                 ;; bit position stays right, and only sliding-window marking is implemented
                  (loop for op = (ue br)
                        until (zerop op)
                        do (case op
-                            ((1 3) (ue br) (when (= op 3) (ue br)))
-                            (2 (ue br))
+                            ;; 1: retire one short-term reference, named by how far back it is
+                            (1 (push (cons 1 (ue br)) (sh-mmco sh)))
+                            ;; 4: raise or lower the long-term ceiling.  With no long-term
+                            ;; references there is nothing for it to evict, so it is a no-op here —
+                            ;; but the value still has to be read or the next operation is garbage
                             (4 (ue br))
-                            (6 (ue br))
-                            (5 nil)
-                            (t (%err "memory management control operation ~d" op))))))))
+                            ((2 3 6) (ue br) (when (= op 3) (ue br))
+                             (%err "long-term reference pictures are not supported"))
+                            (5 (%err "memory management control operation 5 (reset all references)"))
+                            (t (%err "memory management control operation ~d" op))))
+                 (setf (sh-mmco sh) (nreverse (sh-mmco sh)))))))
       ;; 7.3.3 puts cabac_init_idc HERE: after the reference picture marking and immediately
       ;; before slice_qp_delta.  A bit read in the wrong place costs the quantiser and everything
       ;; after it, so the order matters more than it looks.

@@ -246,3 +246,67 @@ not resolve, so a 116-core machine silently decided it had four.
 
 `%vlc` stays at `safety 1` deliberately. Every index in it is bounded by construction, but this
 decodes files off the internet and the checks measured at about 3%.
+
+## High profile
+
+Four things, and only one of them was hard.
+
+**The 8x8 transform** shares nothing with the 4x4 one. Its own scan, six position classes rather
+than three, its own butterfly, and a dequantisation shift that pivots at quantiser 36 rather than
+24 because the transform carries six more bits. It went in bit-exact first try, which is what
+generating the tables mechanically and checking their invariants buys.
+
+**Intra_8x8** is the nine 4x4 modes widened, with one addition that has no 4x4 counterpart: the
+reference samples are filtered with a 1-2-1 kernel before any mode looks at them. Skip it and every
+block is slightly wrong in a way that reads as a rounding bug in the modes rather than a missing
+stage. It also takes sixteen samples from the row above rather than eight, because the diagonal and
+vertical-left modes reach past the block into the above-right neighbour.
+
+**Scaling lists** cost a day for a reason worth writing down. A picture parameter set carries
+`6 + 2 * transform_8x8_mode_flag` lists, not always eight. Reading two that were not there consumed
+the bits belonging to `second_chroma_qp_index_offset`, so the **Cr plane alone** decoded at the
+wrong quantiser while luma and Cb stayed perfect. Comparing the planes separately is what made that
+one obvious instead of mysterious; a single "how many bytes differ" number would have hidden it.
+
+**CABAC for the 8x8 block** was the one that bit. Three things about it are not the 4x4 rules:
+
+- No `coded_block_flag`. The coded block pattern already said the block has coefficients and
+  7.3.5.3.3 does not send it twice.
+- Significance and last-significance live at ctxIdx 402 and 417, not at an offset from 105 and 166.
+- Sixty-three scan positions share fifteen significance contexts and NINE last-significance ones,
+  by two maps.
+
+I wrote the last map from memory with five values instead of nine. The symptom was precise and
+misleading: every syntax element before the residual — macroblock type, the transform size flag,
+all four prediction modes, the chroma mode, the coded block pattern, the quantiser delta — decoded
+CORRECTLY, and the residual was wrong from its DC onwards. That is what a wrong significance map
+does: the run of significance flags is decoded against the wrong probabilities, the block ends up
+with the wrong number of coefficients, and the magnitudes are then read backwards from the wrong
+starting point.
+
+**The check that would have caught it without the bitstream**: the context COUNTS are derivable
+from the ctxIdx layout alone. Last-significance owns 417 through 425 because coeff_abs_level_minus1
+starts at 426, so its map must reach 8. Mine reached 4. Counting the slots between two known
+offsets is a real invariant and it costs nothing.
+
+## The bug the High profile work uncovered, which was not a High profile bug
+
+The last fixture to fail was `fast.mp4`, which had been the file used to prove the refusal path
+worked and so had never once been decoded. Twelve frames of sixty were wrong, in a handful of
+scattered macroblocks, in the last two groups of pictures only.
+
+Narrowing by re-encoding the same source with one x264 feature turned off at a time found it in
+five minutes: `b-pyramid=none` fixed it and nothing else did. A B pyramid means B pictures that are
+themselves references, and an encoder retires those with `memory_management_control_operation`
+rather than by sliding a window. Those operations were being parsed — so the bit position stayed
+right — and then discarded.
+
+**Nothing desynchronises**, which is what makes it hard. The reference set drifts: a picture the
+encoder dropped stays in the buffer, the window evicts a different one, and the lists agree with
+the encoder's for the first two groups of pictures and then quietly do not. Only macroblocks that
+name a reference index the two sides disagree about come out wrong.
+
+x264 turns the B pyramid on by default, so this sat in the way of most real High profile files, and
+in a session about the 8x8 transform it would have been read as an 8x8 transform bug. Two things
+saved time: the failing macroblocks all had `transform_size_8x8_flag` clear, which said the new
+code was not involved; and comparing with the loop filter disabled said the fault was underneath it.

@@ -61,6 +61,29 @@
 (defun %parameter-nal-p (n)
   (or (= (nal-type n) +nal-sps+) (= (nal-type n) +nal-pps+)))
 
+(defun parameter-sets-stable-p (params)
+  "Do these parameter sets say the same thing throughout the stream?
+
+   SPLIT-ACCESS-UNITS hoists every parameter set to the front, which is only sound if the stream
+   never CHANGES one.  Several of the JVT conformance streams re-send picture parameter set 0 with
+   different contents part way through — TOSHIBA's raise num_ref_idx_l0_active_minus1 as the
+   reference buffer fills — and hoisting them all makes the last one govern from the first picture.
+   The failure is not subtle where it shows: a slice asks for a reference index that the buffer
+   cannot yet have.  It is very subtle where it does not.
+
+   The test is deliberately blunt.  Two parameter sets of the same kind that differ in any byte
+   send the whole stream down the serial path, even though they might carry different ids and be
+   perfectly compatible.  Repeating an IDENTICAL set — which almost every real stream does, once
+   before each IDR — still takes the fast path, and that is the case worth keeping."
+  (let ((seen (make-hash-table)))
+    (dolist (n params t)
+      (let* ((k (nal-type n))
+             (old (gethash k seen))
+             (new (nal-rbsp n)))
+        (if old
+            (unless (equalp old new) (return nil))
+            (setf (gethash k seen) new))))))
+
 (defun access-units-independent-p (aus)
   "Is every access unit here decodable without reference to any other?
 

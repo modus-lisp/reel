@@ -352,13 +352,19 @@
   (let* ((nals (annex-b-nals bytes))
          (d (make-decoder)))
     (multiple-value-bind (params aus) (split-access-units nals)
-      ;; the parameter sets first and serially: every worker reads them, none writes them
-      (dolist (n params) (feed-nal d n))
-      (or (and (> threads 1) (decode-independent d aus :threads threads))
-          (let ((out (list)))
-            (dolist (au aus)
-              (dolist (n au)
-                (let ((p (feed-nal d n))) (when p (push p out)))))
+      (or (and (> threads 1)
+               (parameter-sets-stable-p params)
+               ;; the parameter sets first and serially: every worker reads them, none writes them
+               (progn (dolist (n params) (feed-nal d n))
+                      (decode-independent d aus :threads threads)))
+          ;; THE SERIAL PATH WALKS THE NALS AS THEY CAME, parameter sets included and in place.
+          ;; It must not use the split above: that hoists every parameter set to the front, and a
+          ;; stream that re-sends one with different contents would then be decoded entirely under
+          ;; the last version of it.
+          (let ((d (make-decoder))
+                (out (list)))
+            (dolist (n nals)
+              (let ((p (feed-nal d n))) (when p (push p out))))
             ;; and the tail the reorder buffer is still holding
             (dolist (p (flush-decoder d)) (push p out))
             (nreverse out))))))

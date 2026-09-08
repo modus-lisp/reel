@@ -25,7 +25,9 @@
   (last-invisible nil)
   (last-keyframe nil)                           ; whether the frame before this one was a key frame
   (frames 0 :type fixnum)
-  (comp-blocks 0 :type fixnum))                 ; how many blocks used two references
+  (comp-blocks 0 :type fixnum)                  ; how many blocks used two references
+  ;; the loop filter deltas and segmentation feature data, which outlive a frame
+  (persist (make-vp9-persist) :type vp9-persist))
 
 (defun make-vp9-decoder ()
   (let ((d (%make-decoder)))
@@ -46,7 +48,8 @@
   "One VP9 frame — not one packet: a packet may be a superframe of several.  Returns a FRAME, or NIL
    for a frame that produces no picture."
   (declare (type octets bytes) (type fixnum start end))
-  (let ((h (parse-header bytes start end :ref-sizes (d-ref-sizes d))))
+  (let ((h (parse-header bytes start end :ref-sizes (d-ref-sizes d)
+                                         :persist (d-persist d))))
     ;; ---- a frame that only shows a reference again, which is how a hidden alt-ref becomes visible
     (when (h-show-existing h)
       (let ((f (aref (d-refs d) (h-show-existing h))))

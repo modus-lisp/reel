@@ -173,9 +173,13 @@
       (loop for (k width signed) in '((0 8 t) (1 6 t) (2 2 nil) (3 0 nil))
             do (let ((on (plusp (read-bit br))))
                  (setf (aref (h-seg-feature-on h) i k) (if on 1 0))
-                 (when (and on (plusp width))
-                   (setf (aref (h-seg-feature h) i k)
-                         (if signed (read-signed br width) (read-bits br width)))))))))
+                 ;; A FEATURE TURNED OFF IS ALSO ZEROED.  The data persists between frames, so
+                 ;; leaving the old value behind lets a feature that was switched off keep acting
+                 ;; through whatever reads it next.
+                 (setf (aref (h-seg-feature h) i k)
+                       (if (and on (plusp width))
+                           (if signed (read-signed br width) (read-bits br width))
+                           0)))))))
 
 (defun %read-tiling (br h sb-cols)
   "How many tile columns and rows the frame is cut into (6.2.14).
@@ -195,7 +199,41 @@
     (setf (h-log2-tile-rows h)
           (let ((v (read-bit br))) (if (zerop v) 0 (+ 1 (read-bit br)))))))
 
-(defun parse-header (bytes start end &key ref-sizes)
+;;; ---- what survives a frame boundary -------------------------------------------------------------
+;;;
+;;; MOST OF A VP9 HEADER IS THE FRAME'S OWN, and two parts of it are not.  The loop filter deltas
+;;; and the segmentation feature data PERSIST: a frame that does not update them inherits the last
+;;; frame's, and only setup_past_independence — a key frame, an intra-only frame that asks for a
+;;; reset, or an error-resilient frame — puts them back to their defaults.
+;;;
+;;; Building the header struct fresh for every frame silently reset both, which is correct for a
+;;; stream where every frame updates them and wrong for one where a frame sets them once and the
+;;; frames after rely on it.  No encoder here produces the latter; three of the official conformance
+;;; vectors do.
+
+(defstruct (vp9-persist (:conc-name vp-))
+  (lf-ref-delta (make-array 4 :element-type '(signed-byte 32) :initial-contents '(1 0 -1 -1))
+                :type (simple-array (signed-byte 32) (4)))
+  (lf-mode-delta (make-array 2 :element-type '(signed-byte 32) :initial-element 0)
+                 :type (simple-array (signed-byte 32) (2)))
+  (seg-feature-on (make-array '(8 4) :element-type '(signed-byte 32) :initial-element 0)
+                  :type (simple-array (signed-byte 32) (8 4)))
+  (seg-feature (make-array '(8 4) :element-type '(signed-byte 32) :initial-element 0)
+               :type (simple-array (signed-byte 32) (8 4)))
+  (seg-abs nil))
+
+(defun setup-past-independence (p)
+  "The spec's function of that name, for the parts of it that outlive a frame."
+  (declare (type vp9-persist p))
+  (replace (vp-lf-ref-delta p) #(1 0 -1 -1))
+  (fill (vp-lf-mode-delta p) 0)
+  (setf (vp-seg-abs p) nil)
+  (dotimes (i 8)
+    (dotimes (j 4)
+      (setf (aref (vp-seg-feature-on p) i j) 0
+            (aref (vp-seg-feature p) i j) 0))))
+
+(defun parse-header (bytes start end &key ref-sizes persist)
   "The uncompressed header of one frame.  REF-SIZES is a vector of eight (width . height) or NIL,
    because an inter frame may say `the same size as reference two' rather than send one."
   (declare (type octets bytes) (type fixnum start end))
@@ -289,9 +327,29 @@
             (h-parallel-mode h) (or (h-error-resilient h) (plusp (read-bit br)))
             (h-frame-context h) (read-bits br 2))
       (when (or (h-keyframe h) (h-intra-only h)) (setf (h-frame-context h) 0))
+      ;; setup_past_independence, which the spec places exactly here: after the frame context index
+      ;; and before anything that reads or updates the persistent state
+      (when persist
+        (when (or (h-keyframe h) (h-intra-only h) (h-error-resilient h))
+          (setup-past-independence persist))
+        (replace (h-lf-ref-delta h) (vp-lf-ref-delta persist))
+        (replace (h-lf-mode-delta h) (vp-lf-mode-delta persist))
+        (setf (h-seg-abs h) (vp-seg-abs persist))
+        (dotimes (i 8)
+          (dotimes (j 4)
+            (setf (aref (h-seg-feature-on h) i j) (aref (vp-seg-feature-on persist) i j)
+                  (aref (h-seg-feature h) i j) (aref (vp-seg-feature persist) i j)))))
       (%read-loop-filter br h)
       (%read-quant br h)
       (%read-segmentation br h)
+      (when persist
+        (replace (vp-lf-ref-delta persist) (h-lf-ref-delta h))
+        (replace (vp-lf-mode-delta persist) (h-lf-mode-delta h))
+        (setf (vp-seg-abs persist) (h-seg-abs h))
+        (dotimes (i 8)
+          (dotimes (j 4)
+            (setf (aref (vp-seg-feature-on persist) i j) (aref (h-seg-feature-on h) i j)
+                  (aref (vp-seg-feature persist) i j) (aref (h-seg-feature h) i j)))))
       (%read-tiling br h (ceiling (h-width h) 64))
       (setf (h-compressed-size h) (read-bits br 16))
       (when (zerop (h-compressed-size h)) (%err "a frame with an empty compressed header"))

@@ -72,7 +72,10 @@
    #:theora-error #:theora-error-message
    #:info #:parse-headers #:parse-identification #:parse-setup
    #:inf-width #:inf-height #:inf-picture-width #:inf-picture-height
-   #:inf-offset-x #:inf-offset-y #:inf-fps-num #:inf-fps-den #:inf-version))
+   #:inf-offset-x #:inf-offset-y #:inf-fps-num #:inf-fps-den #:inf-version
+   #:decoder #:make-theora-decoder #:decode-frame
+   #:frame #:fr-width #:fr-height #:fr-cwidth #:fr-cheight #:fr-keyframe
+   #:fr-y #:fr-u #:fr-v #:fr-ystride #:fr-cstride #:fr-timestamp #:as-picture))
 
 (defpackage #:reel.ffv1
   (:use #:cl)

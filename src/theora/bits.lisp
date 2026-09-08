@@ -95,20 +95,28 @@
       (make-huff :bits maxlen :table out))))
 
 (defun canonical-huff (lengths &key (values nil))
-  "The canonical Huffman code for a list of lengths: shortest first, and within a length in order.
+  "The canonical Huffman code for a list of lengths, assigned IN TABLE ORDER.
 
-   This is the assignment the specification means when it prints a table of lengths and no codes,
-   and it is the only assignment that both sides can agree on without transmitting anything."
+   In table order, not shortest-first.  The difference matters: Theora's superblock run lengths
+   finish with a six-bit code after sixteen ten-bit ones, and the two assignments disagree about
+   every code from that point on.  The rule is the Kraft counter — start at zero, and after
+   assigning a code of length n add one at bit n — which coincides with the shortest-first
+   assignment whenever the lengths happen to be non-decreasing, and is what the specification
+   means when they are not.
+
+   Going back to a SHORTER length is only well defined if the counter is already aligned to it, so
+   that is checked: a table where it is not is not a prefix code and there is no reading it."
   (let ((entries '()) (code 0) (prev 0))
-    (let ((order (sort (loop for len across lengths for i from 0
-                             when (plusp len) collect (cons len i))
-                       (lambda (a b) (or (< (car a) (car b))
-                                         (and (= (car a) (car b)) (< (cdr a) (cdr b))))))))
-      (dolist (e order)
-        (destructuring-bind (len . i) e
-          (setf code (ash code (- len prev)) prev len)
-          (push (list code (if values (aref values i) i) len) entries)
-          (incf code))))
+    (loop for len across lengths for i from 0
+          do (when (plusp len)
+               (cond ((> len prev) (setf code (ash code (- len prev))))
+                     ((< len prev)
+                      (unless (zerop (ldb (byte (- prev len) 0) code))
+                        (%err "a code table that is not a prefix code"))
+                      (setf code (ash code (- (- prev len))))))
+               (setf prev len)
+               (push (list code (if values (aref values i) i) len) entries)
+               (incf code)))
     (build-huff (nreverse entries))))
 
 (declaim (inline read-huff))

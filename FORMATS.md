@@ -20,6 +20,7 @@ as data.
 | **MPEG program and transport streams** | `.mpg`, `.vob`, `.ts` open and play, end to end |
 | **AVI**, including OpenDML | `.avi` opens and plays, whatever codec is inside |
 | **FFV1**, the preservation codec | ffmpeg, bit-exact on five configurations, every frame |
+| **Theora** in Ogg | ffmpeg, bit-exact on six fixtures, every frame |
 | **Opus, AAC, MP3, MPEG audio Layer II, Vorbis** | reed's own suites; Layer II within 0.0002 RMS of ffmpeg |
 
 H.264 covers CAVLC and CABAC, P and B slices, both direct modes, weighted and implicit weighted
@@ -45,6 +46,10 @@ MPEG-4 Part 2 covers Simple and Advanced Simple: one and four motion vectors, bo
 pictures with direct mode, video packets, and quarter-sample motion. That is what DivX and XviD
 produce.
 
+Theora is VP3 with a header: On3's 2001 codec, frozen by Xiph in 2004 and unchanged since. It
+covers key and inter pictures, golden frames, all four motion vector modes including four vectors
+per macroblock, the per-block quantiser indices, and the loop filter. `.ogv` opens and plays.
+
 FFV1 covers version 3 with the range coder: 4:2:0, 4:2:2 and 4:4:4, any slice layout, either state
 table, and lossless RGB through the reversible colour transform. It is the archival case — the
 command national libraries actually use is `-level 3 -coder 1`, which is what this decodes.
@@ -63,6 +68,9 @@ because nobody knows to disbelieve it.
 - MPEG-4 Part 2: sprites and global motion, interlaced objects, data partitioning, scalability, and
   arbitrary shapes. Also Microsoft's pre-standard MPEG-4 variants (DIV3, MP42), which share a name
   and not a bitstream.
+- Theora: chroma layouts other than 4:2:0, bitstreams older than 3.2.0 (which stored the picture
+  upside down relative to everything since), and VP4 — which ffmpeg decodes with the same code and
+  which shares with Theora a name and not a bitstream.
 - FFV1: the Golomb-Rice entropy coder, versions 0 and 1 (which keep their header in the frame
   rather than the container), more than 8 bits per sample, and Bayer. The player additionally
   refuses anything but 4:2:0, because one picture type serves every codec here and it is 4:2:0 —
@@ -72,12 +80,7 @@ because nobody knows to disbelieve it.
 
 ## The gaps, in the order I would close them
 
-### 1. Theora in Ogg
-
-The Archive's own older open-format derivatives. A VP3 descendant, so genuinely close to the VP8
-code already here.
-
-### 2. VP9
+### 1. VP9
 
 The other half of what the web actually serves. Big, but the better target than HEVC if the goal is
 playing what people link you.

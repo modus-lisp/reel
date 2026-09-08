@@ -102,4 +102,5 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
       :components
       ((:file "tables")      ; GENERATED: the fixed codes and VP3's defaults
        (:file "bits")        ; the bit reader and two kinds of Huffman table
-       (:file "headers")))))));  the three packets that configure a decoder
+       (:file "headers")     ; the three packets that configure a decoder
+       (:file "decode")))))));  superblocks, modes, vectors, coefficients, and the picture

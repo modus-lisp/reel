@@ -75,7 +75,9 @@
    (6 8) (57 8) (5 8) (58 8) (4 8)
    (59 8) (3 8) (60 8) (2 8) (61 8)
    (1 8) (62 8) (0 8))
-  "(value length) for the motion vector components, where the value indexes +FIXED-MOTION-VECTORS+.")
+  "(value length) for the motion vector components.  The VALUE IS THE VECTOR PLUS THIRTY-ONE, not
+   an index into anything: subtract thirty-one and you have the half-pixel displacement, which is
+   why zero has the shortest code and the codes lengthen outwards in both directions.")
 
 (defparameter +fixed-motion-vectors+
   (make-array 64 :element-type 'fixnum :initial-contents
@@ -125,6 +127,19 @@
      0   0   0   0   0   0   0   0   0   0   0   0   0   1   1   1
      1   2   3   4   5   6  10   1   1   1   1   1   1   1   2   2))
   "How many bits the value itself takes, which for the small tokens is one — the sign.")
+
+(defparameter +coeff-base+
+  (make-array 32 :element-type 'fixnum :initial-contents
+   '(
+     0   0   0   0   0   0   0   0   0   1  -1   2  -2   3   4   5
+     6   7   9  13  21  37  69   1   1   1   1   1   1   1   2   2))
+  "The smallest magnitude a token can carry.  Tokens seven to twelve carry it outright, sign and
+   all, and take no extra bits; from thirteen up the extra bits pick a magnitude counting up from
+   this base, with the topmost of them acting as a sign.
+
+   Extracted from ffmpeg's twelve separate value tables and CHECKED to reproduce every one of them
+   exactly, which is the only reason it is safe to keep the rule rather than the tables — the
+   largest of those tables has a thousand and twenty-four entries and says nothing this does not.")
 
 ;;; ---- VP3's defaults ------------------------------------------------------------------------------
 ;;;
@@ -210,5 +225,6 @@
 (declaim (type (simple-array (unsigned-byte 16) (64)) +vp31-dc-scale+ +vp31-ac-scale+))
 (declaim (type (simple-array (unsigned-byte 8) (32))
                +zero-run-base+ +zero-run-bits+ +coeff-bits+))
+(declaim (type (simple-array fixnum (32)) +coeff-base+))
 (declaim (type (simple-array fixnum (64)) +fixed-motion-vectors+))
 (declaim (type (simple-array fixnum (7 8)) +mode-alphabets+))

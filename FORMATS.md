@@ -26,7 +26,7 @@ as data.
 | **FFV1**, the preservation codec | ffmpeg, bit-exact on twelve configurations, every frame |
 | **Theora** in Ogg | ffmpeg, bit-exact on six fixtures, every frame |
 | **VP9** | ffmpeg, bit-exact on seven clips, every picture |
-| **Opus, AAC, MP3, MPEG audio Layer II, G.711** | reed's own suites; Layer II within 0.0002 RMS of ffmpeg |
+| **Opus, AAC, MP3, MPEG audio Layer II, Vorbis, G.711** | reed's own suites; Vorbis at correlation 1.000000 against ffmpeg on ten fixtures |
 
 H.264 covers CAVLC and CABAC, P and B slices, both direct modes, weighted and implicit weighted
 prediction, reference list reordering, adaptive reference marking, the 8x8 transform, Intra_8x8,
@@ -128,16 +128,17 @@ because nobody knows to disbelieve it.
   sRGB colour space refused on its own — and prediction from a reference of a different size.
 - AC-3 and DTS, which a DVD may carry instead of MPEG audio. A file's video plays and the audio
   track is named as undecodable rather than guessed at.
-- **Vorbis**, on the same terms — and this line is a correction. This table claimed until now that
-  Vorbis played, and it does not: there is no Vorbis decoder anywhere in the stack. Ogg and
-  Matroska both recognise the track and name it, which is why nothing ever failed loudly enough to
-  catch the claim. It matters more than the other two refusals because Vorbis is the audio half of
-  the *original* WebM pairing — a `.webm` from before about 2013 is VP8 and Vorbis — so the most
-  likely file to open here with sound and no way to hear it is a WebM.
+- Vorbis floor 0, the line spectral pair representation. No encoder in use has emitted one since
+  the format was frozen and libvorbis never has, so it is refused by name rather than half-written.
 
 ## The gaps
 
-None left. What was here — H.264 High profile, MPEG-2 in program and transport streams, AVI with
+None left. One reopened briefly: this document claimed Vorbis played when there was no Vorbis
+decoder anywhere in the stack — Ogg and Matroska both recognise the track and name it, which is
+exactly why nothing ever failed loudly enough to catch it. It was found by costing what to build
+next rather than by a test, which is its own small lesson about which claims here are load-bearing.
+There is a Vorbis decoder now, and a `.webm` from before about 2013 — VP8 and Vorbis, the original
+pairing — plays with its sound. What was here — H.264 High profile, MPEG-2 in program and transport streams, AVI with
 MPEG-4 Part 2, FFV1, Theora, VP9 — is above.
 
 ### VP9 — the last one, and the largest

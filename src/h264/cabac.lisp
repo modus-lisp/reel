@@ -184,11 +184,20 @@
 
 (declaim (inline %nbr-mbi))
 (defun %nbr-mbi (ss dx dy)
-  "Index of the neighbouring macroblock, or NIL when it is outside or not yet decoded."
+  "Index of the neighbouring macroblock, or NIL when it is unavailable.
+
+   Unavailable means outside the picture, not yet decoded, OR IN A DIFFERENT SLICE (6.4.11.1).
+   Every context increment in this file goes through here, so leaving the last condition out lets
+   a slice's arithmetic coder take its probabilities from a neighbour the encoder had ruled out.
+   It shows up first where the slices differ most: a picture coded as alternating I and P slices
+   gives the P slice's ref_idx a context from the I slice above it, and the decoded index comes out
+   past the end of the reference list."
   (let* ((pic (ss-pic ss)) (x (+ (ss-mbx ss) dx)) (y (+ (ss-mby ss) dy)))
     (and (>= x 0) (>= y 0) (< x (pic-mb-width pic)) (< y (pic-mb-height pic))
          (let ((i (+ (* y (pic-mb-width pic)) x)))
-           (and (/= -1 (aref (pic-mb-types pic) i)) i)))))
+           (and (/= -1 (aref (pic-mb-types pic) i))
+                (= (the fixnum (aref (pic-mb-slice pic) i)) (ss-slice-id ss))
+                i)))))
 
 (defun %i16x16-p (pic mbi)
   (let ((tp (aref (pic-mb-types pic) mbi))) (and (>= tp 1) (<= tp 24))))

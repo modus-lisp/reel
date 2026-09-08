@@ -26,7 +26,7 @@ as data.
 | **FFV1**, the preservation codec | ffmpeg, bit-exact on twelve configurations, every frame |
 | **Theora** in Ogg | ffmpeg, bit-exact on six fixtures, every frame |
 | **VP9** | ffmpeg, bit-exact on seven clips, every picture |
-| **Opus, AAC, MP3, MPEG audio Layer II, Vorbis, FLAC, G.711** | reed's own suites; FLAC bit-exact on sixteen fixtures and against the MD5 the encoder recorded |
+| **Opus, AAC, MP3, MPEG audio Layer II, Vorbis, FLAC, AC-3, G.711** | reed's own suites; FLAC bit-exact on sixteen fixtures and against the MD5 the encoder recorded |
 
 H.264 covers CAVLC and CABAC, P and B slices, both direct modes, weighted and implicit weighted
 prediction, reference list reordering, adaptive reference marking, the 8x8 transform, Intra_8x8,
@@ -126,8 +126,9 @@ because nobody knows to disbelieve it.
   the decoder itself handles the others.
 - VP9: profiles 1, 2 and 3 — anything but eight bits and 4:2:0, refused on the profile field, and an
   sRGB colour space refused on its own — and prediction from a reference of a different size.
-- AC-3 and DTS, which a DVD may carry instead of MPEG audio. A file's video plays and the audio
+- DTS, which a DVD may carry instead of MPEG audio or AC-3. A file's video plays and the audio
   track is named as undecodable rather than guessed at.
+- Enhanced AC-3, which is a different format wearing AC-3's sync word, refused on its bitstream id.
 - Vorbis floor 0, the line spectral pair representation. No encoder in use has emitted one since
   the format was frozen and libvorbis never has, so it is refused by name rather than half-written.
 

@@ -19,6 +19,7 @@ as data.
 | **MP4**, including fragmented | ffprobe, packet for packet |
 | **MPEG program and transport streams** | `.mpg`, `.vob`, `.ts` open and play, end to end |
 | **AVI**, including OpenDML | `.avi` opens and plays, whatever codec is inside |
+| **FFV1**, the preservation codec | ffmpeg, bit-exact on five configurations, every frame |
 | **Opus, AAC, MP3, MPEG audio Layer II, Vorbis** | reed's own suites; Layer II within 0.0002 RMS of ffmpeg |
 
 H.264 covers CAVLC and CABAC, P and B slices, both direct modes, weighted and implicit weighted
@@ -44,6 +45,10 @@ MPEG-4 Part 2 covers Simple and Advanced Simple: one and four motion vectors, bo
 pictures with direct mode, video packets, and quarter-sample motion. That is what DivX and XviD
 produce.
 
+FFV1 covers version 3 with the range coder: 4:2:0, 4:2:2 and 4:4:4, any slice layout, either state
+table, and lossless RGB through the reversible colour transform. It is the archival case — the
+command national libraries actually use is `-level 3 -coder 1`, which is what this decodes.
+
 ## Refused, and refused loudly
 
 Anything below is turned away with a reason rather than decoded wrong. That distinction is the
@@ -58,24 +63,21 @@ because nobody knows to disbelieve it.
 - MPEG-4 Part 2: sprites and global motion, interlaced objects, data partitioning, scalability, and
   arbitrary shapes. Also Microsoft's pre-standard MPEG-4 variants (DIV3, MP42), which share a name
   and not a bitstream.
+- FFV1: the Golomb-Rice entropy coder, versions 0 and 1 (which keep their header in the frame
+  rather than the container), more than 8 bits per sample, and Bayer. The player additionally
+  refuses anything but 4:2:0, because one picture type serves every codec here and it is 4:2:0 —
+  the decoder itself handles the others.
 - AC-3 and DTS, which a DVD may carry instead of MPEG audio. A file's video plays and the audio
   track is named as undecodable rather than guessed at.
 
 ## The gaps, in the order I would close them
 
-### 1. FFV1 in Matroska
-
-The one people forget. FFV1 is the actual **preservation** codec — lossless, and what national
-libraries and film archives keep masters in. The container is already supported, so this is codec
-work only, and it is a range-coded lossless codec rather than a transform codec, so almost nothing
-in reel is reusable. Worth it for the archival case, not the consumption case.
-
-### 2. Theora in Ogg
+### 1. Theora in Ogg
 
 The Archive's own older open-format derivatives. A VP3 descendant, so genuinely close to the VP8
 code already here.
 
-### 3. VP9
+### 2. VP9
 
 The other half of what the web actually serves. Big, but the better target than HEVC if the goal is
 playing what people link you.
@@ -93,5 +95,8 @@ playing what people link you.
 
 ## Small things that are nearly free
 
+- **FFV1's Golomb-Rice coder, and versions 0 and 1.** The range coder is the archival default and
+  is what is here; the other entropy coder is a separate path, and the older versions keep their
+  header in the frame rather than the container.
 - **H.264 decode speed at 1080p.** 71 fps concurrently, but single-threaded it is 10.6, and the
   deblocking filter is a third of that. Matters for a single-core or latency-bound path.

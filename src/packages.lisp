@@ -66,6 +66,16 @@
    #:picture #:pic-width #:pic-height #:pic-y #:pic-u #:pic-v #:picture->yuv420
    #:deblock-picture #:as-picture))
 
+(defpackage #:reel.ffv1
+  (:use #:cl)
+  (:export
+   #:ffv1-error #:ffv1-error-message
+   #:config #:parse-configuration #:cfg-version #:cfg-width #:cfg-height #:cfg-colorspace
+   #:cfg-bits #:cfg-h-slices #:cfg-v-slices #:cfg-ac #:cfg-chroma-h-shift #:cfg-chroma-v-shift
+   #:decoder #:make-ffv1-decoder #:decode-frame
+   #:frame #:fr-width #:fr-height #:fr-cwidth #:fr-cheight
+   #:fr-y #:fr-u #:fr-v #:fr-ystride #:fr-cstride #:picture->yuv420 #:as-picture))
+
 (defpackage #:reel.mpeg4
   (:use #:cl)
   (:export

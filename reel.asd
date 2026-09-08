@@ -87,4 +87,11 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
        (:file "bits")        ; start codes, the bit reader, the Huffman machinery
        (:file "headers")     ; the video object layer and the video object plane
        (:file "slice")       ; the macroblock layer: prediction, motion, coefficients
-       (:file "decode")))))));  start codes in, pictures out
+       (:file "decode"))   ; start codes in, pictures out
+      )
+     ;; ---- FFV1, the lossless codec archives keep masters in
+     (:module "ffv1"
+      :serial t
+      :components
+      ((:file "rangecoder")  ; the binary range coder, and integers spelled through it
+       (:file "decode")))))));  the configuration record, slices, and prediction

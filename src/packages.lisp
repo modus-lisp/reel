@@ -66,6 +66,22 @@
    #:picture #:pic-width #:pic-height #:pic-y #:pic-u #:pic-v #:picture->yuv420
    #:deblock-picture #:as-picture))
 
+(defpackage #:reel.mpeg2
+  (:use #:cl)
+  (:export
+   #:mpeg2-error #:mpeg2-error-message
+   ;; the bitstream layer
+   #:find-start-code #:bitreader #:make-br #:read-bits #:read-bit #:peek-bits
+   ;; the headers
+   #:sequence-header #:parse-sequence-header #:seq-width #:seq-height #:seq-mb-width
+   #:seq-mb-height #:seq-frame-rate #:seq-mpeg2-p #:seq-progressive-p
+   #:picture-header #:ph-coding-type #:ph-structure #:picture-type-name
+   ;; the decoder
+   #:decoder #:make-decoder #:feed-bytes #:flush-decoder #:decode-elementary-stream
+   #:decoder-width #:decoder-height
+   #:frame #:fr-width #:fr-height #:fr-y #:fr-u #:fr-v #:fr-ystride #:fr-cstride
+   #:fr-coding-type #:fr-timestamp #:picture->yuv420))
+
 (defpackage #:reel
   (:use #:cl)
   (:nicknames #:vp8)

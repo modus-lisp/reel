@@ -80,7 +80,7 @@
    why zero has the shortest code and the codes lengthen outwards in both directions.")
 
 (defparameter +fixed-motion-vectors+
-  (make-array 64 :element-type 'fixnum :initial-contents
+  (make-array 64 :element-type '(signed-byte 32) :initial-contents
    '(
       0    0    1   -1    2   -2    3   -3
       4   -4    5   -5    6   -6    7   -7
@@ -129,7 +129,7 @@
   "How many bits the value itself takes, which for the small tokens is one — the sign.")
 
 (defparameter +coeff-base+
-  (make-array 32 :element-type 'fixnum :initial-contents
+  (make-array 32 :element-type '(signed-byte 32) :initial-contents
    '(
      0   0   0   0   0   0   0   0   0   1  -1   2  -2   3   4   5
      6   7   9  13  21  37  69   1   1   1   1   1   1   1   2   2))
@@ -207,7 +207,7 @@
 (defconstant +mode-inter-fourmv+ 7)
 
 (defparameter +mode-alphabets+
-  (make-array '(7 8) :element-type 'fixnum :initial-contents
+  (make-array '(7 8) :element-type '(signed-byte 32) :initial-contents
    '((3 4 2 0 1 5 6 7)
      (3 4 0 2 1 5 6 7)
      (3 2 4 0 1 5 6 7)
@@ -225,6 +225,6 @@
 (declaim (type (simple-array (unsigned-byte 16) (64)) +vp31-dc-scale+ +vp31-ac-scale+))
 (declaim (type (simple-array (unsigned-byte 8) (32))
                +zero-run-base+ +zero-run-bits+ +coeff-bits+))
-(declaim (type (simple-array fixnum (32)) +coeff-base+))
-(declaim (type (simple-array fixnum (64)) +fixed-motion-vectors+))
-(declaim (type (simple-array fixnum (7 8)) +mode-alphabets+))
+(declaim (type (simple-array (signed-byte 32) (32)) +coeff-base+))
+(declaim (type (simple-array (signed-byte 32) (64)) +fixed-motion-vectors+))
+(declaim (type (simple-array (signed-byte 32) (7 8)) +mode-alphabets+))

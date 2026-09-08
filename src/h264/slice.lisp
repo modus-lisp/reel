@@ -361,7 +361,7 @@
    transform.  Only the chroma is the same, because chroma has no 8x8 transform in 4:2:0."
   (declare (optimize (speed 3) (safety 1)))
   (let* ((pic (ss-pic ss))
-         (modes (make-array 4 :element-type 'fixnum)))
+         (modes (make-array 4 :element-type '(signed-byte 32))))
     (declare (dynamic-extent modes))
     (dotimes (i8 4)
       (let ((mode (%read-intra8x8-mode ss i8)))
@@ -399,7 +399,7 @@
 (defun decode-i4x4-macroblock (ss)
   
   (declare (optimize (speed 3) (safety 1)))(let* ((br (ss-br ss)) (pic (ss-pic ss))
-         (modes (make-array 16 :element-type 'fixnum)))
+         (modes (make-array 16 :element-type '(signed-byte 32))))
     (declare (dynamic-extent modes))
     ;; the sixteen prediction modes, each coded against its neighbours' minimum
     (dotimes (blk 16)
@@ -765,8 +765,8 @@
          (pw (aref +p-part-width+ mb-type))
          (ph (aref +p-part-height+ mb-type))
          (shape (case mb-type (1 :16x8) (2 :8x16) (t nil)))
-         (subs (make-array 4 :element-type 'fixnum :initial-element 0))
-         (refs (make-array 4 :element-type 'fixnum :initial-element 0)))
+         (subs (make-array 4 :element-type '(signed-byte 32) :initial-element 0))
+         (refs (make-array 4 :element-type '(signed-byte 32) :initial-element 0)))
     (declare (dynamic-extent subs refs))
     (unless ref-pic (%err "a P macroblock with no reference picture"))
     (setf (aref (pic-mb-types pic) mbi) (- -3 mb-type))
@@ -1145,10 +1145,10 @@
          (nparts (aref +b-part+ mb-type 0))
          (pw (aref +b-part+ mb-type 1))
          (ph (aref +b-part+ mb-type 2))
-         (subs (make-array 4 :element-type 'fixnum :initial-element 0))
-         (modes (make-array 4 :element-type 'fixnum :initial-element 0))
-         (r0s (make-array 4 :element-type 'fixnum :initial-element 0))
-         (r1s (make-array 4 :element-type 'fixnum :initial-element 0)))
+         (subs (make-array 4 :element-type '(signed-byte 32) :initial-element 0))
+         (modes (make-array 4 :element-type '(signed-byte 32) :initial-element 0))
+         (r0s (make-array 4 :element-type '(signed-byte 32) :initial-element 0))
+         (r1s (make-array 4 :element-type '(signed-byte 32) :initial-element 0)))
     (declare (dynamic-extent subs modes r0s r1s))
     (setf (aref (pic-mb-types pic) mbi) (- -3 mb-type)
           (ss-mb-done ss) 0)
@@ -1196,7 +1196,7 @@
        ;; them depends on prediction — and the vectors are worked out afterwards, one partition at a
        ;; time.  Doing it in one pass makes a later partition visible to an earlier one during the
        ;; list-1 pass, which is a wrong prediction and not a desynchronisation.
-       (let ((mvd (make-array '(4 4 2 2) :element-type 'fixnum :initial-element 0)))
+       (let ((mvd (make-array '(4 4 2 2) :element-type '(signed-byte 32) :initial-element 0)))
          (declare (dynamic-extent mvd))
          (dotimes (lx 2)
            (dotimes (i nparts)

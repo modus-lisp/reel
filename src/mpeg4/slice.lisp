@@ -37,13 +37,13 @@
 ;;; and are computed here once.
 
 (defun %build-lmax (run level split)
-  (let ((out (make-array '(2 64) :element-type 'fixnum :initial-element 0)))
+  (let ((out (make-array '(2 64) :element-type '(signed-byte 32) :initial-element 0)))
     (dotimes (i 102 out)
       (let ((last (if (>= i split) 1 0)) (r (aref run i)) (l (aref level i)))
         (when (and (< r 64) (> l (aref out last r))) (setf (aref out last r) l))))))
 
 (defun %build-rmax (run level split)
-  (let ((out (make-array '(2 64) :element-type 'fixnum :initial-element 0)))
+  (let ((out (make-array '(2 64) :element-type '(signed-byte 32) :initial-element 0)))
     (dotimes (i 102 out)
       (let ((last (if (>= i split) 1 0)) (r (aref run i)) (l (aref level i)))
         (when (and (< l 64) (> r (aref out last l))) (setf (aref out last l) r))))))
@@ -52,7 +52,7 @@
 (defparameter +intra-rmax+ (%build-rmax +intra-coeff-run+ +intra-coeff-level+ +intra-last-split+))
 (defparameter +inter-lmax+ (%build-lmax +inter-coeff-run+ +inter-coeff-level+ +inter-last-split+))
 (defparameter +inter-rmax+ (%build-rmax +inter-coeff-run+ +inter-coeff-level+ +inter-last-split+))
-(declaim (type (simple-array fixnum (2 64))
+(declaim (type (simple-array (signed-byte 32) (2 64))
                +intra-lmax+ +intra-rmax+ +inter-lmax+ +inter-rmax+))
 
 ;;; ---- a decoded picture ------------------------------------------------------------------------
@@ -66,12 +66,12 @@
   (ystride 0 :type fixnum) (cstride 0 :type fixnum)
   (coding-type 0 :type fixnum)
   ;; the motion of every 8x8 block, so that a B-VOP's direct mode can read it back
-  (mvx (make-array 0 :element-type 'fixnum) :type fixnums)
-  (mvy (make-array 0 :element-type 'fixnum) :type fixnums)
+  (mvx (make-array 0 :element-type '(signed-byte 32)) :type fixnums)
+  (mvy (make-array 0 :element-type '(signed-byte 32)) :type fixnums)
   ;; and two facts per macroblock that direct mode also asks: was it skipped, and did it carry four
   ;; vectors rather than one
-  (mb-skip (make-array 0 :element-type 'fixnum) :type fixnums)
-  (mb-4mv (make-array 0 :element-type 'fixnum) :type fixnums)
+  (mb-skip (make-array 0 :element-type '(signed-byte 32)) :type fixnums)
+  (mb-4mv (make-array 0 :element-type '(signed-byte 32)) :type fixnums)
   (timestamp nil))
 
 (defun make-frame-for (v)
@@ -85,10 +85,10 @@
                 :v (make-array (* (ash cw -1) (ash ch -1)) :element-type '(unsigned-byte 8)
                                :initial-element 128)
                 :ystride cw :cstride (ash cw -1)
-                :mvx (make-array nb :element-type 'fixnum :initial-element 0)
-                :mvy (make-array nb :element-type 'fixnum :initial-element 0)
-                :mb-skip (make-array (ash nb -2) :element-type 'fixnum :initial-element 0)
-                :mb-4mv (make-array (ash nb -2) :element-type 'fixnum :initial-element 0))))
+                :mvx (make-array nb :element-type '(signed-byte 32) :initial-element 0)
+                :mvy (make-array nb :element-type '(signed-byte 32) :initial-element 0)
+                :mb-skip (make-array (ash nb -2) :element-type '(signed-byte 32) :initial-element 0)
+                :mb-4mv (make-array (ash nb -2) :element-type '(signed-byte 32) :initial-element 0))))
 
 ;;; ---- the state one picture carries -------------------------------------------------------------
 
@@ -109,28 +109,28 @@
   ;; the motion of every 8x8 block of THIS picture, on a grid with a zero border on the left and
   ;; top so that a neighbour off the edge reads as a vector of zero without a test
   (mv-w 0 :type fixnum)
-  (mvx (make-array 0 :element-type 'fixnum) :type fixnums)
-  (mvy (make-array 0 :element-type 'fixnum) :type fixnums)
+  (mvx (make-array 0 :element-type '(signed-byte 32)) :type fixnums)
+  (mvy (make-array 0 :element-type '(signed-byte 32)) :type fixnums)
   ;; the DC of every block, likewise bordered — with 1024 rather than 0, because that is the value
   ;; the specification says an absent neighbour predicts
   (dc-w 0 :type fixnum) (dcc-w 0 :type fixnum)
-  (dc-y (make-array 0 :element-type 'fixnum) :type fixnums)
-  (dc-u (make-array 0 :element-type 'fixnum) :type fixnums)
-  (dc-v (make-array 0 :element-type 'fixnum) :type fixnums)
+  (dc-y (make-array 0 :element-type '(signed-byte 32)) :type fixnums)
+  (dc-u (make-array 0 :element-type '(signed-byte 32)) :type fixnums)
+  (dc-v (make-array 0 :element-type '(signed-byte 32)) :type fixnums)
   ;; the quantiser each macroblock used, because AC prediction across a quantiser change has to
   ;; rescale what it borrows
-  (mb-qscale (make-array 0 :element-type 'fixnum) :type fixnums)
+  (mb-qscale (make-array 0 :element-type '(signed-byte 32)) :type fixnums)
   ;; the edge coefficients each block kept, for the next block to predict from: fourteen per block,
   ;; the left column at 1..7 and the top row at 9..15
-  (ac-y (make-array 0 :element-type 'fixnum) :type fixnums)
-  (ac-u (make-array 0 :element-type 'fixnum) :type fixnums)
-  (ac-v (make-array 0 :element-type 'fixnum) :type fixnums)
-  (block (make-array 64 :element-type 'fixnum) :type (simple-array fixnum (64)))
-  (mv (make-array 8 :element-type 'fixnum) :type fixnums)    ; four (x,y) pairs, list 0
-  (mv1 (make-array 8 :element-type 'fixnum) :type fixnums)   ; and list 1, for a B picture
+  (ac-y (make-array 0 :element-type '(signed-byte 32)) :type fixnums)
+  (ac-u (make-array 0 :element-type '(signed-byte 32)) :type fixnums)
+  (ac-v (make-array 0 :element-type '(signed-byte 32)) :type fixnums)
+  (block (make-array 64 :element-type '(signed-byte 32)) :type (simple-array (signed-byte 32) (64)))
+  (mv (make-array 8 :element-type '(signed-byte 32)) :type fixnums)    ; four (x,y) pairs, list 0
+  (mv1 (make-array 8 :element-type '(signed-byte 32)) :type fixnums)   ; and list 1, for a B picture
   ;; A B picture predicts its vectors from a RUNNING predictor per direction, reset at the start of
   ;; every row — not from the median of neighbours the way P pictures do.
-  (last-mv (make-array 4 :element-type 'fixnum) :type fixnums)
+  (last-mv (make-array 4 :element-type '(signed-byte 32)) :type fixnums)
   (pp-time 1 :type fixnum) (pb-time 1 :type fixnum)
   ;; scratch for quarter-sample interpolation: the window, and the three filtered versions of it
   (qfull (make-array 289 :element-type '(unsigned-byte 8)) :type octets)
@@ -145,17 +145,17 @@
     (%make-state :vol v :vop p :cur cur :forward forward :backward backward
                  :qscale (vop-qscale p)
                  :mv-w bw
-                 :mvx (make-array (* bw bh) :element-type 'fixnum :initial-element 0)
-                 :mvy (make-array (* bw bh) :element-type 'fixnum :initial-element 0)
+                 :mvx (make-array (* bw bh) :element-type '(signed-byte 32) :initial-element 0)
+                 :mvy (make-array (* bw bh) :element-type '(signed-byte 32) :initial-element 0)
                  :dc-w bw :dcc-w cw
-                 :dc-y (make-array (* bw bh) :element-type 'fixnum :initial-element 1024)
-                 :dc-u (make-array (* cw chh) :element-type 'fixnum :initial-element 1024)
-                 :dc-v (make-array (* cw chh) :element-type 'fixnum :initial-element 1024)
-                 :mb-qscale (make-array (* mbw mbh) :element-type 'fixnum
+                 :dc-y (make-array (* bw bh) :element-type '(signed-byte 32) :initial-element 1024)
+                 :dc-u (make-array (* cw chh) :element-type '(signed-byte 32) :initial-element 1024)
+                 :dc-v (make-array (* cw chh) :element-type '(signed-byte 32) :initial-element 1024)
+                 :mb-qscale (make-array (* mbw mbh) :element-type '(signed-byte 32)
                                         :initial-element (vop-qscale p))
-                 :ac-y (make-array (* 16 bw bh) :element-type 'fixnum :initial-element 0)
-                 :ac-u (make-array (* 16 cw chh) :element-type 'fixnum :initial-element 0)
-                 :ac-v (make-array (* 16 cw chh) :element-type 'fixnum :initial-element 0))))
+                 :ac-y (make-array (* 16 bw bh) :element-type '(signed-byte 32) :initial-element 0)
+                 :ac-u (make-array (* 16 cw chh) :element-type '(signed-byte 32) :initial-element 0)
+                 :ac-v (make-array (* 16 cw chh) :element-type '(signed-byte 32) :initial-element 0))))
 
 ;;; ---- block addressing --------------------------------------------------------------------------
 
@@ -208,7 +208,7 @@
          (i -1))
     (declare (type fixnum bits split i dc-pred)
              (type (simple-array (unsigned-byte 8) (102)) runs levels)
-             (type (simple-array fixnum (2 64)) lmax rmax))
+             (type (simple-array (signed-byte 32) (2 64)) lmax rmax))
     (fill blk 0)
     (when intra-p
       (if dc-vlc-p
@@ -566,13 +566,14 @@
    predicted picture until the next intra one.  Vectors may point OUTSIDE the picture — MPEG-2
    forbids that and MPEG-4 does not — so the reference is read with its edges extended."
   (declare (type octets dst plane)
-           (type fixnum dstride dbase stride w h px py bw bh mvx mvy rounding)
+           (type dim dstride dbase stride w h px py)
+           (type (integer 0 64) bw bh) (type (signed-byte 20) mvx mvy) (type bit rounding)
            (optimize (speed 3) (safety 1)))
   (let* ((sx (+ px (ash mvx -1))) (sy (+ py (ash mvy -1)))
          (hx (logand mvx 1)) (hy (logand mvy 1))
          (r (- 1 rounding))
          (inside (and (>= sx 0) (>= sy 0) (<= (+ sx bw hx) w) (<= (+ sy bh hy) h))))
-    (declare (type fixnum sx sy hx hy r))
+    (declare (type (signed-byte 27) sx sy) (type bit hx hy) (type fixnum r))
     (macrolet ((each ((yv xv) form)
                  `(dotimes (,yv bh)
                     (declare (type fixnum ,yv))
@@ -661,9 +662,9 @@
 
 ;;; ---- one macroblock ------------------------------------------------------------------------------
 
-(defparameter +dquant-table+ (make-array 4 :element-type 'fixnum :initial-contents '(-1 -2 1 2))
+(defparameter +dquant-table+ (make-array 4 :element-type '(signed-byte 32) :initial-contents '(-1 -2 1 2))
   "What the two bits after a `dquant' macroblock type do to the quantiser.")
-(declaim (type (simple-array fixnum (4)) +dquant-table+))
+(declaim (type (simple-array (signed-byte 32) (4)) +dquant-table+))
 
 (defun %block-base (st n)
   "(values plane stride base) for block N of the current macroblock."
@@ -821,14 +822,14 @@
 ;;; ---- video packets -----------------------------------------------------------------------------
 
 (defparameter +resync-prefix+
-  (make-array 8 :element-type 'fixnum
+  (make-array 8 :element-type '(signed-byte 32)
               :initial-contents '(#x7f00 #x7e00 #x7c00 #x7800 #x7000 #x6000 #x4000 #x0000))
   "What the next sixteen bits look like at each bit offset when a resync marker follows.
 
    Not the marker itself: MPEG-4 pads to a byte boundary before one with a ZERO followed by ONES,
    so what a decoder actually sees is that padding and then the marker's leading zeros.  Which
    pattern depends on how far into the byte we are, hence a table of eight.")
-(declaim (type (simple-array fixnum (8)) +resync-prefix+))
+(declaim (type (simple-array (signed-byte 32) (8)) +resync-prefix+))
 
 (defun %packet-prefix-length (st)
   "How many zeros a resync marker has, which depends on the picture type and its f_code."
@@ -1071,7 +1072,8 @@
    vertical filter is then applied to that average, and the result is averaged with it.  The
    difference is only in the rounding, and only at the diagonal positions, but it is a difference."
   (declare (type octets dst plane)
-           (type fixnum dstride dbase stride w h px py bw mvx mvy rounding)
+           (type dim dstride dbase stride w h px py)
+           (type (integer 0 64) bw) (type (signed-byte 20) mvx mvy) (type bit rounding)
            (optimize (speed 3) (safety 1)))
   (let* ((sx (+ px (ash mvx -2))) (sy (+ py (ash mvy -2)))
          (dx (logand mvx 3)) (dy (logand mvy 3))

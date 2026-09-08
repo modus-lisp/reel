@@ -32,7 +32,8 @@
    SRC-OFFSET is added to every read and is how field prediction is expressed: the two fields of a
    picture are the same plane read at twice the stride, one of them starting a row lower."
   (declare (type octets dst plane)
-           (type fixnum dstride dbase stride w h px py bw bh mvx mvy src-offset)
+           (type dim dstride dbase stride w h px py src-offset)
+           (type (integer 0 64) bw bh) (type (signed-byte 20) mvx mvy)
            (optimize (speed 3) (safety 0)))
   (let* ((sx (+ px (ash mvx -1))) (sy (+ py (ash mvy -1)))
          (hx (logand mvx 1)) (hy (logand mvy 1))
@@ -40,7 +41,7 @@
          ;; row and column a half-pel step reads, inside the picture
          (inside (and (>= sx 0) (>= sy 0)
                       (<= (+ sx bw hx) w) (<= (+ sy bh hy) h))))
-    (declare (type fixnum sx sy hx hy))
+    (declare (type (signed-byte 27) sx sy) (type bit hx hy))
     (macrolet ((each ((yv xv) form)
                  `(dotimes (,yv bh)
                     (declare (type fixnum ,yv))

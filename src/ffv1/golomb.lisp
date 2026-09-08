@@ -109,7 +109,7 @@
    correction for a predictor that is biased in this context, and the correction is applied by
    ADDING the bias and, separately, by conditionally inverting the sign — the second of which is
    the one that looks like a typo and is not."
-  (declare (type bits b) (type (simple-array fixnum (* 4)) state)
+  (declare (type bits b) (type (simple-array (signed-byte 32) (* 4)) state)
            (type fixnum ctx bits) (optimize (speed 3) (safety 1)))
   (let* ((error-sum (aref state ctx 0)) (drift (aref state ctx 1))
          (bias (aref state ctx 2)) (count (aref state ctx 3))
@@ -143,7 +143,7 @@
         ret))))
 
 (defparameter +log2-run+
-  (make-array 41 :element-type 'fixnum :initial-contents
+  (make-array 41 :element-type '(signed-byte 32) :initial-contents
    '(0  0  0  0  1  1  1  1
      2  2  2  2  3  3  3  3
      4  4  5  5  6  6  7  7
@@ -153,11 +153,11 @@
   "How many bits a run length is worth at each level of the run index: the index climbs while runs
    keep succeeding and falls when one is cut short, so a flat picture reaches runs of sixteen
    million and a busy one never leaves the first few entries.")
-(declaim (type (simple-array fixnum (41)) +log2-run+))
+(declaim (type (simple-array (signed-byte 32) (41)) +log2-run+))
 
 (defun %fresh-vlc-states (count)
   "One context's four numbers, COUNT times.  The error sum starts at four and the count at one,
    which together mean a Rice parameter of two before anything has been seen."
-  (let ((s (make-array (list (max 1 count) 4) :element-type 'fixnum :initial-element 0)))
+  (let ((s (make-array (list (max 1 count) 4) :element-type '(signed-byte 32) :initial-element 0)))
     (dotimes (i (max 1 count) s)
       (setf (aref s i 0) 4 (aref s i 3) 1))))

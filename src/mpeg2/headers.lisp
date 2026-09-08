@@ -39,7 +39,7 @@
   (full-pel-forward nil) (full-pel-backward nil)
   ;; f_code[list][component]: how many bits a motion vector residual carries, and so how far a
   ;; vector may reach.  MPEG-1 carries one per direction; MPEG-2 carries four.
-  (f-code (make-array '(2 2) :element-type 'fixnum :initial-element 15) :type (simple-array fixnum (2 2)))
+  (f-code (make-array '(2 2) :element-type '(signed-byte 32) :initial-element 15) :type (simple-array (signed-byte 32) (2 2)))
   (intra-dc-precision 0 :type fixnum)
   (structure 3 :type fixnum)                    ; 1 top field, 2 bottom field, 3 frame
   (top-field-first t)

@@ -332,8 +332,8 @@
    A reference with no flag of its own is not unweighted-by-omission: it takes the DEFAULT weight,
    which is 1 at the current denominator, and that is not the same as skipping the arithmetic."
   (let* ((n (max 1 (or (sh-num-ref-idx-l0 sh) 1)))
-         (lw (make-array (list n 2) :element-type 'fixnum))
-         (cw (make-array (list n 2 2) :element-type 'fixnum)))
+         (lw (make-array (list n 2) :element-type '(signed-byte 32)))
+         (cw (make-array (list n 2 2) :element-type '(signed-byte 32))))
     (setf (sh-weighted-p sh) t
           (sh-luma-log2-denom sh) (ue br)
           (sh-chroma-log2-denom sh) (ue br))
@@ -349,8 +349,8 @@
     (setf (sh-luma-weights sh) lw (sh-chroma-weights sh) cw)
     (when (sh-b-slice-p sh)
       (let* ((n1 (max 1 (or (sh-num-ref-idx-l1 sh) 1)))
-             (lw1 (make-array (list n1 2) :element-type 'fixnum))
-             (cw1 (make-array (list n1 2 2) :element-type 'fixnum)))
+             (lw1 (make-array (list n1 2) :element-type '(signed-byte 32)))
+             (cw1 (make-array (list n1 2 2) :element-type '(signed-byte 32))))
         (dotimes (i n1)
           (setf (aref lw1 i 0) (ash 1 (sh-luma-log2-denom sh)) (aref lw1 i 1) 0)
           (when (= 1 (u1 br))

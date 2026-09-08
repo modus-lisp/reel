@@ -37,7 +37,7 @@ just far too small to matter, so the output looks like prediction alone.")
    Both butterfly passes turn a lone d into d everywhere, so the whole transform is a fill.  This
    is not a rare case: at any ordinary quantiser most coded blocks carry only low-frequency energy,
    and a large share carry exactly one coefficient."
-  (declare (type (simple-array fixnum (16)) block) (type fixnum d)
+  (declare (type (simple-array (signed-byte 32) (16)) block) (type fixnum d)
            (optimize (speed 3) (safety 0)))
   (fill block d)
   block)
@@ -53,7 +53,7 @@ just far too small to matter, so the output looks like prediction alone.")
    block with two coefficients has fourteen positions nobody need look at.  OUT is zeroed first,
    so positions past END — and zeros inside the range — need no work at all."
   (declare (optimize (speed 3) (safety 1)))
-  (declare (type (simple-array fixnum (*)) coeffs out) (type fixnum qp start end)
+  (declare (type (simple-array (signed-byte 32) (*)) coeffs out) (type fixnum qp start end)
            (type (simple-array (unsigned-byte 8) (16)) weights))
   (fill out 0)
   ;; END is -1 when the block carried nothing, and below START when everything it carried was the
@@ -86,7 +86,7 @@ just far too small to matter, so the output looks like prediction alone.")
 (defun idct-4x4 (block)
   "In-place inverse transform of a dequantised 4x4 BLOCK, raster order.  Leaves the residual
    scaled by 64; the caller rounds with (+ 32) >> 6 when it adds to the prediction."
-  (declare (type (simple-array fixnum (16)) block) (optimize (speed 3) (safety 0)))
+  (declare (type (simple-array (signed-byte 32) (16)) block) (optimize (speed 3) (safety 0)))
   ;; rows
   (dotimes (i 4)
     (let* ((o (* i 4))
@@ -122,7 +122,7 @@ just far too small to matter, so the output looks like prediction alone.")
    reached for it for the same reason: on flat content the DCs are the only thing left and they
    correlate strongly with each other."
   (declare (optimize (speed 3) (safety 1)))
-  (declare (type (simple-array fixnum (16)) dc) (type fixnum qp))
+  (declare (type (simple-array (signed-byte 32) (16)) dc) (type fixnum qp))
   ;; Rows, then columns, of the un-normalised Hadamard (8.5.10).  The matrix is
   ;;     1  1  1  1 / 1  1 -1 -1 / 1 -1 -1  1 / 1 -1  1 -1
   ;; so with s0=a+b, s1=c+d, s2=a-b, s3=c-d the outputs are s0+s1, s0-s1, s2-s3, s2+s3 — in THAT
@@ -156,7 +156,7 @@ just far too small to matter, so the output looks like prediction alone.")
 (defun chroma-dc-transform (dc qp &optional (w0 16))
   "The 2x2 Hadamard over a chroma component's four DC coefficients (8.5.11).  DC is four elements."
   (declare (optimize (speed 3) (safety 1)))
-  (declare (type (simple-array fixnum (*)) dc) (type fixnum qp))
+  (declare (type (simple-array (signed-byte 32) (*)) dc) (type fixnum qp))
   (let* ((a (aref dc 0)) (b (aref dc 1)) (c (aref dc 2)) (d (aref dc 3))
          (e0 (+ a b)) (e1 (- a b)) (e2 (+ c d)) (e3 (- c d))
          (m (mod qp 6)) (e (floor qp 6))
@@ -173,7 +173,7 @@ just far too small to matter, so the output looks like prediction alone.")
   "Add a transformed 4x4 residual to the prediction already in PLANE at BASE, rounding by the
    transform's own scale factor of 64 and clamping."
   (declare (type (simple-array (unsigned-byte 8) (*)) plane)
-           (type (simple-array fixnum (16)) block)
+           (type (simple-array (signed-byte 32) (16)) block)
            (type fixnum stride base) (optimize (speed 3) (safety 0)))
   (dotimes (i 4)
     (let ((row (+ base (* i stride))))

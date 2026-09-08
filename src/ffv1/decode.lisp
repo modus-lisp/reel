@@ -43,7 +43,7 @@
 
    Only the first 128 entries are sent; the rest are the negation of the first, which is the
    symmetry that lets a context and its negation share a model."
-  (declare (type (simple-array fixnum (5 256)) table) (type fixnum scale row))
+  (declare (type (simple-array (signed-byte 32) (5 256)) table) (type fixnum scale row))
   ;; A FRESH STATE PER TABLE, not one shared across the five.  They are five independent run-length
   ;; codes that happen to be adjacent, and carrying the adaptation from one into the next reads the
   ;; second one against probabilities learned from the first.
@@ -62,7 +62,7 @@
 
 (defun %read-quant-tables (c)
   "The five of them, and how many contexts they produce between them."
-  (let ((table (make-array '(5 256) :element-type 'fixnum :initial-element 0))
+  (let ((table (make-array '(5 256) :element-type '(signed-byte 32) :initial-element 0))
         (count 1))
     (declare (type fixnum count))
     (dotimes (i 5)
@@ -118,7 +118,7 @@
           (cfg-v-slices cfg) (1+ (get-symbol c state nil)))
     (let ((n (get-symbol c state nil)))
       (when (or (zerop n) (> n 8)) (%err "~d quantiser tables" n))
-      (let ((tables (make-array n)) (counts (make-array n :element-type 'fixnum)))
+      (let ((tables (make-array n)) (counts (make-array n :element-type '(signed-byte 32))))
         (dotimes (i n)
           (multiple-value-bind (tbl cnt) (%read-quant-tables c)
             (setf (aref tables i) tbl (aref counts i) cnt)))
@@ -183,7 +183,7 @@
   (setf (cfg-plane-count cfg) (+ 2 (if (cfg-transparency cfg) 1 0)))
   (multiple-value-bind (tbl cnt) (%read-quant-tables c)
     (setf (cfg-quant-tables cfg) (vector tbl)
-          (cfg-context-counts cfg) (make-array 1 :element-type 'fixnum :initial-element cnt)
+          (cfg-context-counts cfg) (make-array 1 :element-type '(signed-byte 32) :initial-element cnt)
           (cfg-initial-states cfg) (make-array 1 :initial-element nil)))
   cfg)
 
@@ -228,7 +228,7 @@
    This is the LOCO-I / JPEG-LS predictor and it is chosen for what it does at EDGES: on a vertical
    edge it picks the sample above, on a horizontal one the sample to the left, and on a gradient the
    planar extrapolation.  A plain average would smear all three."
-  (declare (type (simple-array fixnum (*)) buf) (type fixnum i last)
+  (declare (type (simple-array (signed-byte 32) (*)) buf) (type fixnum i last)
            (optimize (speed 3) (safety 0)))
   (let ((lt (aref buf (- last 1))) (tt (aref buf last)) (l (aref buf (- i 1))))
     (declare (type fixnum lt tt l))
@@ -237,8 +237,8 @@
 (declaim (inline %context))
 (defun %context (qt buf i last last2 five-p)
   "Which probability model this sample uses, from the quantised gradients around it."
-  (declare (type (simple-array fixnum (5 256)) qt)
-           (type (simple-array fixnum (*)) buf) (type fixnum i last last2)
+  (declare (type (simple-array (signed-byte 32) (5 256)) qt)
+           (type (simple-array (signed-byte 32) (*)) buf) (type fixnum i last last2)
            (optimize (speed 3) (safety 0)))
   (let ((lt (aref buf (- last 1))) (tt (aref buf last)) (rt (aref buf (+ last 1)))
         (l (aref buf (- i 1))))
@@ -263,7 +263,7 @@
   (run-index 0 :type fixnum)                    ; reset per plane, carried across that plane's lines
   (start 0 :type fixnum)                        ; where this slice's bytes begin, for the handover
   (x 0 :type fixnum) (y 0 :type fixnum) (w 0 :type fixnum) (h 0 :type fixnum)
-  (quant-index (make-array 4 :element-type 'fixnum :initial-element 0) :type (simple-array fixnum (4)))
+  (quant-index (make-array 4 :element-type '(signed-byte 32) :initial-element 0) :type (simple-array (signed-byte 32) (4)))
   (coding-mode 0 :type fixnum)
   (rct-by 1 :type fixnum) (rct-ry 1 :type fixnum)
   states)                                       ; per plane: (context-count x 32) octets
@@ -284,8 +284,8 @@
    The residual's model is chosen per SAMPLE from the neighbourhood, and a model and its mirror are
    the same model read backwards — a negative context means `decode as usual and then negate', which
    halves the number of models a picture needs to learn."
-  (declare (type (simple-array fixnum (5 256)) qt)
-           (type (simple-array fixnum (*)) buf)
+  (declare (type (simple-array (signed-byte 32) (5 256)) qt)
+           (type (simple-array (signed-byte 32) (*)) buf)
            (type (simple-array (unsigned-byte 8) (* 32)) states)
            (type fixnum w cur last last2 bits)
            (optimize (speed 3) (safety 1)))
@@ -325,9 +325,9 @@
    The run continues until a sample disagrees, and the residual that ends it is coded with one
    added to it, because a residual of zero would not have ended it."
   (declare (ignore cfg)
-           (type (simple-array fixnum (5 256)) qt)
-           (type (simple-array fixnum (*)) buf)
-           (type (simple-array fixnum (* 4)) states)
+           (type (simple-array (signed-byte 32) (5 256)) qt)
+           (type (simple-array (signed-byte 32) (*)) buf)
+           (type (simple-array (signed-byte 32) (* 4)) states)
            (type fixnum w cur last last2 bits)
            (optimize (speed 3) (safety 1)))
   (let* ((b (sl-gb sl))
@@ -393,7 +393,7 @@
   (declare (type octets dst) (type fixnum stride ox oy w h bits)
            (optimize (speed 3) (safety 1)))
   (let* ((n (+ w 6))
-         (buf (make-array (* 2 n) :element-type 'fixnum :initial-element 0))
+         (buf (make-array (* 2 n) :element-type '(signed-byte 32) :initial-element 0))
          (cur (+ n 3)) (last 3))
     (declare (type fixnum n cur last))
     ;; the Rice coder's run level restarts at each plane and is carried across that plane's lines
@@ -614,20 +614,20 @@
   (let* ((w (sl-w sl)) (h (sl-h sl))
          (n (+ w 6))
          (bufs (make-array 3))
-         (cur (make-array 3 :element-type 'fixnum :initial-element (+ n 3)))
-         (last (make-array 3 :element-type 'fixnum :initial-element 3))
+         (cur (make-array 3 :element-type '(signed-byte 32) :initial-element (+ n 3)))
+         (last (make-array 3 :element-type '(signed-byte 32) :initial-element 3))
          (offset (ash 1 (cfg-bits cfg)))
          (g (fr-y frame)) (b (fr-u frame)) (r (fr-v frame))
          (stride (fr-ystride frame)))
     (declare (type fixnum w h n offset stride))
-    (dotimes (p 3) (setf (aref bufs p) (make-array (* 2 n) :element-type 'fixnum
+    (dotimes (p 3) (setf (aref bufs p) (make-array (* 2 n) :element-type '(signed-byte 32)
                                                    :initial-element 0)))
     (setf (sl-run-index sl) 0)
     (dotimes (y h)
       (declare (type fixnum y))
       (dotimes (p 3)
         (let ((buf (aref bufs p)))
-          (declare (type (simple-array fixnum (*)) buf))
+          (declare (type (simple-array (signed-byte 32) (*)) buf))
           (rotatef (aref cur p) (aref last p))
           (setf (aref buf (- (aref cur p) 1)) (aref buf (aref last p))
                 (aref buf (+ (aref last p) w)) (aref buf (+ (aref last p) w -1)))
@@ -646,10 +646,10 @@
         (declare (type fixnum o))
         (dotimes (x w)
           (declare (type fixnum x))
-          (let* ((gv (aref (the (simple-array fixnum (*)) (aref bufs 0)) (+ (aref cur 0) x)))
-                 (bv (- (aref (the (simple-array fixnum (*)) (aref bufs 1)) (+ (aref cur 1) x))
+          (let* ((gv (aref (the (simple-array (signed-byte 32) (*)) (aref bufs 0)) (+ (aref cur 0) x)))
+                 (bv (- (aref (the (simple-array (signed-byte 32) (*)) (aref bufs 1)) (+ (aref cur 1) x))
                         offset))
-                 (rv (- (aref (the (simple-array fixnum (*)) (aref bufs 2)) (+ (aref cur 2) x))
+                 (rv (- (aref (the (simple-array (signed-byte 32) (*)) (aref bufs 2)) (+ (aref cur 2) x))
                         offset)))
             (declare (type fixnum gv bv rv))
             (decf gv (ash (+ (* bv (sl-rct-by sl)) (* rv (sl-rct-ry sl))) -2))

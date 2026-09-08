@@ -342,3 +342,34 @@ and the boundary-strength computation, in that order. None of them is obviously 
 **What did NOT change: all-intra decoding, at all.** None of the above runs when there is no motion.
 That is worth stating because it is the thing a benchmark on the wrong clip would hide — the two
 all-intra measurements moved by less than the noise, and only the inter ones moved at all.
+
+## What made it a third faster, and it was not the algorithms
+
+The decoder went from about 43 to 57 pictures a second on 640x360 with P and B pictures, bit-exact
+throughout, without a line of it doing anything different.
+
+**Every `(simple-array fixnum)` is a `(signed-byte 64)` array.** SBCL upgrades the element type, so
+`(aref a i)` on one has a type sixty-four bits wide and a fixnum is sixty-two — the compiler cannot
+prove the value it just loaded is one, and every sum or product of two of them is an out-of-line
+call. The per-block motion, reference and coefficient-count arrays in `picture.lisp` are all such
+arrays and all hold small integers. Thirty-two bits made the arithmetic on them inline.
+
+**The scalar slots mattered more than the arrays.** `ystride`, `yoff`, `cstride`, `coff` and the
+dimensions were `fixnum`, so `(+ yoff (* y ystride))` — which every sample the decoder reads goes
+through — was two generic calls. Declaring them `(unsigned-byte 26)`, which holds any offset into
+any plane H.264 permits and still multiplies to a fixnum, is where most of the gain is. The
+`+no-ref-poc+` sentinel had to stop being `most-negative-fixnum` for the same reason: it lives in
+one of those arrays.
+
+**The six-tap filter was doing five generic multiplies per tap.** `%tap6` declared its arguments
+`fixnum`, and `(* 20 c)` on a fixnum is not provably a fixnum. A tap is a sample or an unrounded
+half-sample; twenty-four bits is generous.
+
+**The deblocking filter was the largest single item and is now a twentieth of the profile.**
+`%boundary-strength` went from 10.3 per cent of the decode to 4.8 on the same change: block
+coordinates and thresholds declared narrow instead of `fixnum`, and the eight samples either side
+of an edge declared `(unsigned-byte 8)` rather than widened to `fixnum` on the way in.
+
+None of this is H.264-specific — the same sweep was worth between 1.3 and 2.2 times on every other
+decoder in the repository. `src/vp9/NOTES.md` has the fullest account, including what was tried and
+reverted.

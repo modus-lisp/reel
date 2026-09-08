@@ -227,7 +227,7 @@
   ;; Table 7-14, mb_type 0..22: (partition-count width height mode0 mode1).  Type 22 is B_8x8,
   ;; whose four partitions carry their own sub types.  Anything above 22 is an intra macroblock
   ;; with 23 subtracted.
-  (make-array '(23 5) :element-type 'fixnum :initial-contents
+  (make-array '(23 5) :element-type '(signed-byte 32) :initial-contents
    '((1 16 16 3 3)      ; B_Direct_16x16
      (1 16 16 0 0)      ; B_L0_16x16
      (1 16 16 1 1)      ; B_L1_16x16
@@ -254,7 +254,7 @@
 
 (defparameter +b-sub+
   ;; Table 7-18, sub_mb_type 0..12: (sub-partition-count width height mode).
-  (make-array '(13 4) :element-type 'fixnum :initial-contents
+  (make-array '(13 4) :element-type '(signed-byte 32) :initial-contents
    '((4 4 4 3)          ; B_Direct_8x8 — four 4x4 blocks, each inferred
      (1 8 8 0)          ; B_L0_8x8
      (1 8 8 1)          ; B_L1_8x8
@@ -269,8 +269,8 @@
      (4 4 4 1)          ; B_L1_4x4
      (4 4 4 2))))       ; B_Bi_4x4
 
-(declaim (type (simple-array fixnum (23 5)) +b-part+))
-(declaim (type (simple-array fixnum (13 4)) +b-sub+))
+(declaim (type (simple-array (signed-byte 32) (23 5)) +b-part+))
+(declaim (type (simple-array (signed-byte 32) (13 4)) +b-sub+))
 
 (declaim (inline pred-uses-l0-p pred-uses-l1-p))
 (defun pred-uses-l0-p (m) (or (= m +pred-l0+) (= m +pred-bi+)))

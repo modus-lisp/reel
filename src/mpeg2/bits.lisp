@@ -22,7 +22,16 @@
   (error 'mpeg2-error :message (apply #'format nil fmt args)))
 
 (deftype octets () '(simple-array (unsigned-byte 8) (*)))
-(deftype fixnums () '(simple-array fixnum (*)))
+(deftype fixnums () '(simple-array (signed-byte 32) (*)))
+(deftype dim ()
+  "A picture dimension, a plane stride, or an offset into a plane.
+
+   Twenty-six bits rather than FIXNUM, because SBCL cannot prove that the product of two fixnums is
+   a fixnum and `(* row stride)\' — which every predicted sample goes through — therefore compiled
+   to an out-of-line call.  Twenty-six bits holds any offset into any plane these formats permit,
+   and two of them multiply to something a fixnum still holds."
+  '(unsigned-byte 26))
+
 
 ;;; ---- start codes (Table 6-1) -----------------------------------------------------------------
 
@@ -136,7 +145,7 @@
    defaults to the entry's position, which is how the specification prints every one of these
    tables — the code for macroblock_address_increment 7 is simply the seventh entry."
   (let* ((maxlen (reduce #'max entries :key #'second))
-         (out (make-array (ash 1 maxlen) :element-type 'fixnum :initial-element 0)))
+         (out (make-array (ash 1 maxlen) :element-type '(signed-byte 32) :initial-element 0)))
     (loop for e in entries for i from 0
           do (destructuring-bind (code len &optional (value i)) e
                (let ((base (ash code (- maxlen len)))

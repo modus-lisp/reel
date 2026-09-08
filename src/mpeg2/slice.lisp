@@ -81,20 +81,20 @@
   (qscale 2 :type fixnum)
   ;; DC predictors, one per component.  Reset at the start of a slice and by every non-intra
   ;; macroblock, which is why an intra macroblock beside an inter one predicts from grey.
-  (dc (make-array 3 :element-type 'fixnum) :type fixnums)
+  (dc (make-array 3 :element-type '(signed-byte 32)) :type fixnums)
   ;; PMV[list][slot][component]: the running motion vector predictor.  Two slots because field
   ;; prediction in a frame picture carries a vector per field.
-  (pmv (make-array '(2 2 2) :element-type 'fixnum :initial-element 0)
-       :type (simple-array fixnum (2 2 2)))
+  (pmv (make-array '(2 2 2) :element-type '(signed-byte 32) :initial-element 0)
+       :type (simple-array (signed-byte 32) (2 2 2)))
   ;; the vectors this macroblock actually uses, and which reference field each came from
-  (mv (make-array '(2 2 2) :element-type 'fixnum :initial-element 0)
-      :type (simple-array fixnum (2 2 2)))
-  (field-select (make-array '(2 2) :element-type 'fixnum :initial-element 0)
-                :type (simple-array fixnum (2 2)))
+  (mv (make-array '(2 2 2) :element-type '(signed-byte 32) :initial-element 0)
+      :type (simple-array (signed-byte 32) (2 2 2)))
+  (field-select (make-array '(2 2) :element-type '(signed-byte 32) :initial-element 0)
+                :type (simple-array (signed-byte 32) (2 2)))
   (mv-type +mt-frame+ :type fixnum)
   (mb-flags 0 :type fixnum)                     ; the previous macroblock's, for B skips
   (interlaced-dct nil)
-  (block (make-array 64 :element-type 'fixnum) :type (simple-array fixnum (64))))
+  (block (make-array 64 :element-type '(signed-byte 32)) :type (simple-array (signed-byte 32) (64))))
 
 (declaim (inline %escape-level %oddify))
 (defun %escape-level (br mpeg1-p)

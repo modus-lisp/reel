@@ -26,12 +26,12 @@
    point outside the picture entirely, and the edge sample is repeated for as far as it does.  The
    padding around the planes is not what makes this safe — a vector can be much larger than the
    padding — the clamp is."
-  (declare (type picture pic) (type fixnum x y) (optimize (speed 3) (safety 0)))
+  (declare (type picture pic) (type (signed-byte 26) x y) (optimize (speed 3) (safety 0)))
   (let ((w (* 16 (pic-mb-width pic))) (h (* 16 (pic-mb-height pic))))
-    (declare (type fixnum w h))
+    (declare (type dim w h))
     (let ((cx (if (< x 0) 0 (if (>= x w) (1- w) x)))
           (cy (if (< y 0) 0 (if (>= y h) (1- h) y))))
-      (declare (type fixnum cx cy))
+      (declare (type dim cx cy))
       (aref (pic-y pic) (+ (pic-yoff pic) (* cy (pic-ystride pic)) cx)))))
 
 (declaim (inline %ref-luma-fast %ref-chroma-fast))
@@ -39,34 +39,41 @@
   "The same sample WITHOUT the clamp, for a block whose whole source rectangle is inside the
    picture — which is nearly all of them, and the clamp is six comparisons and two multiplies per
    tap of a thirty-six tap filter."
-  (declare (type picture pic) (type fixnum x y) (optimize (speed 3) (safety 0)))
+  (declare (type picture pic) (type (signed-byte 26) x y) (optimize (speed 3) (safety 0)))
   (aref (pic-y pic) (+ (pic-yoff pic) (* y (pic-ystride pic)) x)))
 
 (defun %ref-chroma-fast (plane pic x y)
-  (declare (type (simple-array (unsigned-byte 8) (*)) plane) (type picture pic) (type fixnum x y)
+  (declare (type (simple-array (unsigned-byte 8) (*)) plane) (type picture pic)
+           (type (signed-byte 26) x y)
            (optimize (speed 3) (safety 0)))
   (aref plane (+ (pic-coff pic) (* y (pic-cstride pic)) x)))
 
 (defun %ref-chroma (plane pic x y)
-  (declare (type (simple-array (unsigned-byte 8) (*)) plane) (type picture pic) (type fixnum x y)
+  (declare (type (simple-array (unsigned-byte 8) (*)) plane) (type picture pic)
+           (type (signed-byte 26) x y)
            (optimize (speed 3) (safety 0)))
   (let ((w (* 8 (pic-mb-width pic))) (h (* 8 (pic-mb-height pic))))
-    (declare (type fixnum w h))
+    (declare (type dim w h))
     (let ((cx (if (< x 0) 0 (if (>= x w) (1- w) x)))
           (cy (if (< y 0) 0 (if (>= y h) (1- h) y))))
-      (declare (type fixnum cx cy))
+      (declare (type dim cx cy))
       (aref plane (+ (pic-coff pic) (* cy (pic-cstride pic)) cx)))))
 
 ;;; ---- the six-tap, and the sixteen sample positions ------------------------------------------------
 
 (declaim (inline %tap6))
 (defun %tap6 (a b c d e f)
-  (declare (type fixnum a b c d e f) (optimize (speed 3) (safety 0)))
+  ;; TWENTY-FOUR BITS, not FIXNUM: a fixnum times twenty is not provably a fixnum, so every one of
+  ;; the five multiplies below became an out-of-line call.  A tap is a sample or an unrounded
+  ;; half-sample, and neither leaves a few thousand.
+  (declare (type (signed-byte 24) a b c d e f) (optimize (speed 3) (safety 0)))
   (+ a (* -5 b) (* 20 c) (* 20 d) (* -5 e) f))
 
 (declaim (inline %r5 %avg))
-(defun %r5 (v) (declare (type fixnum v) (optimize (speed 3) (safety 0))) (clamp255 (ash (+ v 16) -5)))
-(defun %avg (a b) (declare (type fixnum a b) (optimize (speed 3) (safety 0))) (ash (+ a b 1) -1))
+(defun %r5 (v) (declare (type (signed-byte 24) v) (optimize (speed 3) (safety 0)))
+  (clamp255 (ash (+ v 16) -5)))
+(defun %avg (a b) (declare (type (signed-byte 24) a b) (optimize (speed 3) (safety 0)))
+  (ash (+ a b 1) -1))
 
 ;;; TWO COPIES OF THE SAME SAMPLER, generated rather than written.  They differ in one thing: how a
 ;;; reference sample is read.  The specification's rule is that a vector may point outside the
@@ -81,13 +88,13 @@
           (declaim (inline ,h6 ,v6))
           (defun ,h6 (ref x y)
             "The unrounded horizontal half-sample between (X,Y) and (X+1,Y)."
-            (declare (type fixnum x y) (optimize (speed 3) (safety 0)))
+            (declare (type (signed-byte 26) x y) (optimize (speed 3) (safety 0)))
             (%tap6 (,refer ref (- x 2) y) (,refer ref (- x 1) y) (,refer ref x y)
                    (,refer ref (+ x 1) y) (,refer ref (+ x 2) y) (,refer ref (+ x 3) y)))
 
           (defun ,v6 (ref x y)
             "The unrounded vertical half-sample between (X,Y) and (X,Y+1)."
-            (declare (type fixnum x y) (optimize (speed 3) (safety 0)))
+            (declare (type (signed-byte 26) x y) (optimize (speed 3) (safety 0)))
             (%tap6 (,refer ref x (- y 2)) (,refer ref x (- y 1)) (,refer ref x y)
                    (,refer ref x (+ y 1)) (,refer ref x (+ y 2)) (,refer ref x (+ y 3))))
 
@@ -97,7 +104,8 @@
    The letters are the specification's: b and h are the half positions right and below the integer
    sample G, j is the centre, m is the half position below G's right neighbour and s the one right
    of G's lower neighbour.  Every quarter position is the average of two of those."
-            (declare (type fixnum x y xf yf) (optimize (speed 3) (safety 0)))
+            (declare (type (signed-byte 26) x y) (type (integer 0 3) xf yf)
+                     (optimize (speed 3) (safety 0)))
             (cond
               ;; integer position
               ((and (zerop xf) (zerop yf)) (,refer ref x y))
@@ -357,12 +365,15 @@
    One rounding, not two: the two predictions are combined and rounded once, which is why this
    cannot be expressed as weighting each side and then averaging."
   (declare (type (simple-array (unsigned-byte 8) (*)) dst src)
-           (type fixnum dstride dbase sstride sbase w h w0 w1 log2-denom o0 o1)
+           (type fixnum dstride dbase sstride sbase w h)
+           ;; the weights and the denominator are bounded by the standard, and saying so is what
+           ;; turns the shift below from a call into an instruction
+           (type (signed-byte 16) w0 w1 o0 o1) (type (integer 0 7) log2-denom)
            (optimize (speed 3) (safety 1)))
   (let ((round (ash 1 log2-denom))
         (shift (1+ log2-denom))
         (off (ash (+ o0 o1 1) -1)))
-    (declare (type fixnum round shift off))
+    (declare (type fixnum round off) (type (integer 1 8) shift))
     (dotimes (j h)
       (let ((d (+ dbase (* j dstride))) (s (+ sbase (* j sstride))))
         (declare (type fixnum d s))

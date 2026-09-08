@@ -20,17 +20,17 @@
 (defparameter +blk-x+
   ;; luma block index (0..15) to its x position in 4-sample units: 8x8 sub-blocks in raster
   ;; order, and 4x4 blocks in raster order inside each of those
-  (make-array 16 :element-type 'fixnum
+  (make-array 16 :element-type '(signed-byte 32)
                  :initial-contents '(0 1 0 1  2 3 2 3  0 1 0 1  2 3 2 3)))
 (defparameter +blk-y+
-  (make-array 16 :element-type 'fixnum
+  (make-array 16 :element-type '(signed-byte 32)
                  :initial-contents '(0 0 1 1  0 0 1 1  2 2 3 3  2 2 3 3)))
 
 (defparameter +blk-index+
   ;; the inverse of +BLK-X+/+BLK-Y+: which block index sits at (x, y) in 4x4 units.  Needed to ask
   ;; "has that neighbour been decoded yet", which is a question about DECODING ORDER, and decoding
   ;; order here is 8x8 sub-blocks in raster with 4x4s in raster inside them — not raster overall.
-  (make-array '(4 4) :element-type 'fixnum
+  (make-array '(4 4) :element-type '(signed-byte 32)
                      :initial-contents '((0 1 4 5)
                                          (2 3 6 7)
                                          (8 9 12 13)
@@ -48,25 +48,36 @@
 
 (defconstant +pad+ 16 "Border samples around each plane, so a neighbour read at -1 is in bounds.")
 
-(defconstant +no-ref-poc+ most-negative-fixnum
+(defconstant +no-ref-poc+ (- (ash 1 31))
   "Stands in the reference-picture array for `this list predicts nothing here'.  A real picture
-order count can be negative, so absence needs a value no picture can hold.")
+order count can be negative, so absence needs a value no picture can hold — and one that fits in
+the thirty-two bits the array is, which is why it is not MOST-NEGATIVE-FIXNUM.")
 
-(deftype fixnums () '(simple-array fixnum (*)))
+(deftype fixnums () '(simple-array (signed-byte 32) (*)))
 
 (declaim (inline %empty8 %emptyfx))
 (defun %empty8 () (make-array 0 :element-type '(unsigned-byte 8)))
-(defun %emptyfx () (make-array 0 :element-type 'fixnum))
+(defun %emptyfx () (make-array 0 :element-type '(signed-byte 32)))
+
+(deftype dim ()
+  "A picture dimension, a plane stride, or an offset into a plane.
+
+   TWENTY-SIX BITS, not FIXNUM, and the difference is the point: SBCL cannot prove that the sum or
+   product of two fixnums is a fixnum, so `(+ yoff (* row ystride))' — which every sample read in
+   the decoder goes through — compiled to out-of-line generic arithmetic.  Twenty-six bits holds
+   any offset into any plane H.264 permits (4096x2304 padded is under ten million samples) and two
+   of them multiply to something a fixnum still holds, so the whole of that arithmetic is inline."
+  '(unsigned-byte 26))
 
 (defstruct (picture (:conc-name pic-))
-  (width 0 :type fixnum) (height 0 :type fixnum)          ; displayed, after cropping
-  (mb-width 0 :type fixnum) (mb-height 0 :type fixnum)
+  (width 0 :type dim) (height 0 :type dim)                ; displayed, after cropping
+  (mb-width 0 :type dim) (mb-height 0 :type dim)
   ;; TYPED, and it matters more than it looks.  Every sample the decoder reads or writes goes
   ;; through one of these slots, and an untyped slot makes each of those a generic array dispatch
   ;; at run time — it measured at 4% of decode time all by itself.
   (y (%empty8) :type octets) (u (%empty8) :type octets) (v (%empty8) :type octets)
-  (ystride 0 :type fixnum) (cstride 0 :type fixnum)
-  (yoff 0 :type fixnum) (coff 0 :type fixnum)
+  (ystride 0 :type dim) (cstride 0 :type dim)
+  (yoff 0 :type dim) (coff 0 :type dim)
   ;; per-4x4-block coefficient counts, for nC
   (nz-y (%emptyfx) :type fixnums) (nz-u (%emptyfx) :type fixnums) (nz-v (%emptyfx) :type fixnums)
   ;; per-4x4-block Intra4x4 prediction modes, and per-macroblock facts the loop filter needs
@@ -76,8 +87,8 @@ order count can be negative, so absence needs a value no picture can hold.")
   ;; prediction correct without either of them having to learn about inter macroblocks.
   (mb-types (%emptyfx) :type fixnums)
   (mb-qps (%emptyfx) :type fixnums)
-  (frame-num 0 :type fixnum)            ; this picture's frame_num, which is its PicNum for a frame
-  (poc 0 :type fixnum)                  ; picture order count: where it goes on SCREEN, not in the stream
+  (frame-num 0 :type dim)               ; this picture's frame_num, which is its PicNum for a frame
+  (poc 0 :type (signed-byte 30))                  ; picture order count: where it goes on SCREEN, not in the stream
   (ref-p nil)                           ; was it kept as a reference picture
   ;; Motion, per 4x4 block, for BOTH reference lists.  A B slice can predict a block from two
   ;; pictures at once, so every one of these is two deep: mvs holds l0x l0y l1x l1y, refs and
@@ -119,22 +130,22 @@ order count can be negative, so absence needs a value no picture can hold.")
      :v (make-array (* cs (+ (ash ah -1) (* 2 +pad+))) :element-type '(unsigned-byte 8) :initial-element 128)
      :ystride ys :cstride cs
      :yoff (+ (* +pad+ ys) +pad+) :coff (+ (* +pad+ cs) +pad+)
-     :nz-y (make-array (* mbw 4 mbh 4) :element-type 'fixnum :initial-element 0)
-     :nz-u (make-array (* mbw 2 mbh 2) :element-type 'fixnum :initial-element 0)
-     :nz-v (make-array (* mbw 2 mbh 2) :element-type 'fixnum :initial-element 0)
-     :modes (make-array (* mbw 4 mbh 4) :element-type 'fixnum :initial-element 2)
-     :mb-types (make-array (* mbw mbh) :element-type 'fixnum :initial-element -1)
-     :mb-qps (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0)
-     :mvs (make-array (* mbw 4 mbh 4 4) :element-type 'fixnum :initial-element 0)
-     :refs (make-array (* mbw 4 mbh 4 2) :element-type 'fixnum :initial-element -1)
-     :mvds (make-array (* mbw 4 mbh 4 4) :element-type 'fixnum :initial-element 0)
-     :ref-pics (make-array (* mbw 4 mbh 4 2) :element-type 'fixnum
+     :nz-y (make-array (* mbw 4 mbh 4) :element-type '(signed-byte 32) :initial-element 0)
+     :nz-u (make-array (* mbw 2 mbh 2) :element-type '(signed-byte 32) :initial-element 0)
+     :nz-v (make-array (* mbw 2 mbh 2) :element-type '(signed-byte 32) :initial-element 0)
+     :modes (make-array (* mbw 4 mbh 4) :element-type '(signed-byte 32) :initial-element 2)
+     :mb-types (make-array (* mbw mbh) :element-type '(signed-byte 32) :initial-element -1)
+     :mb-qps (make-array (* mbw mbh) :element-type '(signed-byte 32) :initial-element 0)
+     :mvs (make-array (* mbw 4 mbh 4 4) :element-type '(signed-byte 32) :initial-element 0)
+     :refs (make-array (* mbw 4 mbh 4 2) :element-type '(signed-byte 32) :initial-element -1)
+     :mvds (make-array (* mbw 4 mbh 4 4) :element-type '(signed-byte 32) :initial-element 0)
+     :ref-pics (make-array (* mbw 4 mbh 4 2) :element-type '(signed-byte 32)
                            :initial-element +no-ref-poc+)
-     :blk-direct (make-array (* mbw 4 mbh 4) :element-type 'fixnum :initial-element 0)
-     :mb-cbp (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0)
-     :mb-chroma-mode (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0)
-     :mb-dc-cbf (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0)
-     :mb-tf8 (make-array (* mbw mbh) :element-type 'fixnum :initial-element 0))))
+     :blk-direct (make-array (* mbw 4 mbh 4) :element-type '(signed-byte 32) :initial-element 0)
+     :mb-cbp (make-array (* mbw mbh) :element-type '(signed-byte 32) :initial-element 0)
+     :mb-chroma-mode (make-array (* mbw mbh) :element-type '(signed-byte 32) :initial-element 0)
+     :mb-dc-cbf (make-array (* mbw mbh) :element-type '(signed-byte 32) :initial-element 0)
+     :mb-tf8 (make-array (* mbw mbh) :element-type '(signed-byte 32) :initial-element 0))))
 
 (declaim (inline pic-y-base pic-c-base))
 (defun pic-y-base (p mbx mby)
@@ -161,12 +172,12 @@ order count can be negative, so absence needs a value no picture can hold.")
   (mbx 0 :type fixnum) (mby 0 :type fixnum)
   (qp 26 :type fixnum)
   ;; typed for the same reason the picture's planes are: these are read and written per block
-  (coeffs (make-array 16 :element-type 'fixnum) :type fixnums)   ; scan-order scratch
-  (block (make-array 16 :element-type 'fixnum) :type fixnums)    ; raster-order scratch
-  (luma-dc (make-array 16 :element-type 'fixnum) :type fixnums)
-  (chroma-dc (make-array 4 :element-type 'fixnum) :type fixnums)
+  (coeffs (make-array 16 :element-type '(signed-byte 32)) :type fixnums)   ; scan-order scratch
+  (block (make-array 16 :element-type '(signed-byte 32)) :type fixnums)    ; raster-order scratch
+  (luma-dc (make-array 16 :element-type '(signed-byte 32)) :type fixnums)
+  (chroma-dc (make-array 4 :element-type '(signed-byte 32)) :type fixnums)
   ;; the second plane's, so neither is per-macroblock
-  (chroma-dc-v (make-array 4 :element-type 'fixnum) :type fixnums)
+  (chroma-dc-v (make-array 4 :element-type '(signed-byte 32)) :type fixnums)
   (pred (make-array 16 :element-type '(unsigned-byte 8)) :type octets)
   (pt (make-array 9 :element-type '(unsigned-byte 8)) :type octets)
   (pl (make-array 4 :element-type '(unsigned-byte 8)) :type octets)
@@ -182,8 +193,8 @@ order count can be negative, so absence needs a value no picture can hold.")
   ;; 8x8 scratch, the 4x4 scratch widened.  PT8 is sixteen wide because the diagonal modes reach
   ;; past the block into the above-right neighbour, and PTL8 is a one-element array only so that
   ;; GATHER-8X8-NEIGHBOURS can return the filtered corner by writing to it.
-  (coeffs8 (make-array 64 :element-type 'fixnum) :type fixnums)
-  (block8 (make-array 64 :element-type 'fixnum) :type fixnums)
+  (coeffs8 (make-array 64 :element-type '(signed-byte 32)) :type fixnums)
+  (block8 (make-array 64 :element-type '(signed-byte 32)) :type fixnums)
   (pred8 (make-array 64 :element-type '(unsigned-byte 8)) :type octets)
   (pt8 (make-array 16 :element-type '(unsigned-byte 8)) :type octets)
   (pl8 (make-array 8 :element-type '(unsigned-byte 8)) :type octets)

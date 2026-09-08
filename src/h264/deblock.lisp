@@ -38,13 +38,13 @@ negative slice offset still lands inside the array instead of before it.")
   "Filter one line of samples across an edge.  Q0I indexes q0; STEP is the distance from one
    sample to the next ACROSS the edge (1 for a vertical edge, the stride for a horizontal one)."
   (declare (type (simple-array (unsigned-byte 8) (*)) plane)
-           (type fixnum q0i step bs alpha beta tc0)
+           (type dim q0i step) (type (signed-byte 16) bs alpha beta tc0)
            (optimize (speed 3) (safety 0)))
   (let* ((p0 (aref plane (- q0i step))) (p1 (aref plane (- q0i (* 2 step))))
          (p2 (aref plane (- q0i (* 3 step)))) (p3 (aref plane (- q0i (* 4 step))))
          (q0 (aref plane q0i)) (q1 (aref plane (+ q0i step)))
          (q2 (aref plane (+ q0i (* 2 step)))) (q3 (aref plane (+ q0i (* 3 step)))))
-    (declare (type fixnum p0 p1 p2 p3 q0 q1 q2 q3))
+    (declare (type (unsigned-byte 8) p0 p1 p2 p3 q0 q1 q2 q3))
     ;; the gate: a step bigger than alpha across the edge, or beta within either side, is taken
     ;; to be real detail and left alone
     (unless (and (< (abs (- p0 q0)) alpha)
@@ -52,7 +52,7 @@ negative slice offset still lands inside the array instead of before it.")
                  (< (abs (- q1 q0)) beta))
       (return-from %filter-line nil))
     (let ((ap (abs (- p2 p0))) (aq (abs (- q2 q0))))
-      (declare (type fixnum ap aq))
+      (declare (type (unsigned-byte 9) ap aq))
       (cond
         ((= bs 4)
          (cond
@@ -95,7 +95,8 @@ negative slice offset still lands inside the array instead of before it.")
 
 (defun %filter-edge (plane q0i step line-step count bs qp alpha-off beta-off chroma-p)
   "Filter COUNT lines of one edge.  QP is the average of the two sides' quantisers."
-  (declare (type fixnum q0i step line-step count bs qp alpha-off beta-off)
+  (declare (type dim q0i step line-step) (type (integer 0 64) count)
+           (type (signed-byte 16) bs qp alpha-off beta-off)
            (type (simple-array (unsigned-byte 8) (*)) plane)
            (optimize (speed 3) (safety 1)))
   (when (zerop bs) (return-from %filter-edge nil))
@@ -104,7 +105,7 @@ negative slice offset still lands inside the array instead of before it.")
          (alpha (aref +alpha-table+ ia))
          (beta (aref +beta-table+ ib))
          (tc0 (if (= bs 4) 0 (aref +tc0-table+ ia bs))))
-    (declare (type fixnum ia ib alpha beta tc0))
+    (declare (type (signed-byte 16) ia ib alpha beta tc0))
     (when (or (zerop alpha) (zerop beta)) (return-from %filter-edge nil))
     ;; FOUR LOOPS, not one.  CHROMA-P and "is bS 4" are constant for a whole edge, but tested per
     ;; line inside the filter, and at 1080p this is 34% of decode: about 1.6 million filtered lines
@@ -127,7 +128,7 @@ negative slice offset still lands inside the array instead of before it.")
 (declaim (inline %far-apart))
 (defun %far-apart (ax ay bx by)
   "Did these two vectors part company by a whole sample or more?  Quarter-pel units, so four."
-  (declare (type fixnum ax ay bx by) (optimize (speed 3) (safety 0)))
+  (declare (type (signed-byte 20) ax ay bx by) (optimize (speed 3) (safety 0)))
   (or (>= (abs (- ax bx)) 4) (>= (abs (- ay by)) 4)))
 
 (declaim (inline %block-motion))
@@ -135,7 +136,7 @@ negative slice offset still lands inside the array instead of before it.")
   "(values n pocA mvAx mvAy pocB mvBx mvBy) for one block: how many predictions it used, and each
    one's picture and vector.  A block predicting only from list 1 answers with that in the A slot,
    because what matters downstream is the SET of predictions, not which list held them."
-  (declare (type picture pic) (type fixnum bx by) (optimize (speed 3) (safety 0)))
+  (declare (type picture pic) (type dim bx by) (optimize (speed 3) (safety 0)))
   (let ((n 0) (pa +no-ref-poc+) (ax 0) (ay 0) (pb +no-ref-poc+) (bx* 0) (by* 0))
     (dotimes (lx 2)
       (let ((poc (blk-ref-poc pic bx by lx)))
@@ -156,7 +157,7 @@ negative slice offset still lands inside the array instead of before it.")
    scan positions belonging to its siblings.  The filter asks about the 8x8 (8.7.2.1), so the four
    counts are ORed; the counts themselves must stay per-4x4 because that is what nC reads."
   ;; block coordinates are never negative here, so the divisions by four are shifts
-  (declare (type picture pic) (type fixnum bx by) (optimize (speed 3) (safety 0)))
+  (declare (type picture pic) (type dim bx by) (optimize (speed 3) (safety 0)))
   (let* ((gw (* 4 (pic-mb-width pic)))
          (nz (pic-nz-y pic))
          (mbi (+ (* (ash by -2) (pic-mb-width pic)) (ash bx -2))))
@@ -179,7 +180,7 @@ negative slice offset still lands inside the array instead of before it.")
    held them or at what index (8.7.2.1).  A bi-predicted block that used one picture TWICE is the
    awkward case: the two vectors can be matched to the other block's two either way round, and the
    edge is only left alone if some pairing works."
-  (declare (type picture pic) (type fixnum pbx pby qbx qby) (optimize (speed 3) (safety 0)))
+  (declare (type picture pic) (type dim pbx pby qbx qby) (optimize (speed 3) (safety 0)))
   (let ((p-intra (mb-intra-p pic (ash pbx -2) (ash pby -2)))
         (q-intra (mb-intra-p pic (ash qbx -2) (ash qby -2))))
     (cond

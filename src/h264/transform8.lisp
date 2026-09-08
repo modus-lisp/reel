@@ -22,7 +22,7 @@
 
    END is the highest scan position carrying a coefficient, the same economy the 4x4 path uses: a
    block with a handful of low-frequency coefficients leaves most of the scan untouched."
-  (declare (type (simple-array fixnum (*)) coeffs out) (type fixnum qp end)
+  (declare (type (simple-array (signed-byte 32) (*)) coeffs out) (type fixnum qp end)
            (type (simple-array (unsigned-byte 8) (64)) weights)
            (optimize (speed 3) (safety 1)))
   (fill out 0)
@@ -48,7 +48,7 @@
 (declaim (inline %idct8-line))
 (defun %idct8-line (b i0 step)
   "One eight-point pass of the inverse transform, in place, over B starting at I0."
-  (declare (type (simple-array fixnum (64)) b) (type fixnum i0 step)
+  (declare (type (simple-array (signed-byte 32) (64)) b) (type fixnum i0 step)
            (optimize (speed 3) (safety 0)))
   (macrolet ((d (k) `(aref b (+ i0 (* ,k step)))))
     (let* ((d0 (d 0)) (d1 (d 1)) (d2 (d 2)) (d3 (d 3))
@@ -78,7 +78,7 @@
 
    Leaves the residual scaled by 64, exactly as the 4x4 transform does, so the caller's
    (+ 32) >> 6 when adding to the prediction is the same in both paths."
-  (declare (type (simple-array fixnum (64)) block) (optimize (speed 3) (safety 1)))
+  (declare (type (simple-array (signed-byte 32) (64)) block) (optimize (speed 3) (safety 1)))
   (dotimes (i 8) (%idct8-line block (* i 8) 1))
   (dotimes (j 8) (%idct8-line block j 8))
   block)
@@ -86,7 +86,7 @@
 (defun add-residual-8x8 (plane stride base block)
   "Add an 8x8 residual to the prediction already sitting in PLANE."
   (declare (type (simple-array (unsigned-byte 8) (*)) plane)
-           (type (simple-array fixnum (64)) block)
+           (type (simple-array (signed-byte 32) (64)) block)
            (type fixnum stride base)
            (optimize (speed 3) (safety 1)))
   (dotimes (row 8)

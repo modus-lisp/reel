@@ -17,7 +17,7 @@
 (in-package #:reel.decode)
 
 (deftype u8vec () '(simple-array (unsigned-byte 8) (*)))
-(deftype fxvec () '(simple-array fixnum (*)))
+(deftype fxvec () '(simple-array (signed-byte 32) (*)))
 
 (defconstant +border+ 32)                       ; luma border pixels
 (defconstant +cborder+ 16)                      ; chroma border pixels
@@ -148,18 +148,18 @@
   ;; reference header
   (refresh-last t) (refresh-golden t) (refresh-altref t) (copy-golden 0) (copy-altref 0)
   (refresh-entropy t)
-  (sign-bias (make-array 4 :element-type 'fixnum :initial-element 0))
+  (sign-bias (make-array 4 :element-type '(signed-byte 32) :initial-element 0))
   ;; reference frames
   last golden altref current last-output
   (pool '())
   ;; per-macroblock records (row-major, mb-cols x mb-rows)
   mb-ymode mb-uvmode mb-ref mb-mvr mb-mvc mb-split-r mb-split-c mb-segment mb-skip
   ;; scratch
-  (near-r (make-array 4 :element-type 'fixnum)) (near-c (make-array 4 :element-type 'fixnum))
-  (cnt (make-array 4 :element-type 'fixnum))
-  (mc-tmp (make-array (* 16 21) :element-type 'fixnum))
+  (near-r (make-array 4 :element-type '(signed-byte 32))) (near-c (make-array 4 :element-type '(signed-byte 32)))
+  (cnt (make-array 4 :element-type '(signed-byte 32)))
+  (mc-tmp (make-array (* 16 21) :element-type '(signed-byte 32)))
   (mc-scratch (make-array (* 21 21) :element-type '(unsigned-byte 8)))
-  (split-r (make-array 16 :element-type 'fixnum)) (split-c (make-array 16 :element-type 'fixnum))
+  (split-r (make-array 16 :element-type '(signed-byte 32))) (split-c (make-array 16 :element-type '(signed-byte 32)))
   (frame-count 0 :type fixnum)
   (shown-count 0 :type fixnum))
 
@@ -177,22 +177,22 @@
                      :uplane (make-plane* (* cols 8) (* rows 8) 0)
                      :vplane (make-plane* (* cols 8) (* rows 8) 0)
                      :coeff-probs (copy-seq +default-coeff-probs+)
-                     :above-y (make-array (* cols 4) :element-type 'fixnum :initial-element 0)
-                     :above-u (make-array (* cols 2) :element-type 'fixnum :initial-element 0)
-                     :above-v (make-array (* cols 2) :element-type 'fixnum :initial-element 0)
-                     :above-y2 (make-array cols :element-type 'fixnum :initial-element 0)
-                     :above-bmode (make-array (* cols 4) :element-type 'fixnum :initial-element 0)
+                     :above-y (make-array (* cols 4) :element-type '(signed-byte 32) :initial-element 0)
+                     :above-u (make-array (* cols 2) :element-type '(signed-byte 32) :initial-element 0)
+                     :above-v (make-array (* cols 2) :element-type '(signed-byte 32) :initial-element 0)
+                     :above-y2 (make-array cols :element-type '(signed-byte 32) :initial-element 0)
+                     :above-bmode (make-array (* cols 4) :element-type '(signed-byte 32) :initial-element 0)
                      :mb-i4x4 (make-array n)
                      :mb-nonzero (make-array n)
-                     :mb-seg (make-array n :element-type 'fixnum :initial-element 0))
-          (vd-mb-ymode vd) (make-array n :element-type 'fixnum :initial-element 0)
-          (vd-mb-uvmode vd) (make-array n :element-type 'fixnum :initial-element 0)
-          (vd-mb-ref vd) (make-array n :element-type 'fixnum :initial-element 0)
-          (vd-mb-mvr vd) (make-array n :element-type 'fixnum :initial-element 0)
-          (vd-mb-mvc vd) (make-array n :element-type 'fixnum :initial-element 0)
-          (vd-mb-split-r vd) (make-array (* 16 n) :element-type 'fixnum :initial-element 0)
-          (vd-mb-split-c vd) (make-array (* 16 n) :element-type 'fixnum :initial-element 0)
-          (vd-mb-segment vd) (make-array n :element-type 'fixnum :initial-element 0)
+                     :mb-seg (make-array n :element-type '(signed-byte 32) :initial-element 0))
+          (vd-mb-ymode vd) (make-array n :element-type '(signed-byte 32) :initial-element 0)
+          (vd-mb-uvmode vd) (make-array n :element-type '(signed-byte 32) :initial-element 0)
+          (vd-mb-ref vd) (make-array n :element-type '(signed-byte 32) :initial-element 0)
+          (vd-mb-mvr vd) (make-array n :element-type '(signed-byte 32) :initial-element 0)
+          (vd-mb-mvc vd) (make-array n :element-type '(signed-byte 32) :initial-element 0)
+          (vd-mb-split-r vd) (make-array (* 16 n) :element-type '(signed-byte 32) :initial-element 0)
+          (vd-mb-split-c vd) (make-array (* 16 n) :element-type '(signed-byte 32) :initial-element 0)
+          (vd-mb-segment vd) (make-array n :element-type '(signed-byte 32) :initial-element 0)
           (vd-mb-skip vd) (make-array n :initial-element nil)
           (vd-last vd) nil (vd-golden vd) nil (vd-altref vd) nil (vd-current vd) nil
           (vd-last-output vd) nil (vd-pool vd) '())))
@@ -523,8 +523,9 @@
   "Predict a WxH block from REF (octets, top-left sample at RBASE, row stride
    RSTRIDE) with eighth-pel fractions FX/FY into the fixnum raster DST at
    DBASE.  Two-pass separable filter, each pass rounded and clamped to 0..255."
-  (declare (type u8vec ref) (type fxvec dst tmp) (type (simple-array fixnum (8 6)) filters)
-           (type fixnum rstride rbase w h fx fy dstride dbase)
+  (declare (type u8vec ref) (type fxvec dst tmp) (type (simple-array (signed-byte 32) (8 6)) filters)
+           (type dim rstride rbase dstride dbase) (type (integer 0 64) w h)
+           (type (integer 0 7) fx fy)
            (optimize (speed 3) (safety 0)))
   (cond
     ((and (zerop fx) (zerop fy))
@@ -535,7 +536,7 @@
     ((zerop fy)                                    ; horizontal only
      (let ((f0 (aref filters fx 0)) (f1 (aref filters fx 1)) (f2 (aref filters fx 2))
            (f3 (aref filters fx 3)) (f4 (aref filters fx 4)) (f5 (aref filters fx 5)))
-       (declare (type fixnum f0 f1 f2 f3 f4 f5))
+       (declare (type (signed-byte 16) f0 f1 f2 f3 f4 f5))
        (dotimes (r h)
          (let ((s (+ rbase (* r rstride))) (o (+ dbase (* r dstride))))
            (declare (type fixnum s o))
@@ -551,7 +552,7 @@
      (let ((f0 (aref filters fy 0)) (f1 (aref filters fy 1)) (f2 (aref filters fy 2))
            (f3 (aref filters fy 3)) (f4 (aref filters fy 4)) (f5 (aref filters fy 5))
            (s2 (* 2 rstride)) (s3 (* 3 rstride)))
-       (declare (type fixnum f0 f1 f2 f3 f4 f5 s2 s3))
+       (declare (type (signed-byte 16) f0 f1 f2 f3 f4 f5) (type dim s2 s3))
        (dotimes (r h)
          (let ((s (+ rbase (* r rstride))) (o (+ dbase (* r dstride))))
            (declare (type fixnum s o))
@@ -682,14 +683,14 @@
   (let ((yc (d-ycoeffs d)) (yp (d-yplane d)))
     (dotimes (b 16)
       (let ((blk (aref yc b)))
-        (declare (type (simple-array fixnum (16)) blk))
+        (declare (type (simple-array (signed-byte 32) (16)) blk))
         (unless (every #'zerop blk)
           (add-residual yp (+ mx (* 4 (logand b 3))) (+ my (* 4 (ash b -2))) (vp8-idct blk)))))
     (dolist (spec (list (cons (d-uplane d) (d-ublocks d)) (cons (d-vplane d) (d-vblocks d))))
       (let ((pl (car spec)) (blocks (cdr spec)))
         (dotimes (b 4)
           (let ((blk (aref blocks b)))
-            (declare (type (simple-array fixnum (16)) blk))
+            (declare (type (simple-array (signed-byte 32) (16)) blk))
             (unless (every #'zerop blk)
               (add-residual pl (+ cx (* 4 (logand b 1))) (+ cy (* 4 (ash b -1))) (vp8-idct blk)))))))))
 

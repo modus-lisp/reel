@@ -178,7 +178,7 @@
    Returns the number of coefficients decoded, which the caller stores as the nC of this block for
    its neighbours to read."
   (declare (optimize (speed 3) (safety 1)))
-  (declare (type (simple-array fixnum (*)) coeffs) (type fixnum nc max-coeff start))
+  (declare (type (simple-array (signed-byte 32) (*)) coeffs) (type fixnum nc max-coeff start))
   (fill coeffs 0)
   (multiple-value-bind (total-coeff trailing-ones) (%coeff-token br nc)
     (declare (type fixnum total-coeff trailing-ones))
@@ -191,8 +191,8 @@
     ;; picture, which is enough collector pressure to make the audio on the same desktop stutter,
     ;; because SBCL stops every thread to collect.  A block holds at most sixteen coefficients, so a
     ;; constant bound costs nothing and stack-allocates.
-    (let ((levels (make-array 16 :element-type 'fixnum))
-          (runs (make-array 16 :element-type 'fixnum :initial-element 0)))
+    (let ((levels (make-array 16 :element-type '(signed-byte 32)))
+          (runs (make-array 16 :element-type '(signed-byte 32) :initial-element 0)))
       (declare (dynamic-extent levels runs))
       ;; the trailing ones: a sign bit each, magnitude known
       (dotimes (i trailing-ones)

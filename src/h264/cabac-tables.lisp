@@ -53,15 +53,15 @@
 
 (declaim (type (simple-array (unsigned-byte 8) (63)) +sig-map-8x8+ +last-map-8x8+))
 
-(defparameter +cat-cbf-offset+ (make-array 6 :element-type 'fixnum
+(defparameter +cat-cbf-offset+ (make-array 6 :element-type '(signed-byte 32)
                                              :initial-contents '(0 4 8 12 16 0)))
-(defparameter +cat-sig-offset+ (make-array 6 :element-type 'fixnum
+(defparameter +cat-sig-offset+ (make-array 6 :element-type '(signed-byte 32)
                                              :initial-contents '(0 15 29 44 47 0)))
-(defparameter +cat-abs-offset+ (make-array 6 :element-type 'fixnum
+(defparameter +cat-abs-offset+ (make-array 6 :element-type '(signed-byte 32)
                                              :initial-contents '(0 10 20 30 39 199)))
-(defparameter +cat-max-coeff+  (make-array 6 :element-type 'fixnum
+(defparameter +cat-max-coeff+  (make-array 6 :element-type '(signed-byte 32)
                                              :initial-contents '(16 15 16 4 15 64)))
-(declaim (type (simple-array fixnum (6))
+(declaim (type (simple-array (signed-byte 32) (6))
                +cat-cbf-offset+ +cat-sig-offset+ +cat-abs-offset+ +cat-max-coeff+))
 
 (defparameter +cabac-range-lps+

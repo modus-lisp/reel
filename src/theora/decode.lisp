@@ -33,10 +33,10 @@
 
 (defstruct (pic (:conc-name pic-))
   (planes (make-array 3) :type simple-vector)
-  (stride (make-array 3 :element-type 'fixnum) :type fixnums)
-  (org (make-array 3 :element-type 'fixnum) :type fixnums)
-  (width (make-array 3 :element-type 'fixnum) :type fixnums)
-  (height (make-array 3 :element-type 'fixnum) :type fixnums))
+  (stride (make-array 3 :element-type '(signed-byte 32)) :type fixnums)
+  (org (make-array 3 :element-type '(signed-byte 32)) :type fixnums)
+  (width (make-array 3 :element-type '(signed-byte 32)) :type fixnums)
+  (height (make-array 3 :element-type '(signed-byte 32)) :type fixnums))
 
 (defun make-pic-for (w h)
   "A picture of a coded size, each plane padded on all four sides."
@@ -84,45 +84,45 @@
 (defstruct (decoder (:conc-name d-) (:constructor %make-decoder))
   info
   ;; geometry, per plane
-  (frag-w (make-array 3 :element-type 'fixnum) :type fixnums)
-  (frag-h (make-array 3 :element-type 'fixnum) :type fixnums)
-  (frag-start (make-array 3 :element-type 'fixnum) :type fixnums)
-  (sb-w (make-array 3 :element-type 'fixnum) :type fixnums)
-  (sb-h (make-array 3 :element-type 'fixnum) :type fixnums)
-  (sb-start (make-array 3 :element-type 'fixnum) :type fixnums)
+  (frag-w (make-array 3 :element-type '(signed-byte 32)) :type fixnums)
+  (frag-h (make-array 3 :element-type '(signed-byte 32)) :type fixnums)
+  (frag-start (make-array 3 :element-type '(signed-byte 32)) :type fixnums)
+  (sb-w (make-array 3 :element-type '(signed-byte 32)) :type fixnums)
+  (sb-h (make-array 3 :element-type '(signed-byte 32)) :type fixnums)
+  (sb-start (make-array 3 :element-type '(signed-byte 32)) :type fixnums)
   (sb-count 0 :type fixnum)
   (frag-count 0 :type fixnum)
   (mb-w 0 :type fixnum) (mb-h 0 :type fixnum) (mb-count 0 :type fixnum)
-  (sb-frag (make-array 0 :element-type 'fixnum) :type fixnums)   ; superblock*16 -> fragment or -1
+  (sb-frag (make-array 0 :element-type '(signed-byte 32)) :type fixnums)   ; superblock*16 -> fragment or -1
   ;; per-fragment state
   (coding (make-array 0 :element-type '(unsigned-byte 8)) :type octets)
   (qpi (make-array 0 :element-type '(unsigned-byte 8)) :type octets)
-  (dc (make-array 0 :element-type 'fixnum) :type fixnums)
+  (dc (make-array 0 :element-type '(signed-byte 32)) :type fixnums)
   (nextzz (make-array 0 :element-type '(unsigned-byte 8)) :type octets)
   (endzz (make-array 0 :element-type '(unsigned-byte 8)) :type octets)
   (coeffs (make-array 0 :element-type '(signed-byte 16)) :type (simple-array (signed-byte 16) (*)))
-  (mvx (make-array 0 :element-type 'fixnum) :type fixnums)
-  (mvy (make-array 0 :element-type 'fixnum) :type fixnums)
+  (mvx (make-array 0 :element-type '(signed-byte 32)) :type fixnums)
+  (mvy (make-array 0 :element-type '(signed-byte 32)) :type fixnums)
   (mb-coding (make-array 0 :element-type '(unsigned-byte 8)) :type octets)
   (sb-coding (make-array 0 :element-type '(unsigned-byte 8)) :type octets)
-  (coded (make-array 0 :element-type 'fixnum) :type fixnums)
-  (coded-start (make-array 3 :element-type 'fixnum) :type fixnums)
-  (coded-count (make-array 3 :element-type 'fixnum) :type fixnums)
+  (coded (make-array 0 :element-type '(signed-byte 32)) :type fixnums)
+  (coded-start (make-array 3 :element-type '(signed-byte 32)) :type fixnums)
+  (coded-count (make-array 3 :element-type '(signed-byte 32)) :type fixnums)
   (total-coded 0 :type fixnum)
   ;; the fixed Huffman tables
   sb-run frag-run mode-code mv-code
   ;; quantisation: [qpi][inter][plane] -> 64 weights in raster order
   (qmat (make-array '(3 2 3)) :type (simple-array t (3 2 3)))
-  (qps (make-array 3 :element-type 'fixnum :initial-element -1) :type fixnums)
+  (qps (make-array 3 :element-type '(signed-byte 32) :initial-element -1) :type fixnums)
   (nqps 1 :type fixnum)
-  (bounding (make-array 512 :element-type 'fixnum) :type fixnums)
+  (bounding (make-array 512 :element-type '(signed-byte 32)) :type fixnums)
   (filter-limit -1 :type fixnum)
   ;; frames
   (pool (make-array 3) :type simple-vector)
   cur last golden
   (keyframe nil)
   (frames 0 :type fixnum)
-  (block (make-array 64 :element-type 'fixnum) :type fixnums))
+  (block (make-array 64 :element-type '(signed-byte 32)) :type fixnums))
 
 (declaim (inline %huff))
 (defun %huff (br h what)
@@ -153,7 +153,7 @@
           (d-mb-count d) (* (inf-mb-width info) (inf-mb-height info)))
     ;; the superblock-to-fragment map, once: sixteen slots per superblock, -1 where the curve
     ;; wanders off the edge of a plane that is not a whole number of superblocks wide
-    (let ((map (make-array (* 16 (d-sb-count d)) :element-type 'fixnum :initial-element -1))
+    (let ((map (make-array (* 16 (d-sb-count d)) :element-type '(signed-byte 32) :initial-element -1))
           (j 0))
       (dotimes (p 3)
         (let ((w (aref (d-frag-w d) p)) (h (aref (d-frag-h d) p))
@@ -170,15 +170,15 @@
                  `(setf (,slot d) (make-array ,n :element-type ',type :initial-element ,init))))
       (alloc d-coding (d-frag-count d) (unsigned-byte 8) +mode-copy+)
       (alloc d-qpi (d-frag-count d) (unsigned-byte 8))
-      (alloc d-dc (d-frag-count d) fixnum)
+      (alloc d-dc (d-frag-count d) (signed-byte 32))
       (alloc d-nextzz (d-frag-count d) (unsigned-byte 8))
       (alloc d-endzz (d-frag-count d) (unsigned-byte 8))
       (alloc d-coeffs (* 64 (d-frag-count d)) (signed-byte 16))
-      (alloc d-mvx (d-frag-count d) fixnum)
-      (alloc d-mvy (d-frag-count d) fixnum)
+      (alloc d-mvx (d-frag-count d) (signed-byte 32))
+      (alloc d-mvy (d-frag-count d) (signed-byte 32))
       (alloc d-mb-coding (d-mb-count d) (unsigned-byte 8) +mode-copy+)
       (alloc d-sb-coding (d-sb-count d) (unsigned-byte 8))
-      (alloc d-coded (d-frag-count d) fixnum))
+      (alloc d-coded (d-frag-count d) (signed-byte 32)))
     (setf (d-sb-run d) (canonical-huff +superblock-run-lengths+
                                        :values (let ((v (make-array 34)))
                                                  (dotimes (k 34 v) (setf (aref v k) (1+ k)))))
@@ -207,7 +207,7 @@
     (dotimes (inter 2)
       (dotimes (plane 3)
         (let ((base (dequant-matrix i inter plane qi))
-              (out (make-array 64 :element-type 'fixnum)))
+              (out (make-array 64 :element-type '(signed-byte 32))))
           (dotimes (k 64)
             (let ((qmin (ash 8 (+ inter (if (zerop k) 1 0))))
                   (qscale (if (zerop k) dc ac)))
@@ -356,7 +356,7 @@
   (if (d-keyframe d)
       (fill (d-coding d) +mode-intra+)
       (let* ((scheme (read-bits br 3))
-             (alphabet (make-array 8 :element-type 'fixnum)))
+             (alphabet (make-array 8 :element-type '(signed-byte 32))))
         (cond ((zerop scheme)
                ;; the picture sends its own ordering, as a rank for each mode in turn
                (fill alphabet +mode-inter-no-mv+)
@@ -409,7 +409,7 @@
   (when (d-keyframe d) (return-from %unpack-vectors))
   (let ((coding-mode (read-bit br))
         (last-x 0) (last-y 0) (prior-x 0) (prior-y 0)
-        (mx (make-array 4 :element-type 'fixnum)) (my (make-array 4 :element-type 'fixnum)))
+        (mx (make-array 4 :element-type '(signed-byte 32))) (my (make-array 4 :element-type '(signed-byte 32))))
     (declare (type fixnum last-x last-y prior-x prior-y))
     (%do-macroblocks (d mb-x mb-y mb)
       (let ((mode (aref (d-mb-coding d) mb)))
@@ -549,7 +549,7 @@
           finally (return eob-run))))
 
 (defparameter +predictor-weights+
-  (make-array '(16 4) :element-type 'fixnum :initial-contents
+  (make-array '(16 4) :element-type '(signed-byte 32) :initial-contents
    '((   0   0   0   0)
      (   0   0   0 128)     ; left
      (   0   0 128   0)     ; up-right
@@ -570,14 +570,14 @@
    row per subset of them that is available.  Several rows ignore neighbours they have — the
    three-neighbour cases fall back to the two-neighbour weights — which is not an oversight but the
    table VP3 shipped and Theora froze.")
-(declaim (type (simple-array fixnum (16 4)) +predictor-weights+))
+(declaim (type (simple-array (signed-byte 32) (16 4)) +predictor-weights+))
 
 (defparameter +dc-reference-class+
-  (make-array 9 :element-type 'fixnum :initial-contents '(1 0 1 1 1 2 2 1 3))
+  (make-array 9 :element-type '(signed-byte 32) :initial-contents '(1 0 1 1 1 2 2 1 3))
   "Which picture a fragment's DC is relative to, by coding mode: the previous one, itself (intra),
    or the golden one.  A DC may only be predicted from a neighbour in the same class, because the
    two are then differences from the same thing.")
-(declaim (type (simple-array fixnum (9)) +dc-reference-class+))
+(declaim (type (simple-array (signed-byte 32) (9)) +dc-reference-class+))
 
 (defun %reverse-dc-prediction (d plane)
   "Turn each coded fragment's transmitted DC difference back into a DC, in raster order (7.9.2).
@@ -588,7 +588,7 @@
   (let* ((w (aref (d-frag-w d) plane)) (h (aref (d-frag-h d) plane))
          (start (aref (d-frag-start d) plane))
          (dc (d-dc d)) (coding (d-coding d))
-         (last (make-array 4 :element-type 'fixnum :initial-element 0)))
+         (last (make-array 4 :element-type '(signed-byte 32) :initial-element 0)))
     (declare (type fixnum w h start) (optimize (speed 3) (safety 1)))
     (dotimes (y h)
       (dotimes (x w)

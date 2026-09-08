@@ -3,10 +3,10 @@
 
 (defun vp8-idct (ip)
   "Inverse DCT (RFC 6386 §14.3).  Returns a fresh 16-element fixnum array."
-  (declare (type (simple-array fixnum (16)) ip))
-  (let ((tmp (make-array 16 :element-type 'fixnum))
-        (op (make-array 16 :element-type 'fixnum)))
-    (declare (type (simple-array fixnum (16)) tmp op))
+  (declare (type (simple-array (signed-byte 32) (16)) ip))
+  (let ((tmp (make-array 16 :element-type '(signed-byte 32)))
+        (op (make-array 16 :element-type '(signed-byte 32))))
+    (declare (type (simple-array (signed-byte 32) (16)) tmp op))
     ;; columns, stride 4
     (dotimes (i 4)
       (let* ((a1 (+ (aref ip i) (aref ip (+ 8 i))))
@@ -40,10 +40,10 @@
 
 (defun vp8-iwht (ip)
   "Inverse Walsh-Hadamard transform (RFC 6386 §14.3).  Returns a fresh 16-element fixnum array."
-  (declare (type (simple-array fixnum (16)) ip))
-  (let ((tmp (make-array 16 :element-type 'fixnum))
-        (op (make-array 16 :element-type 'fixnum)))
-    (declare (type (simple-array fixnum (16)) tmp op))
+  (declare (type (simple-array (signed-byte 32) (16)) ip))
+  (let ((tmp (make-array 16 :element-type '(signed-byte 32)))
+        (op (make-array 16 :element-type '(signed-byte 32))))
+    (declare (type (simple-array (signed-byte 32) (16)) tmp op))
     ;; stride 4
     (dotimes (i 4)
       (let* ((a1 (+ (aref ip i) (aref ip (+ 12 i))))

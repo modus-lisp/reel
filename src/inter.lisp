@@ -210,13 +210,13 @@ shortcut the motion-free path takes."
 (defun %find-near-mvs (ms mbx mby mc mr out probs)
   "Fill OUT with #(nearest-row nearest-col near-row near-col best-row best-col) and PROBS with the
 four vp8_mv_ref_tree probabilities for this macroblock."
-  (declare (type (simple-array fixnum (6)) out) (type (simple-array (unsigned-byte 8) (4)) probs)
+  (declare (type (simple-array (signed-byte 32) (6)) out) (type (simple-array (unsigned-byte 8) (4)) probs)
            (type fixnum mbx mby mc mr) (optimize (speed 3) (safety 0)))
   (let ((mvr (the (simple-array (signed-byte 16) (*)) (ms-mv-row ms)))
         (mvc (the (simple-array (signed-byte 16) (*)) (ms-mv-col ms)))
-        (nr (make-array 4 :element-type 'fixnum :initial-element 0))
-        (nc (make-array 4 :element-type 'fixnum :initial-element 0))
-        (cnt (make-array 4 :element-type 'fixnum :initial-element 0))
+        (nr (make-array 4 :element-type '(signed-byte 32) :initial-element 0))
+        (nc (make-array 4 :element-type '(signed-byte 32) :initial-element 0))
+        (cnt (make-array 4 :element-type '(signed-byte 32) :initial-element 0))
         (n 0))
     (declare (dynamic-extent nr nc cnt) (type fixnum n))
     (macrolet ((nb (dx dy weight)
@@ -579,6 +579,10 @@ one displacement the whole screen shares collects a vote from all of them."
                   (incf (gethash d votes 0)))))))))
     (mapcar (lambda (d) (if (eq axis :x) (cons d 0) (cons 0 d))) (%rank-votes votes 4))))
 
+(defconstant +worst-sad+ (1- (ash 1 31))
+  "No candidate: larger than any real sum of absolute differences, and small enough to sit in the
+thirty-two bit array the shortlist is.  A 16x16 block cannot exceed 65280.")
+
 (defun %scan-grid (y prev w h probes limit &key (step 4) (near 32) (near-step 2))
   "Per probe, ITS best 2-D displacement: a grid to find the neighbourhood, then every pixel inside
 it.  The fallback for a drag, which moves on both axes at once so nothing separable finds it — and
@@ -620,12 +624,12 @@ displacement costs several times what the comparisons do."
   (let* ((votes (make-hash-table :test #'equal))
          (near (min near limit))
          (k 64)                                  ; shortlist size: room for six neighbourhoods
-         (cs (make-array k :element-type 'fixnum))
-         (cx (make-array k :element-type 'fixnum))
-         (cy (make-array k :element-type 'fixnum))
-         (ord (make-array k :element-type 'fixnum)))
+         (cs (make-array k :element-type '(signed-byte 32)))
+         (cx (make-array k :element-type '(signed-byte 32)))
+         (cy (make-array k :element-type '(signed-byte 32)))
+         (ord (make-array k :element-type '(signed-byte 32))))
     (declare (type fixnum near k)
-             (type (simple-array fixnum (*)) cs cx cy ord))
+             (type (simple-array (signed-byte 32) (*)) cs cx cy ord))
     (dolist (p probes)
       (let ((ox (* 16 (the fixnum (first p)))) (oy (* 16 (the fixnum (second p)))))
         (declare (type fixnum ox oy))
@@ -635,14 +639,14 @@ displacement costs several times what the comparisons do."
                    (declare (type fixnum rx ry))
                    (if (and (>= rx 0) (>= ry 0) (<= (+ rx 16) w) (<= (+ ry 16) h))
                        (%sad16-fast y w ox oy prev w rx ry sample)
-                       most-positive-fixnum))))
+                       +worst-sad+))))
           (flet ((scale (bound st)
                    "Sweep multiples of ST out to BOUND — so the grid always contains zero, whatever
 BOUND is — keep the best K, and refine the best few DISTINCT ones to the pixel."
                    (declare (type fixnum bound st))
                    (let ((n (floor bound st)) (worst 0) (filled 0))
                      (declare (type fixnum n worst filled))
-                     (fill cs most-positive-fixnum)
+                     (fill cs +worst-sad+)
                      (loop for iy of-type fixnum from (- n) to n do
                        (loop for ix of-type fixnum from (- n) to n do
                          (let* ((dx (* ix st)) (dy (* iy st)) (s (sad-at dx dy 4)))
@@ -657,22 +661,22 @@ BOUND is — keep the best K, and refine the best few DISTINCT ones to the pixel
                                (setf worst bad))))))
                      (dotimes (i k) (setf (aref ord i) i))
                      (sort ord #'< :key (lambda (i) (aref cs i)))
-                     (let ((taken 0) (tx (make-array 6 :element-type 'fixnum))
-                           (ty (make-array 6 :element-type 'fixnum)))
-                       (declare (type fixnum taken) (type (simple-array fixnum (6)) tx ty)
+                     (let ((taken 0) (tx (make-array 6 :element-type '(signed-byte 32)))
+                           (ty (make-array 6 :element-type '(signed-byte 32))))
+                       (declare (type fixnum taken) (type (simple-array (signed-byte 32) (6)) tx ty)
                                 (dynamic-extent tx ty))
                        (dotimes (j (min k filled))
                          (let* ((i (aref ord j)) (dx (aref cx i)) (dy (aref cy i)))
                            (declare (type fixnum dx dy))
                            (when (and (< taken 6)
-                                      (< (aref cs i) most-positive-fixnum)
+                                      (< (aref cs i) +worst-sad+)
                                       (dotimes (q taken t)
                                         (when (and (<= (abs (- (aref tx q) dx)) st)
                                                    (<= (abs (- (aref ty q) dy)) st))
                                           (return nil))))
                              (setf (aref tx taken) dx (aref ty taken) dy)
                              (incf taken)
-                             (let ((s most-positive-fixnum) (bx 0) (by 0))
+                             (let ((s +worst-sad+) (bx 0) (by 0))
                                (declare (type fixnum s bx by))
                                (loop for ry of-type fixnum from (- dy st) to (+ dy st) do
                                  (loop for rx of-type fixnum from (- dx st) to (+ dx st) do
@@ -934,7 +938,7 @@ caller learning what a translation costs learns it from the count that actually 
          (pv (make-array 64 :element-type '(unsigned-byte 8)))
          (cbuf (make-array 64 :element-type '(unsigned-byte 8)))
          (ftmp (make-array 104 :element-type '(signed-byte 32)))
-         (nearv (make-array 6 :element-type 'fixnum :initial-element 0))
+         (nearv (make-array 6 :element-type '(signed-byte 32) :initial-element 0))
          (mvprobs (make-array 4 :element-type '(unsigned-byte 8) :initial-element 128))
          ;; ---- the frame's global motion vector ----
          (gmv (when (and *motion-vectors* (ve-have-ref enc) (not (eq motion :none)))

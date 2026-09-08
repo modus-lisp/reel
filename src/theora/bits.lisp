@@ -19,7 +19,7 @@
   (error 'theora-error :message (apply #'format nil fmt args)))
 
 (deftype octets () '(simple-array (unsigned-byte 8) (*)))
-(deftype fixnums () '(simple-array fixnum (*)))
+(deftype fixnums () '(simple-array (signed-byte 32) (*)))
 
 (defstruct (bitreader (:conc-name br-))
   (data (make-array 0 :element-type '(unsigned-byte 8)) :type octets)
@@ -69,7 +69,7 @@
 
 (defstruct (huff (:conc-name hf-))
   (bits 0 :type fixnum)
-  (table (make-array 0 :element-type 'fixnum) :type fixnums))
+  (table (make-array 0 :element-type '(signed-byte 32)) :type fixnums))
 
 (defun build-huff (entries)
   "A lookup table from a list of (value length), peeked and indexed.
@@ -81,7 +81,7 @@
   ;; which reads as a thirty-one-bit code and refuses a table that is perfectly well formed
   (let ((maxlen (reduce #'max entries :key #'third :initial-value 1)))
     (when (> maxlen 20) (%err "a Huffman code of ~d bits" maxlen))
-    (let ((out (make-array (ash 1 maxlen) :element-type 'fixnum :initial-element 0)))
+    (let ((out (make-array (ash 1 maxlen) :element-type '(signed-byte 32) :initial-element 0)))
       (loop for e in entries
             do (destructuring-bind (code value len) e
                  (when (plusp len)

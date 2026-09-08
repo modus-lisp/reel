@@ -96,7 +96,7 @@
    coefficient is the first is computed as a plain multiply by eight, and (x * 16383 + 1024) >> 11
    is not always x * 8 — at x = 2048 they are 16383 and 16384.  Skipping the shortcut is not merely
    slower, it disagrees."
-  (declare (type (simple-array fixnum (64)) block) (optimize (speed 3) (safety 0)))
+  (declare (type (simple-array (signed-byte 32) (64)) block) (optimize (speed 3) (safety 0)))
   (dotimes (r 8)
     (let ((i0 (* r 8)))
       (declare (type fixnum i0))
@@ -131,7 +131,7 @@
 (defun idct-put (plane stride base block)
   "Transform BLOCK and write it as samples: an INTRA block carries the picture itself, not a
    correction to one, so nothing is added to it."
-  (declare (type octets plane) (type (simple-array fixnum (64)) block)
+  (declare (type octets plane) (type (simple-array (signed-byte 32) (64)) block)
            (type fixnum stride base) (optimize (speed 3) (safety 0)))
   (idct-8x8 block)
   (dotimes (r 8)
@@ -141,7 +141,7 @@
 
 (defun idct-add (plane stride base block)
   "Transform BLOCK and add it to the prediction already sitting in PLANE."
-  (declare (type octets plane) (type (simple-array fixnum (64)) block)
+  (declare (type octets plane) (type (simple-array (signed-byte 32) (64)) block)
            (type fixnum stride base) (optimize (speed 3) (safety 0)))
   (idct-8x8 block)
   (dotimes (r 8)

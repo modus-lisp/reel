@@ -32,38 +32,44 @@ H.264 covers CAVLC and CABAC, P and B slices, both direct modes, weighted and im
 prediction, reference list reordering, adaptive reference marking, the 8x8 transform, Intra_8x8,
 scaling matrices, and the in-loop filter.
 
-Speed, on one machine and one synthetic source, so read it as ratios and not as a specification:
-
-| | one thread | sixteen |
-|---|---|---|
-| 640x360, P and B pictures | 38 fps | 40 |
-| 1920x1080, P and B pictures | 4.5 fps | 4.5 |
-| 640x360, all intra | 61 fps | 526 |
-| 1920x1080, all intra | 7.9 fps | 68 |
-
-The two columns differ only where the stream allows it. Pictures are decoded concurrently when they
-are independently decodable, which today means all-intra; a stream with P or B pictures is a chain
-and gets the serial walk, so the second column is the first plus noise.
-
-The inter rows are about 2.7 times what they were before the motion-compensation path was tuned;
-the intra rows are unchanged, because nothing that was tuned runs in them.
-
 That set is what x264 produces with no options at all, which is the point: High is x264's default
 profile, so most H.264 encoded since about 2010 is High rather than Main.
 
-VP9, on the same machine, one thread, sixty pictures of the same synthetic source at each size:
+Speed, on one machine and one synthetic source, so read it as ratios and not as a specification.
+Every decoder, one thread, 640x360, sixty pictures, CPU time, best of several runs — before and
+after the type work described below:
 
 | | before | after |
 |---|---|---|
-| 640x360 | 125 fps | 222 |
-| 1280x720 | 31 fps | 61 |
-| 1920x1080 | 13.7 fps | 26.8 |
+| MPEG-2 | 283 fps | 611 |
+| MPEG-4 Part 2 | 255 fps | 556 |
+| Theora | 308 fps | 398 |
+| VP8 | 184 fps | 249 |
+| VP9 | 125 fps | 238 |
+| H.264, P and B pictures | 43 fps | 57 |
+| FFV1, lossless | 23.5 fps | 32 |
 
-About 1.9 times, with the output bit-identical at every step, and almost none of it algorithmic:
-SBCL stores a `fixnum` array as sixty-four bits, so every value read out of one is wider than a
-fixnum and every sum of two of them was an out-of-line call. Declaring the arrays thirty-two bits
-wide — which is what they hold — was fourteen per cent on its own. `src/vp9/NOTES.md` has the rest,
-including the two changes that were reverted for being slower than what they replaced.
+At other sizes: VP9 goes 31 to 60 fps at 1280x720 and 13.7 to 27 at 1920x1080; H.264 with P and B
+pictures runs about 6.5 fps at 1920x1080. FFV1 is last because it is lossless — it carries every
+sample of every picture and there is nothing to skip.
+
+Pictures are decoded concurrently when they are independently decodable, which today means
+all-intra; on an idle machine that was worth about eight times on sixteen threads. A stream with P
+or B pictures is a chain and gets the serial walk, so it gains nothing — and that is every real
+stream, which is why per-picture concurrency is still on the list at the end rather than off it.
+
+**Where all of that came from, and it is nearly all one thing.** SBCL stores a `fixnum` array as
+`(signed-byte 64)`, so a value read out of one has a type the compiler cannot prove is a fixnum —
+a fixnum is sixty-two bits — and every sum, product or shift of two such values compiled to an
+out-of-line call into the generic arithmetic. A video decoder is nothing but sums of values loaded
+from arrays. Declaring the arrays thirty-two bits wide, which is what they all hold, and the plane
+strides and offsets twenty-six, was most of the table above; the rest was bounding a handful of
+variable shifts so they could become machine shifts, and one file — VP8's loop filter, thirty-eight
+per cent of a VP8 decode — that turned out to carry no optimisation declaration at all.
+
+Nothing about the decoded pictures changed: every fixture in every suite is still bit-exact against
+ffmpeg. `src/vp9/NOTES.md` has the long version, including the two changes that were measured,
+found slower than what they replaced, and reverted.
 
 MPEG-1 and MPEG-2 are one decoder, because they are one bitstream: an MPEG-2 sequence header is byte
 for byte an MPEG-1 one and everything MPEG-2 added arrives afterwards in extensions. It covers I, P
@@ -153,8 +159,9 @@ sizes named.
 - **A serial H.264 stream is still a serial decode.** Concurrency here is per PICTURE, so it does
   nothing for a stream with P or B pictures — which is every real stream. VP9 has the same shape and
   the same limit. Slice-level or wavefront parallelism would help both, and neither is small.
-- **The same twenty minutes spent on the other decoders.** What doubled VP9's speed was almost
-  entirely telling the compiler what its arrays hold, and nothing about VP9 made that true of it
-  alone: H.264, MPEG-2, MPEG-4 Part 2, Theora and FFV1 all still declare their small-integer arrays
-  `fixnum`, which in SBCL means sixty-four bits and generic arithmetic on everything read out of
-  them.
+- **The two profiles that are still one function.** FFV1 spends 84 per cent of its time in
+  `%decode-line` and VP8 a third in its deblocking kernel, and in both cases that is now the
+  arithmetic the format actually specifies rather than anything the compiler was failing to see.
+  Getting further would mean doing less of it — VP8's planes are still thirty-two bits a sample
+  where eight would do, which is four times the memory traffic through the busiest loop it has —
+  rather than telling the compiler things.

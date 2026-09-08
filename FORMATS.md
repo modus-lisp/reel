@@ -21,6 +21,7 @@ as data.
 | **AVI**, including OpenDML | `.avi` opens and plays, whatever codec is inside |
 | **FFV1**, the preservation codec | ffmpeg, bit-exact on twelve configurations, every frame |
 | **Theora** in Ogg | ffmpeg, bit-exact on six fixtures, every frame |
+| **VP9** | ffmpeg, bit-exact on five clips, every picture |
 | **Opus, AAC, MP3, MPEG audio Layer II, Vorbis** | reed's own suites; Layer II within 0.0002 RMS of ffmpeg |
 
 H.264 covers CAVLC and CABAC, P and B slices, both direct modes, weighted and implicit weighted
@@ -91,9 +92,9 @@ because nobody knows to disbelieve it.
 - FFV1: version 2, which was experimental and never shipped; more than 8 bits per sample; and Bayer. The player additionally
   refuses anything but 4:2:0, because one picture type serves every codec here and it is 4:2:0 —
   the decoder itself handles the others.
-- VP9: profiles 1, 2 and 3 — anything but eight bits and 4:2:0 — and, for now, VP9 itself: the
-  headers parse and a picture is not yet produced, so the player names the track rather than
-  half-decoding it.
+- VP9: profiles 1, 2 and 3 — anything but eight bits and 4:2:0 — prediction from a reference of a
+  different size, and backward probability adaptation, which a stream that does not set
+  frame-parallel mode needs.
 - AC-3 and DTS, which a DVD may carry instead of MPEG audio. A file's video plays and the audio
   track is named as undecodable rather than guessed at.
 
@@ -101,25 +102,18 @@ because nobody knows to disbelieve it.
 
 ### 1. VP9
 
-The other half of what the web actually serves. Big, but the better target than HEVC if the goal is
-playing what people link you.
+Plays. A hundred and ten pictures across five clips decode bit-exact against ffmpeg, including
+1280x720 across four tile columns, a lossless encode, and a stream with alt-ref frames. `.webm` with
+VP9 opens and plays.
 
-Underway, and further than it looks. Both headers parse and verify; so do the tiles, the partition
-quadtree, every block's modes, and every coefficient of every transform block of an intra frame.
+That covers both headers, superframes, tiles, the partition quadtree, every block mode, every
+coefficient, all four transform sizes with both the DCT and the ADST, the fifteen intra predictors,
+motion vector prediction with its eight-neighbour search, the three eight-tap interpolation filters,
+the eight reference slots, and the loop filter with all three of its widths.
 
-The check throughout is that an arithmetic-coded partition of a stated length is consumed to the
-byte. A 1280x720 key frame is thirty-four thousand bytes and twenty-three hundred blocks, and one
-symbol read at the wrong width anywhere in it does not land on the last one. So the entropy layer is
-as verified as a decoded picture would make it, before there is a picture.
-
-Reconstruction and the loop filter are in, and **every intra frame of every fixture now decodes
-bit-exact against ffmpeg** — 176x144, 352x288 with a switchable transform mode, 1280x720 across four
-tile columns, and a lossless encode. That is the whole decoder except inter prediction: the partition
-quadtree, every block mode, every coefficient, all four transform sizes with both the DCT and the
-ADST, the fifteen intra predictors, and the filter with all three of its widths.
-
-What remains is motion: vector prediction, the eight-tap filters, and compound prediction.
-`reel/src/vp9/NOTES.md` has the detail.
+Two things are refused rather than approximated, and both are named in `reel/src/vp9/NOTES.md`:
+backward probability adaptation, which a stream that does not set frame-parallel mode needs, and
+prediction from a reference of a different size.
 
 ## Not worth it, and why
 

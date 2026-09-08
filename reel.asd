@@ -116,8 +116,14 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
        (:file "transform")   ; GENERATED (one dimension at a time) plus the two-pass wrapper
        (:file "intra")        ; the fifteen intra prediction modes at four sizes
        (:file "loopfilter")  ; the deblocking filter, and the masks that say where it goes
+       (:file "filters")     ; GENERATED: the three eight-tap interpolation filters
+       (:file "mc")          ; motion compensation, and the average two references make
+       (:file "intertab")    ; GENERATED: the inter-mode contexts and the vector search order
+       (:file "refctx")      ; GENERATED: which probability a reference decision uses
+       (:file "inter")       ; inter blocks: references, modes, and motion vectors
        (:file "block")       ; tiles, the partition quadtree, block modes and coefficients
-       (:file "recon"))      ; edge samples, prediction and the inverse transform
+       (:file "recon")       ; edge samples, prediction and the inverse transform
+       (:file "decode"))     ; a packet in, pictures out, and the eight reference slots
       )
      ;; ---- Theora, a VP3 descendant, in Ogg
      (:module "theora"

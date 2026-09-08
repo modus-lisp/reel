@@ -57,3 +57,16 @@
           (replace out c :start1 o :end1 (+ o cw) :start2 (* r cs) :end2 (+ (* r cs) cw))
           (incf o cw))))
     out))
+
+(defun as-picture (f)
+  "This decoder's frame as a REEL.DECODE:PICTURE, sharing planes rather than copying them.
+
+   The picture carries the DISPLAY size and the plane's own stride, so the superblock alignment the
+   decoder needs never leaves this file — a caller sees a 176x144 picture whose rows happen to be
+   192 samples apart."
+  (declare (type frame f))
+  (reel.decode::%make-shared-picture
+   :width (fr-width f) :height (fr-height f)
+   :y (aref (fr-planes f) 0) :u (aref (fr-planes f) 1) :v (aref (fr-planes f) 2)
+   :y-stride (aref (fr-stride f) 0) :uv-stride (aref (fr-stride f) 1)
+   :y-offset 0 :uv-offset 0))

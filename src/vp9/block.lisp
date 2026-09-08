@@ -73,6 +73,11 @@
   (above-txfm (%o 0) :type octets)
   (above-segpred (%o 0) :type octets)
   (above-intra (%o 0) :type octets)
+  (above-comp (%o 0) :type octets)
+  (above-ref (%o 0) :type octets)
+  (above-filter (%o 0) :type octets)
+  ;; the vectors an inter block's neighbours used, two per eight-sample column, two lists each
+  (above-mv (make-array '(1 2 2) :element-type 'fixnum) :type (simple-array fixnum (* 2 2)))
   ;; left contexts: one superblock row of one tile, and reset at the start of each
   (left-partition (%o 8) :type octets)
   (left-mode (%o 16) :type octets)
@@ -82,6 +87,10 @@
   (left-txfm (%o 8) :type octets)
   (left-segpred (%o 8) :type octets)
   (left-intra (%o 8) :type octets)
+  (left-comp (%o 8) :type octets)
+  (left-ref (%o 8) :type octets)
+  (left-filter (%o 8) :type octets)
+  (left-mv (make-array '(16 2 2) :element-type 'fixnum) :type (simple-array fixnum (16 2 2)))
   ;; the block being decoded
   (row 0 :type fixnum) (col 0 :type fixnum) (row7 0 :type fixnum)
   (bs 0 :type fixnum) (bl 0 :type fixnum) (bp 0 :type fixnum)
@@ -89,6 +98,22 @@
   (tx 0 :type fixnum) (uvtx 0 :type fixnum)
   (mode (make-array 4 :element-type 'fixnum) :type (simple-array fixnum (4)))
   (uvmode 0 :type fixnum)
+  ;; an inter block: which references, whether both, which filter, and a vector per sub-block
+  (bref (make-array 2 :element-type 'fixnum) :type (simple-array fixnum (2)))
+  (bcomp nil)
+  (bfilter 0 :type fixnum) (bfilter-id 0 :type fixnum)
+  (bmv (make-array '(4 2 2) :element-type 'fixnum) :type (simple-array fixnum (4 2 2)))
+  (min-mvx 0 :type fixnum) (min-mvy 0 :type fixnum)
+  (max-mvx 0 :type fixnum) (max-mvy 0 :type fixnum)
+  ;; the reference and vector of every eight-sample block of this frame, and of the last one
+  (mvref (make-array 6 :element-type 'fixnum) :type (simple-array fixnum (*)))
+  mvref-prev
+  (use-last-mvs nil)
+  ;; the segment each block belongs to, this frame and last
+  (segmap (%o 0) :type octets)
+  segmap-prev
+  ;; the three reference frames this frame may predict from
+  (ref-frames (make-array 3 :initial-element nil) :type simple-vector)
   (tile-col-start 0 :type fixnum) (tile-col-end 0 :type fixnum)
   ;; coefficients of one block, and how many each of its transform blocks held
   (coeffs (make-array 4096 :element-type 'fixnum) :type (simple-array fixnum (4096)))
@@ -115,7 +140,8 @@
            :type (simple-array fixnum (* 2 2 8 4)))
   (lf-lim (make-array 64 :element-type 'fixnum) :type (simple-array fixnum (64)))
   (lf-mblim (make-array 64 :element-type 'fixnum) :type (simple-array fixnum (64)))
-  (lf-lvl (make-array 8 :element-type 'fixnum) :type (simple-array fixnum (8)))
+  ;; [segment][reference + 1, or 0 for intra][the block's vector is non-zero]
+  (lf-lvl (make-array '(8 4 2) :element-type 'fixnum) :type (simple-array fixnum (8 4 2)))
   c                                             ; the arithmetic coder of the current tile
   (blocks 0 :type fixnum)                       ; how many blocks this frame has decoded
   ;; THE CHECK THAT COSTS NOTHING: how far any tile's coder finished from the end of its own
@@ -161,7 +187,15 @@
                           :above-skip (%o cols)
                           :above-txfm (%o cols)
                           :above-segpred (%o cols)
-                          :above-intra (%o cols))))
+                          :above-intra (%o cols)
+                          :above-comp (%o cols)
+                          :above-ref (%o cols)
+                          :above-filter (%o cols))))
+    (setf (st-above-mv st) (make-array (list (* 2 cols) 2 2) :element-type 'fixnum
+                                       :initial-element 0))
+    (setf (st-mvref st) (make-array (* 6 (* 8 sb-rows) (* 8 sb-cols)) :element-type 'fixnum
+                                    :initial-element -1)
+          (st-segmap st) (%o (* (* 8 sb-rows) (* 8 sb-cols))))
     (setf (st-frame st) (make-frame-for h))
     (setf (st-lf-level st) (make-array (list (st-sb-cols st) 8 8) :element-type 'fixnum
                                        :initial-element 0)
@@ -191,7 +225,12 @@
    contexts must say so rather than hold the last frame's."
   (fill (st-above-partition st) 0)
   (fill (st-above-skip st) 0)
-  (fill (st-above-mode st) 2)                   ; DC_PRED, which is what an absent neighbour means
+  ;; AT TWO DIFFERENT GRANULARITIES, and the array serves both: a key frame's mode context is per
+  ;; four samples and an inter frame's is per eight, so the same array is filled to twice the length
+  ;; for one and indexed half as far for the other.
+  (if (or (h-keyframe (st-h st)) (h-intra-only (st-h st)))
+      (fill (st-above-mode st) 2 :end (* 2 (st-cols st)))
+      (fill (st-above-mode st) +nearestmv+ :end (st-cols st)))
   (fill (st-above-y-nnz st) 0)
   (fill (the octets (aref (st-above-uv-nnz st) 0)) 0)
   (fill (the octets (aref (st-above-uv-nnz st) 1)) 0)
@@ -204,7 +243,9 @@
    a tile independent of the one beside it."
   (fill (st-left-partition st) 0)
   (fill (st-left-skip st) 0)
-  (fill (st-left-mode st) 2)
+  (if (or (h-keyframe (st-h st)) (h-intra-only (st-h st)))
+      (fill (st-left-mode st) 2)
+      (fill (st-left-mode st) +nearestmv+ :end 8))
   (fill (st-left-y-nnz st) 0)
   (fill (the octets (aref (st-left-uv-nnz st) 0)) 0)
   (fill (the octets (aref (st-left-uv-nnz st) 1)) 0)
@@ -219,28 +260,50 @@
 (defun %bh4 (bs) (aref +block-size-wh+ 1 bs 1))
 
 (defun %decode-mode (st)
-  "The segment, the skip flag, the transform size and the intra modes of one block (6.4.15).
+  "The segment, the skip flag, the transform size, and then either the intra modes or the whole of
+   the inter decision — which references, which mode, which filter, and the vectors (6.4.15).
 
    KEY FRAMES CODE THEIR INTRA MODES AGAINST FIXED TABLES chosen by the neighbouring blocks' modes,
-   not against an adapting model — a key frame has no history and, more to the point, must decode on
-   its own.  Which is why the mode contexts here are the neighbours' MODES and not counts."
+   not against an adapting model — a key frame has no history and must decode on its own.  An intra
+   block inside an INTER frame codes the same modes against adapting models instead, which is why
+   the two paths look alike and share nothing."
   (let* ((h (st-h st)) (p (fp-p (st-fp st))) (c (st-c st))
          (bs (st-bs st)) (row (st-row st)) (col (st-col st)) (row7 (st-row7 st))
          (max-tx (aref +max-tx-for-bs+ bs))
          (bw4 (%bw4 bs)) (bh4 (%bh4 bs))
-         (have-a (plusp row)) (have-l (> col (st-tile-col-start st))))
-    (declare (type fixnum bs row col row7 max-tx bw4 bh4))
+         (w4 (min (- (st-cols st) col) bw4))
+         (h4 (min (- (st-rows st) row) bh4))
+         (keyish (or (h-keyframe h) (h-intra-only h)))
+         (have-a (plusp row)) (have-l (> col (st-tile-col-start st)))
+         (vref 0))
+    (declare (type fixnum bs row col row7 max-tx bw4 bh4 w4 h4 vref))
+    ;; ---- what this block may address, which bounds every predicted vector
+    (setf (st-min-mvx st) (- (+ 128 (* col 64)))
+          (st-min-mvy st) (- (+ 128 (* row 64)))
+          (st-max-mvx st) (+ 128 (* (- (st-cols st) col bw4) 64))
+          (st-max-mvy st) (+ 128 (* (- (st-rows st) row bh4) 64)))
     ;; ---- segment
-    (setf (st-seg-id st)
-          (cond ((not (h-seg-enabled h)) 0)
-                ((not (h-seg-update-map h)) 0)
-                (t (bool-tree c +segmentation-tree+ (h-seg-tree-probs h) 0))))
+    (setf (st-seg-id st) (%decode-segment st h c keyish w4 h4 bw4 bh4))
     ;; ---- skip: a segment may force it, and otherwise it is coded against the two neighbours
     (setf (st-skip st) (plusp (aref (st-seg-skip st) (st-seg-id st))))
     (unless (st-skip st)
       (let ((k (+ (aref (st-left-skip st) row7) (aref (st-above-skip st) col))))
         (setf (st-skip st) (plusp (bool-bit c (aref (pr-skip p) k))))))
-    (setf (st-intra st) t)
+    ;; ---- intra or inter
+    (setf (st-intra st)
+          (cond (keyish t)
+                ((and (h-seg-enabled h) (plusp (aref (h-seg-feature-on h) (st-seg-id st) 2)))
+                 (zerop (aref (h-seg-feature h) (st-seg-id st) 2)))
+                (t (let ((k (if (and have-a have-l)
+                                (let ((v (+ (aref (st-above-intra st) col)
+                                            (aref (st-left-intra st) row7))))
+                                  (declare (type fixnum v))
+                                  (+ v (if (= v 2) 1 0)))
+                                (cond (have-a (* 2 (aref (st-above-intra st) col)))
+                                      (have-l (* 2 (aref (st-left-intra st) row7)))
+                                      (t 0)))))
+                     (declare (type fixnum k))
+                     (zerop (bool-bit c (aref (pr-intra p) k)))))))
     ;; ---- transform size, whose context is `did my neighbours use a big one'
     (if (and (or (st-intra st) (not (st-skip st))) (= (fp-tx-mode (st-fp st)) +tx-switchable+))
         (let ((k (cond ((and have-a have-l)
@@ -269,43 +332,31 @@
                   (1 (bool-bit c (aref (pr-tx8p p) k)))
                   (t 0))))
         (setf (st-tx st) (min max-tx (fp-tx-mode (st-fp st)))))
-    ;; ---- the intra modes.  A block larger than 8x8 has one mode; an 8x8 or smaller has one per
-    ;; 4x4 quadrant, and the second and fourth are predicted from the first and third.
-    (let ((a (st-above-mode st)) (ao (* 2 col))
-          (l (st-left-mode st)) (lo (* 2 row7))
-          (m (st-mode st)))
-      (if (> bs +bs-8x8+)
-          (progn
-            (setf (aref m 0) (%kf-ymode c (aref a ao) (aref l lo))
-                  (aref a ao) (aref m 0))
-            (if (/= bs +bs-8x4+)
-                (setf (aref m 1) (%kf-ymode c (aref a (1+ ao)) (aref m 0))
-                      (aref l lo) (aref m 1)
-                      (aref a (1+ ao)) (aref m 1))
-                (setf (aref m 1) (aref m 0)
-                      (aref l lo) (aref m 0)
-                      (aref a (1+ ao)) (aref m 0)))
-            (if (/= bs +bs-4x8+)
-                (progn
-                  (setf (aref m 2) (%kf-ymode c (aref a ao) (aref l (1+ lo)))
-                        (aref a ao) (aref m 2))
-                  (if (/= bs +bs-8x4+)
-                      (setf (aref m 3) (%kf-ymode c (aref a (1+ ao)) (aref m 2))
-                            (aref l (1+ lo)) (aref m 3)
-                            (aref a (1+ ao)) (aref m 3))
-                      (setf (aref m 3) (aref m 2)
-                            (aref l (1+ lo)) (aref m 2)
-                            (aref a (1+ ao)) (aref m 2))))
-                (setf (aref m 2) (aref m 0)
-                      (aref m 3) (aref m 1)
-                      (aref l (1+ lo)) (aref m 1)
-                      (aref a (1+ ao)) (aref m 1))))
-          (let ((v (%kf-ymode c (aref a ao) (aref l lo))))
-            (dotimes (i 4) (setf (aref m i) v))
-            (fill a v :start ao :end (min (length a) (+ ao (aref +block-size-wh+ 0 bs 0))))
-            (fill l v :start lo :end (min (length l) (+ lo (aref +block-size-wh+ 0 bs 1))))))
-      (setf (st-uvmode st) (bool-tree c +intramode-tree+ +default-kf-uvmode+
-                                      (* 9 (aref m 3)))))
+    ;; ---- the modes themselves
+    (cond
+      (keyish (%decode-kf-modes st c bs row7 col))
+      ((st-intra st)
+       (setf (st-bcomp st) nil)
+       (let ((m (st-mode st)))
+         (if (> bs +bs-8x8+)
+             (progn
+               (setf (aref m 0) (bool-tree c +intramode-tree+ (pr-y-mode p) 0))
+               (setf (aref m 1) (if (/= bs +bs-8x4+)
+                                    (bool-tree c +intramode-tree+ (pr-y-mode p) 0)
+                                    (aref m 0)))
+               (if (/= bs +bs-4x8+)
+                   (progn
+                     (setf (aref m 2) (bool-tree c +intramode-tree+ (pr-y-mode p) 0))
+                     (setf (aref m 3) (if (/= bs +bs-8x4+)
+                                          (bool-tree c +intramode-tree+ (pr-y-mode p) 0)
+                                          (aref m 2))))
+                   (setf (aref m 2) (aref m 0) (aref m 3) (aref m 1))))
+             (let ((v (bool-tree c +intramode-tree+ (pr-y-mode p)
+                                 (* 9 (aref +size-group+ bs)))))
+               (dotimes (i 4) (setf (aref m i) v))))
+         (setf (st-uvmode st)
+               (bool-tree c +intramode-tree+ (pr-uv-mode p) (* 9 (aref m 3))))))
+      (t (setf vref (%decode-inter-mode st h p c bs row row7 col have-a have-l))))
     ;; ---- and what this block leaves for its neighbours.  THE FULL BLOCK WIDTH, not the part
     ;; inside the picture: a block that hangs over the edge still writes the context a block below
     ;; it would read, and clipping here would make the two disagree.
@@ -315,8 +366,109 @@
     (%splat (st-left-txfm st) row7 bh4 (st-tx st))
     (%splat (st-above-partition st) col bw4 (aref +above-ctx-for-bs+ bs))
     (%splat (st-left-partition st) row7 bh4 (aref +left-ctx-for-bs+ bs))
-    (%splat (st-above-intra st) col bw4 1)
-    (%splat (st-left-intra st) row7 bh4 1)))
+    (cond
+      (keyish
+       (%splat (st-above-intra st) col bw4 1)
+       (%splat (st-left-intra st) row7 bh4 1))
+      (t
+       (%splat (st-above-intra st) col bw4 (if (st-intra st) 1 0))
+       (%splat (st-left-intra st) row7 bh4 (if (st-intra st) 1 0))
+       (%splat (st-above-comp st) col bw4 (if (st-bcomp st) 1 0))
+       (%splat (st-left-comp st) row7 bh4 (if (st-bcomp st) 1 0))
+       (%splat (st-above-mode st) col bw4 (aref (st-mode st) 3))
+       (%splat (st-left-mode st) row7 bh4 (aref (st-mode st) 3))
+       (unless (st-intra st)
+         (%splat (st-above-ref st) col bw4 vref)
+         (%splat (st-left-ref st) row7 bh4 vref)
+         (when (= 3 (h-filter-mode h))
+           (%splat (st-above-filter st) col bw4 (st-bfilter-id st))
+           (%splat (st-left-filter st) row7 bh4 (st-bfilter-id st))))
+       (%store-mv-contexts st bs row7 col bw4 bh4)))
+    ;; ---- and the block's reference and vector, for the neighbours of the blocks after it
+    (%store-mvref st row col w4 h4)))
+
+(defun %decode-segment (st h c keyish w4 h4 bw4 bh4)
+  "Which of the eight segments this block belongs to (6.4.16).
+
+   An inter frame may PREDICT the segment from the co-located blocks of the previous frame rather
+   than code it — and when it does, the predicted value is the SMALLEST of them, not the most
+   common, because a segment number is an index into a table of adjustments and the conservative
+   choice is the lowest."
+  (declare (type state st) (type fixnum w4 h4 bw4 bh4) (optimize (speed 3) (safety 1)))
+  (let ((row (st-row st)) (col (st-col st)) (row7 (st-row7 st))
+        (stride (* 8 (st-sb-cols st)))
+        (id 0))
+    (declare (type fixnum row col row7 stride id))
+    (cond
+      ((not (h-seg-enabled h)) (setf id 0))
+      (keyish (setf id (if (h-seg-update-map h)
+                           (bool-tree c +segmentation-tree+ (h-seg-tree-probs h) 0)
+                           0)))
+      ((or (not (h-seg-update-map h))
+           (and (h-seg-temporal h)
+                (plusp (bool-bit c (aref (h-seg-pred-probs h)
+                                         (+ (aref (st-above-segpred st) col)
+                                            (aref (st-left-segpred st) row7)))))))
+       (setf id (if (and (not (h-error-resilient h)) (st-segmap-prev st))
+                    (let ((pred 8) (prev (the octets (st-segmap-prev st))))
+                      (declare (type fixnum pred))
+                      (dotimes (y h4 pred)
+                        (let ((base (+ (* (+ y row) stride) col)))
+                          (declare (type fixnum base))
+                          (dotimes (x w4)
+                            (setf pred (min pred (aref prev (+ base x))))))))
+                    0))
+       (%splat (st-above-segpred st) col w4 1)
+       (%splat (st-left-segpred st) row7 h4 1))
+      (t (setf id (bool-tree c +segmentation-tree+ (h-seg-tree-probs h) 0))
+         (%splat (st-above-segpred st) col w4 0)
+         (%splat (st-left-segpred st) row7 h4 0)))
+    (when (and (h-seg-enabled h) (or (h-seg-update-map h) keyish))
+      (let ((map (st-segmap st)))
+        (dotimes (y bh4)
+          (let ((base (+ (* (+ y row) stride) col)))
+            (declare (type fixnum base))
+            (dotimes (x bw4)
+              (when (< (+ base x) (length map)) (setf (aref map (+ base x)) id)))))))
+    id))
+
+(defun %decode-kf-modes (st c bs row7 col)
+  "A key frame's intra modes, against the fixed tables its neighbours' modes select."
+  (declare (type state st) (type fixnum bs row7 col))
+  (let ((a (st-above-mode st)) (ao (* 2 col))
+        (l (st-left-mode st)) (lo (* 2 row7))
+        (m (st-mode st)))
+    (if (> bs +bs-8x8+)
+        (progn
+          (setf (aref m 0) (%kf-ymode c (aref a ao) (aref l lo))
+                (aref a ao) (aref m 0))
+          (if (/= bs +bs-8x4+)
+              (setf (aref m 1) (%kf-ymode c (aref a (1+ ao)) (aref m 0))
+                    (aref l lo) (aref m 1)
+                    (aref a (1+ ao)) (aref m 1))
+              (setf (aref m 1) (aref m 0)
+                    (aref l lo) (aref m 0)
+                    (aref a (1+ ao)) (aref m 0)))
+          (if (/= bs +bs-4x8+)
+              (progn
+                (setf (aref m 2) (%kf-ymode c (aref a ao) (aref l (1+ lo)))
+                      (aref a ao) (aref m 2))
+                (if (/= bs +bs-8x4+)
+                    (setf (aref m 3) (%kf-ymode c (aref a (1+ ao)) (aref m 2))
+                          (aref l (1+ lo)) (aref m 3)
+                          (aref a (1+ ao)) (aref m 3))
+                    (setf (aref m 3) (aref m 2)
+                          (aref l (1+ lo)) (aref m 2)
+                          (aref a (1+ ao)) (aref m 2))))
+              (setf (aref m 2) (aref m 0)
+                    (aref m 3) (aref m 1)
+                    (aref l (1+ lo)) (aref m 1)
+                    (aref a (1+ ao)) (aref m 1))))
+        (let ((v (%kf-ymode c (aref a ao) (aref l lo))))
+          (dotimes (i 4) (setf (aref m i) v))
+          (fill a v :start ao :end (min (length a) (+ ao (aref +block-size-wh+ 0 bs 0))))
+          (fill l v :start lo :end (min (length l) (+ lo (aref +block-size-wh+ 0 bs 1))))))
+    (setf (st-uvmode st) (bool-tree c +intramode-tree+ +default-kf-uvmode+ (* 9 (aref m 3))))))
 
 (declaim (inline %kf-ymode %splat))
 (defun %kf-ymode (c above left)
@@ -549,9 +701,11 @@
             (%splat (aref (st-above-uv-nnz st) pl) col w4 0)
             (%splat (aref (st-left-uv-nnz st) pl) (st-row7 st) h4 0)))
         (%decode-coeffs st))
-    (%intra-recon st)
+    (if (st-intra st) (%intra-recon st) (%inter-recon st))
     ;; and record which of this block's edges the filter will visit, and how wide
-    (let ((lvl (aref (st-lf-lvl st) (st-seg-id st))))
+    (let ((lvl (aref (st-lf-lvl st) (st-seg-id st)
+                     (if (st-intra st) 0 (1+ (aref (st-bref st) 0)))
+                     (if (/= (aref (st-mode st) 3) +zeromv+) 1 0))))
       (declare (type fixnum lvl))
       (when (and (plusp (h-filter-level (st-h st))) (plusp lvl))
         (let* ((bs (st-bs st))
@@ -559,13 +713,16 @@
                (w4 (%bw4 bs)) (h4 (%bh4 bs))
                (x-end (min (- (st-cols st) (st-col st)) w4))
                (y-end (min (- (st-rows st) (st-row st)) h4))
-               (row7 (st-row7 st)) (col7 (logand (st-col st) 7)))
+               (row7 (st-row7 st)) (col7 (logand (st-col st) 7))
+               ;; A SKIPPED INTER BLOCK HAS NO TRANSFORM EDGES INSIDE IT, only its own boundary:
+               ;; there is no residual, so nothing was transformed and nothing needs smoothing.
+               (skip-inter (and (not (st-intra st)) (st-skip st))))
           (declare (type fixnum bs sb w4 h4 x-end y-end row7 col7))
           (dotimes (dy h4)
             (dotimes (dx w4)
               (when (and (< (+ row7 dy) 8) (< (+ col7 dx) 8))
                 (setf (aref (st-lf-level st) sb (+ row7 dy) (+ col7 dx)) lvl))))
-          (%mask-edges (st-lf-mask st) sb 0 0 0 row7 col7 x-end y-end 0 0 (st-tx st) nil)
+          (%mask-edges (st-lf-mask st) sb 0 0 0 row7 col7 x-end y-end 0 0 (st-tx st) skip-inter)
           (%mask-edges (st-lf-mask st) sb 1 1 1 row7 col7 x-end y-end
                        (if (and (logbitp 0 (st-cols st))
                                 (>= (+ (st-col st) w4) (st-cols st)))
@@ -573,30 +730,42 @@
                        (if (and (logbitp 0 (st-rows st))
                                 (>= (+ (st-row st) h4) (st-rows st)))
                            (logand (st-rows st) 7) 0)
-                       (st-uvtx st) nil))))
+                       (st-uvtx st) skip-inter))))
     (incf (st-blocks st))))
 
 (defun %init-filter-levels (st h)
-  "The filter level each segment uses, from the frame level and the per-segment and per-reference
-   deltas (6.2.9).
+  "The filter level for every combination of segment, reference frame and zero-or-not vector (6.2.9).
 
-   Only the intra entry is computed here, because only intra blocks exist so far; the reference and
-   mode deltas that an inter block would apply multiply by two once the frame level reaches
-   thirty-two, which is the format saying `a strong filter should be adjusted in bigger steps'."
+   The deltas are multiplied by TWO once the frame level reaches thirty-two, which is the format
+   saying that a strong filter should be adjusted in bigger steps than a weak one.  And intra blocks
+   take the reference-zero delta with no mode delta at all, which is why their two entries are equal
+   and the other three references' are not."
   (declare (type state st))
-  (let ((sh (if (>= (h-filter-level h) 32) 1 0)))
+  (let ((sh (if (>= (h-filter-level h) 32) 1 0))
+        (out (st-lf-lvl st)))
     (declare (type fixnum sh))
-    (dotimes (i 8)
-      (let ((lvl (h-filter-level h)))
-        (declare (type fixnum lvl))
-        (when (and (h-seg-enabled h) (plusp (aref (h-seg-feature-on h) i 1)))
-          (setf lvl (if (h-seg-abs h)
-                        (aref (h-seg-feature h) i 1)
-                        (+ (h-filter-level h) (aref (h-seg-feature h) i 1)))))
-        (setf lvl (max 0 (min 63 lvl)))
-        (when (h-lf-delta-enabled h)
-          (setf lvl (max 0 (min 63 (+ lvl (* (aref (h-lf-ref-delta h) 0) (ash 1 sh)))))))
-        (setf (aref (st-lf-lvl st) i) lvl)))))
+    (flet ((c6 (v) (max 0 (min 63 v))))
+      (dotimes (i 8)
+        (let ((lvl (h-filter-level h)))
+          (declare (type fixnum lvl))
+          (when (and (h-seg-enabled h) (plusp (aref (h-seg-feature-on h) i 1)))
+            (setf lvl (c6 (if (h-seg-abs h)
+                              (aref (h-seg-feature h) i 1)
+                              (+ (h-filter-level h) (aref (h-seg-feature h) i 1))))))
+          (if (h-lf-delta-enabled h)
+              (progn
+                (let ((v (c6 (+ lvl (* (aref (h-lf-ref-delta h) 0) (ash 1 sh))))))
+                  (setf (aref out i 0 0) v (aref out i 0 1) v))
+                (loop for j of-type fixnum from 1 to 3
+                      do (setf (aref out i j 0)
+                               (c6 (+ lvl (* (+ (aref (h-lf-ref-delta h) j)
+                                                (aref (h-lf-mode-delta h) 0))
+                                             (ash 1 sh))))
+                               (aref out i j 1)
+                               (c6 (+ lvl (* (+ (aref (h-lf-ref-delta h) j)
+                                                (aref (h-lf-mode-delta h) 1))
+                                             (ash 1 sh)))))))
+              (dotimes (j 4) (setf (aref out i j 0) lvl (aref out i j 1) lvl))))))))
 
 (defun %decode-sb (st row col bl)
   "One node of the quadtree (6.4.4).

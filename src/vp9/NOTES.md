@@ -199,9 +199,62 @@ left edge of a tile believe it has a neighbour — which is invisible until a fr
 tile column *and* a switchable transform size, because only then does availability reach the
 entropy decoder.
 
+## Inter prediction
+
+Stage six, and with it **every picture of every fixture decodes bit-exact against ffmpeg** — a
+hundred and ten of them across five clips, including 1280x720 across four tile columns and a stream
+encoded with alt-ref frames.
+
+VP9 predicts a motion vector before it codes one, and the prediction is a **search** rather than a
+formula. Up to eight neighbouring blocks are visited in an order that depends on the block's shape —
+nearer edge first — and the first that used the same reference supplies the vector. If none did, the
+search runs again accepting a different reference and negating the vector when the two point opposite
+ways in time. Then the previous frame's vector at this position. Only then does the predictor answer
+zero, and even that is clamped, which for a block at the picture's edge is not zero.
+
+The search returns the **second distinct** answer when the block asked for the near vector rather
+than the nearest, which is why it is written as early returns over a remembered first candidate
+rather than as a list. Building the list and taking the second element is not the same function: the
+order of comparison is observable.
+
+Two of ffmpeg's comments in that function say the behaviour is a bug in libvpx. They are transcribed
+as they stand, because libvpx is what encoders were written against and a decoder that fixes the bug
+decodes those streams wrongly.
+
+**Chroma vectors are in sixteenths, not eighths** — and that is not a separate convention. A luma
+vector of one eighth of a luma sample *is* one sixteenth of a chroma sample at half the resolution.
+So the same number is read against a sixteen-phase filter instead of taking every second phase, and
+chroma prediction is finer than luma prediction rather than coarser.
+
+A block smaller than 8x8 predicts its luma in two or four pieces with a vector each, and its chroma
+in **one** piece with those vectors averaged, because at half the resolution the pieces would be two
+samples wide and an eight-tap filter needs more than that.
+
+### The nearly-two hundred lines nobody should type
+
+The reference-frame and comparison contexts are four decision trees over what the neighbours did, and
+no branch of them is ever obviously wrong. They are transcribed by **parsing ffmpeg's C**, the same
+way the inverse transforms are, with a name table mapping its context arrays onto this decoder's. One
+inverted test there gives a decoder that is right on most content, and nothing in the shape of the
+code catches it.
+
+### Two things that were wrong and silent
+
+**The filter level of an inter block depends on its reference and on whether its vector is zero** —
+`lflvl[segment][ref+1][mv != 0]`, not the single intra entry. And a **skipped inter block has no
+transform edges inside it**, only its own boundary: there is no residual, so nothing was transformed
+and nothing needs smoothing. Together those two were half a percent of samples wrong on the first
+inter frame, growing with each frame after it as the error propagated through the references.
+
 ## What is next
 
-1. Motion vectors and inter prediction, including compound.
+1. **Backward probability adaptation.** A stream that does not set frame-parallel mode refreshes its
+   probability context from the symbol COUNTS of the frame just decoded, not from the forward
+   updates. It is refused loudly rather than skipped — skipping it decodes every frame after the
+   first against probabilities that drift from the encoder's, which looks like a coefficient bug.
+2. **Reference scaling.** A frame may predict from a reference of a different size. Refused.
+3. **Compound prediction** is implemented and NOT exercised by any fixture: it needs references whose
+   sign biases differ, and libvpx here does not emit one for these clips.
 3. The loop filter, which in VP9 is applied per transform-block edge rather than per macroblock.
 4. Backward probability adaptation, which is what makes a frame's counts the next frame's model.
 

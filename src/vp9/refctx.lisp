@@ -1,0 +1,173 @@
+;;;; vp9/refctx.lisp — GENERATED.  Which probability an inter block's reference decisions use.
+;;;;
+;;;; Four decision trees over what the blocks above and to the left did, and between them nearly two
+;;;; hundred lines of nested conditionals in which no branch is ever obviously wrong.  They are
+;;;; transcribed by PARSING ffmpeg's C rather than by hand, for the same reason the inverse transforms
+;;;; are: one inverted test here gives a decoder that is right on most content and wrong on the rest,
+;;;; and there is nothing in the shape of the code to catch it.
+;;;;
+;;;; The three facts each neighbour contributes are whether it was intra, whether it used two
+;;;; references, and which single reference it used.  Everything below is a way of combining those.
+
+(in-package #:reel.vp9)
+
+(defun %ref-ctx-comp (st h have-a have-l col row7 fixref)
+  "Whether this block predicts from two references, contextually (6.4.19).
+
+   Five contexts from what the neighbours did, and the whole of it is a decision tree over three
+   facts per neighbour — intra or not, compound or not, and which single reference it used."
+  (declare (type state st) (type fixnum col row7 fixref)
+           (ignorable h fixref have-a have-l)
+           (optimize (speed 3) (safety 1)))
+  (let ((k 0))
+    (declare (type fixnum k))
+    (if have-a
+        (if have-l
+            (if (and (plusp (aref (st-above-comp st) col)) (plusp (aref (st-left-comp st) row7)))
+                (setf k 4)
+                (if (plusp (aref (st-above-comp st) col))
+                    (setf k (+ 2 (if (or (plusp (aref (st-left-intra st) row7)) (plusp (if (= (aref (st-left-ref st) row7) fixref) 1 0))) 1 0)))
+                    (if (plusp (aref (st-left-comp st) row7))
+                        (setf k (+ 2 (if (or (plusp (aref (st-above-intra st) col)) (plusp (if (= (aref (st-above-ref st) col) fixref) 1 0))) 1 0)))
+                        (setf k (logxor (if (and (plusp (if (zerop (aref (st-above-intra st) col)) 1 0)) (plusp (if (= (aref (st-above-ref st) col) fixref) 1 0))) 1 0) (if (and (plusp (if (zerop (aref (st-left-intra st) row7)) 1 0)) (plusp (if (= (aref (st-left-ref st) row7) fixref) 1 0))) 1 0))))))
+            (setf k (if (plusp (aref (st-above-comp st) col)) 3 (if (and (plusp (if (zerop (aref (st-above-intra st) col)) 1 0)) (plusp (if (= (aref (st-above-ref st) col) fixref) 1 0))) 1 0))))
+        (if have-l
+            (setf k (if (plusp (aref (st-left-comp st) row7)) 3 (if (and (plusp (if (zerop (aref (st-left-intra st) row7)) 1 0)) (plusp (if (= (aref (st-left-ref st) row7) fixref) 1 0))) 1 0)))
+            (setf k 1)))
+    k))
+
+(defun %ref-ctx-compref (st h have-a have-l col row7 fixref)
+  "Which of the two variable references pairs with the fixed one (6.4.21)."
+  (declare (type state st) (type fixnum col row7 fixref)
+           (ignorable h fixref have-a have-l)
+           (optimize (speed 3) (safety 1)))
+  (let ((k 0) (refa 0) (refl 0))
+    (declare (type fixnum k refa refl))
+    (if have-a
+        (if have-l
+            (if (plusp (aref (st-above-intra st) col))
+                (if (plusp (aref (st-left-intra st) row7))
+                    (setf k 2)
+                    (setf k (+ 1 (* 2 (if (/= (aref (st-left-ref st) row7) (aref (h-var-comp-ref h) 1)) 1 0)))))
+                (if (plusp (aref (st-left-intra st) row7))
+                    (setf k (+ 1 (* 2 (if (/= (aref (st-above-ref st) col) (aref (h-var-comp-ref h) 1)) 1 0))))
+                    (progn
+                      (progn
+                        (setf refl (aref (st-left-ref st) row7))
+                        (setf refa (aref (st-above-ref st) col)))
+                      (if (and (= refl refa) (= refa (aref (h-var-comp-ref h) 1)))
+                          (setf k 0)
+                          (if (and (not (plusp (aref (st-left-comp st) row7))) (not (plusp (aref (st-above-comp st) col))))
+                              (if (or (and (= refa fixref) (= refl (aref (h-var-comp-ref h) 0))) (and (= refl fixref) (= refa (aref (h-var-comp-ref h) 0))))
+                                  (setf k 4)
+                                  (setf k (if (plusp (if (= refa refl) 1 0)) 3 1)))
+                              (if (not (plusp (aref (st-left-comp st) row7)))
+                                  (if (and (= refa (aref (h-var-comp-ref h) 1)) (/= refl (aref (h-var-comp-ref h) 1)))
+                                      (setf k 1)
+                                      (setf k (if (plusp (if (and (plusp (if (= refl (aref (h-var-comp-ref h) 1)) 1 0)) (plusp (if (/= refa (aref (h-var-comp-ref h) 1)) 1 0))) 1 0)) 2 4)))
+                                  (if (not (plusp (aref (st-above-comp st) col)))
+                                      (if (and (= refl (aref (h-var-comp-ref h) 1)) (/= refa (aref (h-var-comp-ref h) 1)))
+                                          (setf k 1)
+                                          (setf k (if (plusp (if (and (plusp (if (= refa (aref (h-var-comp-ref h) 1)) 1 0)) (plusp (if (/= refl (aref (h-var-comp-ref h) 1)) 1 0))) 1 0)) 2 4)))
+                                      (setf k (if (plusp (if (= refl refa) 1 0)) 4 2)))))))))
+            (if (plusp (aref (st-above-intra st) col))
+                (setf k 2)
+                (if (plusp (aref (st-above-comp st) col))
+                    (setf k (* 4 (if (/= (aref (st-above-ref st) col) (aref (h-var-comp-ref h) 1)) 1 0)))
+                    (setf k (* 3 (if (/= (aref (st-above-ref st) col) (aref (h-var-comp-ref h) 1)) 1 0))))))
+        (if have-l
+            (if (plusp (aref (st-left-intra st) row7))
+                (setf k 2)
+                (if (plusp (aref (st-left-comp st) row7))
+                    (setf k (* 4 (if (/= (aref (st-left-ref st) row7) (aref (h-var-comp-ref h) 1)) 1 0)))
+                    (setf k (* 3 (if (/= (aref (st-left-ref st) row7) (aref (h-var-comp-ref h) 1)) 1 0)))))
+            (setf k 2)))
+    k))
+
+(defun %ref-ctx-single0 (st h have-a have-l col row7 fixref)
+  "The first bit of a single reference: the last frame, or one of the other two (6.4.20)."
+  (declare (type state st) (type fixnum col row7 fixref)
+           (ignorable h fixref have-a have-l)
+           (optimize (speed 3) (safety 1)))
+  (let ((k 0))
+    (declare (type fixnum k))
+    (if (and have-a (not (plusp (aref (st-above-intra st) col))))
+        (if (and have-l (not (plusp (aref (st-left-intra st) row7))))
+            (if (plusp (aref (st-left-comp st) row7))
+                (if (plusp (aref (st-above-comp st) col))
+                    (setf k (+ 1 (if (or (plusp (if (or (plusp (if (zerop fixref) 1 0)) (plusp (if (zerop (aref (st-left-ref st) row7)) 1 0))) 1 0)) (plusp (if (zerop (aref (st-above-ref st) col)) 1 0))) 1 0)))
+                    (setf k (+ (* 3 (if (zerop (aref (st-above-ref st) col)) 1 0)) (if (or (plusp (if (zerop fixref) 1 0)) (plusp (if (zerop (aref (st-left-ref st) row7)) 1 0))) 1 0))))
+                (if (plusp (aref (st-above-comp st) col))
+                    (setf k (+ (* 3 (if (zerop (aref (st-left-ref st) row7)) 1 0)) (if (or (plusp (if (zerop fixref) 1 0)) (plusp (if (zerop (aref (st-above-ref st) col)) 1 0))) 1 0)))
+                    (setf k (+ (* 2 (if (zerop (aref (st-left-ref st) row7)) 1 0)) (* 2 (if (zerop (aref (st-above-ref st) col)) 1 0))))))
+            (if (plusp (aref (st-above-intra st) col))
+                (setf k 2)
+                (if (plusp (aref (st-above-comp st) col))
+                    (setf k (+ 1 (if (or (plusp (if (zerop fixref) 1 0)) (plusp (if (zerop (aref (st-above-ref st) col)) 1 0))) 1 0)))
+                    (setf k (* 4 (if (zerop (aref (st-above-ref st) col)) 1 0))))))
+        (if (and have-l (not (plusp (aref (st-left-intra st) row7))))
+            (if (plusp (aref (st-left-intra st) row7))
+                (setf k 2)
+                (if (plusp (aref (st-left-comp st) row7))
+                    (setf k (+ 1 (if (or (plusp (if (zerop fixref) 1 0)) (plusp (if (zerop (aref (st-left-ref st) row7)) 1 0))) 1 0)))
+                    (setf k (* 4 (if (zerop (aref (st-left-ref st) row7)) 1 0)))))
+            (setf k 2)))
+    k))
+
+(defun %ref-ctx-single1 (st h have-a have-l col row7 fixref)
+  "And the second, choosing between the golden and altref frames."
+  (declare (type state st) (type fixnum col row7 fixref)
+           (ignorable h fixref have-a have-l)
+           (optimize (speed 3) (safety 1)))
+  (let ((k 0))
+    (declare (type fixnum k))
+    (if have-a
+        (if have-l
+            (if (plusp (aref (st-left-intra st) row7))
+                (if (plusp (aref (st-above-intra st) col))
+                    (setf k 2)
+                    (if (plusp (aref (st-above-comp st) col))
+                        (setf k (+ 1 (* 2 (if (or (plusp (if (= fixref 1) 1 0)) (plusp (if (= (aref (st-above-ref st) col) 1) 1 0))) 1 0))))
+                        (if (not (plusp (aref (st-above-ref st) col)))
+                            (setf k 3)
+                            (setf k (* 4 (if (= (aref (st-above-ref st) col) 1) 1 0))))))
+                (if (plusp (aref (st-above-intra st) col))
+                    (if (plusp (aref (st-left-intra st) row7))
+                        (setf k 2)
+                        (if (plusp (aref (st-left-comp st) row7))
+                            (setf k (+ 1 (* 2 (if (or (plusp (if (= fixref 1) 1 0)) (plusp (if (= (aref (st-left-ref st) row7) 1) 1 0))) 1 0))))
+                            (if (not (plusp (aref (st-left-ref st) row7)))
+                                (setf k 3)
+                                (setf k (* 4 (if (= (aref (st-left-ref st) row7) 1) 1 0))))))
+                    (if (plusp (aref (st-above-comp st) col))
+                        (if (plusp (aref (st-left-comp st) row7))
+                            (if (= (aref (st-left-ref st) row7) (aref (st-above-ref st) col))
+                                (setf k (* 3 (if (or (plusp (if (= fixref 1) 1 0)) (plusp (if (= (aref (st-left-ref st) row7) 1) 1 0))) 1 0)))
+                                (setf k 2))
+                            (if (not (plusp (aref (st-left-ref st) row7)))
+                                (setf k (+ 1 (* 2 (if (or (plusp (if (= fixref 1) 1 0)) (plusp (if (= (aref (st-above-ref st) col) 1) 1 0))) 1 0))))
+                                (setf k (+ (* 3 (if (= (aref (st-left-ref st) row7) 1) 1 0)) (if (or (plusp (if (= fixref 1) 1 0)) (plusp (if (= (aref (st-above-ref st) col) 1) 1 0))) 1 0)))))
+                        (if (plusp (aref (st-left-comp st) row7))
+                            (if (not (plusp (aref (st-above-ref st) col)))
+                                (setf k (+ 1 (* 2 (if (or (plusp (if (= fixref 1) 1 0)) (plusp (if (= (aref (st-left-ref st) row7) 1) 1 0))) 1 0))))
+                                (setf k (+ (* 3 (if (= (aref (st-above-ref st) col) 1) 1 0)) (if (or (plusp (if (= fixref 1) 1 0)) (plusp (if (= (aref (st-left-ref st) row7) 1) 1 0))) 1 0))))
+                            (if (not (plusp (aref (st-above-ref st) col)))
+                                (if (not (plusp (aref (st-left-ref st) row7)))
+                                    (setf k 3)
+                                    (setf k (* 4 (if (= (aref (st-left-ref st) row7) 1) 1 0))))
+                                (if (not (plusp (aref (st-left-ref st) row7)))
+                                    (setf k (* 4 (if (= (aref (st-above-ref st) col) 1) 1 0)))
+                                    (setf k (+ (* 2 (if (= (aref (st-left-ref st) row7) 1) 1 0)) (* 2 (if (= (aref (st-above-ref st) col) 1) 1 0))))))))))
+            (if (or (plusp (aref (st-above-intra st) col)) (and (not (plusp (aref (st-above-comp st) col))) (not (plusp (aref (st-above-ref st) col)))))
+                (setf k 2)
+                (if (plusp (aref (st-above-comp st) col))
+                    (setf k (* 3 (if (or (plusp (if (= fixref 1) 1 0)) (plusp (if (= (aref (st-above-ref st) col) 1) 1 0))) 1 0)))
+                    (setf k (* 4 (if (= (aref (st-above-ref st) col) 1) 1 0))))))
+        (if have-l
+            (if (or (plusp (aref (st-left-intra st) row7)) (and (not (plusp (aref (st-left-comp st) row7))) (not (plusp (aref (st-left-ref st) row7)))))
+                (setf k 2)
+                (if (plusp (aref (st-left-comp st) row7))
+                    (setf k (* 3 (if (or (plusp (if (= fixref 1) 1 0)) (plusp (if (= (aref (st-left-ref st) row7) 1) 1 0))) 1 0)))
+                    (setf k (* 4 (if (= (aref (st-left-ref st) row7) 1) 1 0)))))
+            (setf k 2)))
+    k))

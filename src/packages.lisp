@@ -89,7 +89,8 @@
    #:h-log2-tile-cols #:h-log2-tile-rows #:h-compressed-size #:h-header-bytes #:h-frame-context
    #:read-compressed-header #:make-default-context #:fp-tx-mode #:fp-comp-pred-mode
    #:make-state #:decode-tiles #:st-blocks #:st-tile-slack #:st-frame
-   #:frame #:fr-width #:fr-height #:picture->yuv420))
+   #:decoder #:make-vp9-decoder #:decode-frame
+   #:frame #:fr-width #:fr-height #:picture->yuv420 #:as-picture))
 
 (defpackage #:reel.ffv1
   (:use #:cl)

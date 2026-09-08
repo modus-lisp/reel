@@ -19,7 +19,7 @@ as data.
 | **MP4**, including fragmented | ffprobe, packet for packet |
 | **MPEG program and transport streams** | `.mpg`, `.vob`, `.ts` open and play, end to end |
 | **AVI**, including OpenDML | `.avi` opens and plays, whatever codec is inside |
-| **FFV1**, the preservation codec | ffmpeg, bit-exact on five configurations, every frame |
+| **FFV1**, the preservation codec | ffmpeg, bit-exact on twelve configurations, every frame |
 | **Theora** in Ogg | ffmpeg, bit-exact on six fixtures, every frame |
 | **Opus, AAC, MP3, MPEG audio Layer II, Vorbis** | reed's own suites; Layer II within 0.0002 RMS of ffmpeg |
 
@@ -50,9 +50,11 @@ Theora is VP3 with a header: On3's 2001 codec, frozen by Xiph in 2004 and unchan
 covers key and inter pictures, golden frames, all four motion vector modes including four vectors
 per macroblock, the per-block quantiser indices, and the loop filter. `.ogv` opens and plays.
 
-FFV1 covers version 3 with the range coder: 4:2:0, 4:2:2 and 4:4:4, any slice layout, either state
-table, and lossless RGB through the reversible colour transform. It is the archival case — the
-command national libraries actually use is `-level 3 -coder 1`, which is what this decodes.
+FFV1 covers versions 0, 1 and 3, both entropy coders, 4:2:0, 4:2:2 and 4:4:4, any slice layout,
+either state table, and lossless RGB through the reversible colour transform. `-level 3 -coder 1` is
+the command national libraries actually use; `-coder 0` is what ffmpeg does when nobody says, and
+versions 0 and 1 keep their header in the first key frame rather than in the container, which is why
+such a file has an empty CodecPrivate and configures the decoder as it plays.
 
 ## Refused, and refused loudly
 
@@ -71,8 +73,7 @@ because nobody knows to disbelieve it.
 - Theora: chroma layouts other than 4:2:0, bitstreams older than 3.2.0 (which stored the picture
   upside down relative to everything since), and VP4 — which ffmpeg decodes with the same code and
   which shares with Theora a name and not a bitstream.
-- FFV1: the Golomb-Rice entropy coder, versions 0 and 1 (which keep their header in the frame
-  rather than the container), more than 8 bits per sample, and Bayer. The player additionally
+- FFV1: version 2, which was experimental and never shipped; more than 8 bits per sample; and Bayer. The player additionally
   refuses anything but 4:2:0, because one picture type serves every codec here and it is 4:2:0 —
   the decoder itself handles the others.
 - AC-3 and DTS, which a DVD may carry instead of MPEG audio. A file's video plays and the audio
@@ -98,8 +99,5 @@ playing what people link you.
 
 ## Small things that are nearly free
 
-- **FFV1's Golomb-Rice coder, and versions 0 and 1.** The range coder is the archival default and
-  is what is here; the other entropy coder is a separate path, and the older versions keep their
-  header in the frame rather than the container.
 - **H.264 decode speed at 1080p.** 71 fps concurrently, but single-threaded it is 10.6, and the
   deblocking filter is a third of that. Matters for a single-core or latency-bound path.

@@ -83,7 +83,8 @@
    #:ffv1-error #:ffv1-error-message
    #:config #:parse-configuration #:cfg-version #:cfg-width #:cfg-height #:cfg-colorspace
    #:cfg-bits #:cfg-h-slices #:cfg-v-slices #:cfg-ac #:cfg-chroma-h-shift #:cfg-chroma-v-shift
-   #:decoder #:make-ffv1-decoder #:decode-frame
+   #:decoder #:make-ffv1-decoder #:make-ffv1-decoder-for-frames #:decode-frame
+   #:parse-frame-header
    #:frame #:fr-width #:fr-height #:fr-cwidth #:fr-cheight
    #:fr-y #:fr-u #:fr-v #:fr-ystride #:fr-cstride #:picture->yuv420 #:as-picture))
 

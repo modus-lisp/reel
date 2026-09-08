@@ -94,6 +94,7 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
       :serial t
       :components
       ((:file "rangecoder")  ; the binary range coder, and integers spelled through it
+       (:file "golomb")      ; the OTHER entropy coder: adaptive Rice codes and a run mode
        (:file "decode"))   ; the configuration record, slices, and prediction
       )
      ;; ---- Theora, a VP3 descendant, in Ogg

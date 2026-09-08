@@ -90,10 +90,6 @@
       (decf (rc-end c) 4)
       (setf (cfg-micro cfg) (get-symbol c state nil)))
     (setf (cfg-ac cfg) (get-symbol c state nil))
-    (when (zerop (cfg-ac cfg))
-      ;; Golomb-Rice instead of the range coder.  A different entropy coder entirely, with its own
-      ;; adaptive state and a run mode; refused rather than approximated.
-      (%err "the Golomb-Rice entropy coder is not supported yet"))
     (when (= (cfg-ac cfg) 2)
       ;; A CUSTOM STATE TABLE, which `-coder 1' means and which is therefore the common case rather
       ;; than an exotic one.  Each entry is a DIFFERENCE from the default table's, so the default
@@ -151,6 +147,45 @@
       (when (>= (+ (ash (cfg-version cfg) 16) (cfg-micro cfg)) #x30003)
         (setf (cfg-intra cfg) (get-symbol c state nil))))
     cfg))
+
+(defun parse-frame-header (cfg c state)
+  "The header a version 0 or 1 stream keeps IN ITS FIRST KEY FRAME rather than in its container.
+
+   It is the same fields as the configuration record's first half, in the same order and read with
+   the same coder — but there is no slice geometry, no error-detection flag and no micro version,
+   because none of those existed yet.  The quantiser tables follow it, exactly one set of them, and
+   that set is what every plane uses: the per-plane choice arrived in version 2.
+
+   The `bits per sample' field is the one that is NOT there in version 0.  It reads eight, which is
+   what version 0 could code and all it could code."
+  (let ((v (get-symbol c state nil)))
+    (when (>= v 2) (%err "version ~d in a version 0/1 frame header" v))
+    (setf (cfg-version cfg) v (cfg-micro cfg) 0 (cfg-ec cfg) 0
+          (cfg-h-slices cfg) 1 (cfg-v-slices cfg) 1))
+  (setf (cfg-ac cfg) (get-symbol c state nil))
+  (if (= (cfg-ac cfg) 2)
+      (let ((tr (make-array 256 :element-type '(unsigned-byte 8) :initial-element 0)))
+        (loop for i of-type fixnum from 1 below 256
+              do (setf (aref tr i)
+                       (logand (+ (get-symbol c state t) (aref (rc-one-state c) i)) 255)))
+        (setf (cfg-state-transition cfg) tr))
+      (setf (cfg-state-transition cfg) nil))
+  (setf (cfg-colorspace cfg) (get-symbol c state nil))
+  (when (plusp (cfg-version cfg)) (setf (cfg-bits cfg) (get-symbol c state nil)))
+  (setf (cfg-chroma-planes cfg) (= 1 (get-rac c state 0))
+        (cfg-chroma-h-shift cfg) (get-symbol c state nil)
+        (cfg-chroma-v-shift cfg) (get-symbol c state nil)
+        (cfg-transparency cfg) (= 1 (get-rac c state 0)))
+  (when (= (cfg-colorspace cfg) 2) (%err "Bayer FFV1 is not supported"))
+  (when (> (cfg-bits cfg) 8) (%err "~d bits per sample is not supported (8 only)" (cfg-bits cfg)))
+  (when (or (> (cfg-chroma-h-shift cfg) 4) (> (cfg-chroma-v-shift cfg) 4))
+    (%err "chroma shifts ~d,~d" (cfg-chroma-h-shift cfg) (cfg-chroma-v-shift cfg)))
+  (setf (cfg-plane-count cfg) (+ 2 (if (cfg-transparency cfg) 1 0)))
+  (multiple-value-bind (tbl cnt) (%read-quant-tables c)
+    (setf (cfg-quant-tables cfg) (vector tbl)
+          (cfg-context-counts cfg) (make-array 1 :element-type 'fixnum :initial-element cnt)
+          (cfg-initial-states cfg) (make-array 1 :initial-element nil)))
+  cfg)
 
 (defun %get-symbol-row (c state2 k)
   "A signed symbol against row K of the two-dimensional state used for initial states."
@@ -224,11 +259,24 @@
 
 (defstruct (slice (:conc-name sl-))
   rc
+  gb                                            ; the Rice bit reader, when the coder is Golomb-Rice
+  (run-index 0 :type fixnum)                    ; reset per plane, carried across that plane's lines
+  (start 0 :type fixnum)                        ; where this slice's bytes begin, for the handover
   (x 0 :type fixnum) (y 0 :type fixnum) (w 0 :type fixnum) (h 0 :type fixnum)
   (quant-index (make-array 4 :element-type 'fixnum :initial-element 0) :type (simple-array fixnum (4)))
   (coding-mode 0 :type fixnum)
   (rct-by 1 :type fixnum) (rct-ry 1 :type fixnum)
   states)                                       ; per plane: (context-count x 32) octets
+
+(defun %line (cfg sl states qt w buf cur last last2 bits)
+  "One line, through whichever entropy coder the file chose.
+
+   The two coders share the predictor and the context quantisation above them and nothing below, so
+   the split is here rather than inside either — they do not even hold their per-context state in
+   the same shape."
+  (if (zerop (cfg-ac cfg))
+      (%decode-line-golomb cfg sl states qt w buf cur last last2 bits)
+      (%decode-line cfg sl states qt w buf cur last last2 bits)))
 
 (defun %decode-line (cfg sl states qt w buf cur last last2 bits)
   "One line of one plane: a residual per sample, added to the prediction.
@@ -268,6 +316,72 @@
           (setf (aref buf (+ cur x))
                 (logand (+ (%predict buf (+ cur x) (+ last x)) diff) mask)))))))
 
+(defun %decode-line-golomb (cfg sl states qt w buf cur last last2 bits)
+  "The same line, coded with adaptive Rice codes instead (4.7).
+
+   The RUN MODE is what makes this different from a straight substitution of one coder for the
+   other.  Context zero — the one where every quantised gradient came out flat — does not code its
+   samples at all: it codes how MANY of them follow the predictor, and the decoder fills them in.
+   The run continues until a sample disagrees, and the residual that ends it is coded with one
+   added to it, because a residual of zero would not have ended it."
+  (declare (ignore cfg)
+           (type (simple-array fixnum (5 256)) qt)
+           (type (simple-array fixnum (*)) buf)
+           (type (simple-array fixnum (* 4)) states)
+           (type fixnum w cur last last2 bits)
+           (optimize (speed 3) (safety 1)))
+  (let* ((b (sl-gb sl))
+         (mask (1- (ash 1 bits)))
+         (five-p (or (/= 0 (aref qt 3 127)) (/= 0 (aref qt 4 127))))
+         (run-index (sl-run-index sl))
+         (run-count 0) (run-mode 0)
+         (x 0))
+    (declare (type fixnum mask run-index run-count run-mode x))
+    (loop while (< x w)
+          do (let* ((ctx (%context qt buf (+ cur x) (+ last x) (+ last2 x) five-p))
+                    (sign (minusp ctx))
+                    (diff 0))
+               (declare (type fixnum ctx diff))
+               (when sign (setf ctx (- ctx)))
+               (when (and (zerop ctx) (zerop run-mode)) (setf run-mode 1))
+               (if (zerop run-mode)
+                   (setf diff (%get-vlc-symbol b states ctx bits))
+                   (progn
+                     (when (and (zerop run-count) (= run-mode 1))
+                       (if (plusp (%read-bit b))
+                           ;; a full run at this level, and the level climbs if it fits
+                           (progn (setf run-count (ash 1 (aref +log2-run+ run-index)))
+                                  (when (<= (+ x run-count) w) (incf run-index)))
+                           ;; a short run, its length sent outright, and the level falls
+                           (progn (setf run-count
+                                        (if (plusp (aref +log2-run+ run-index))
+                                            (%read-bits b (aref +log2-run+ run-index))
+                                            0))
+                                  (when (plusp run-index) (decf run-index))
+                                  (setf run-mode 2))))
+                     ;; THE SAMPLES OF A RUN ARE NOT ALWAYS COPIES.  Where the line above already
+                     ;; matched at the run's left edge they are copied from it; otherwise they are
+                     ;; the predictor's output, which is not the same thing and is what a run
+                     ;; through a gradient looks like.
+                     (if (= (aref buf (+ cur x -1)) (aref buf (+ last x -1)))
+                         (loop while (and (> run-count 1) (> (- w x) 1))
+                               do (setf (aref buf (+ cur x)) (aref buf (+ last x)))
+                                  (incf x) (decf run-count))
+                         (loop while (and (> run-count 1) (> (- w x) 1))
+                               do (setf (aref buf (+ cur x)) (%predict buf (+ cur x) (+ last x)))
+                                  (incf x) (decf run-count)))
+                     (decf run-count)
+                     (if (minusp run-count)
+                         (progn (setf run-mode 0 run-count 0)
+                                (setf diff (%get-vlc-symbol b states ctx bits))
+                                (when (>= diff 0) (incf diff)))
+                         (setf diff 0))))
+               (when sign (setf diff (- diff)))
+               (setf (aref buf (+ cur x))
+                     (logand (+ (%predict buf (+ cur x) (+ last x)) diff) mask))
+               (incf x)))
+    (setf (sl-run-index sl) run-index)))
+
 (defun %decode-plane (cfg sl plane-index states qt dst stride ox oy w h bits)
   "One plane of one slice, line by line, into DST.
 
@@ -282,6 +396,8 @@
          (buf (make-array (* 2 n) :element-type 'fixnum :initial-element 0))
          (cur (+ n 3)) (last 3))
     (declare (type fixnum n cur last))
+    ;; the Rice coder's run level restarts at each plane and is carried across that plane's lines
+    (setf (sl-run-index sl) 0)
     (dotimes (y h)
       (declare (type fixnum y))
       (rotatef cur last)
@@ -293,7 +409,7 @@
       ;; two-line buffer alternates, so before a sample is written its slot still holds the value
       ;; from TWO rows up — which is exactly the neighbour the five-input context wants.  Keeping a
       ;; third line would be the obvious thing and would also be a third more memory traffic.
-      (%decode-line cfg sl states qt w buf cur last cur bits)
+      (%line cfg sl states qt w buf cur last cur bits)
       (let ((o (+ (* (+ oy y) stride) ox)))
         (declare (type fixnum o))
         (dotimes (x w) (setf (aref dst (+ o x)) (logand (aref buf (+ cur x)) 255)))))))
@@ -373,6 +489,12 @@
 
 (defun make-ffv1-decoder (cfg) (make-decoder :cfg cfg))
 
+(defun make-ffv1-decoder-for-frames (&key width height)
+  "A decoder for a stream with NO configuration record — versions 0 and 1, whose header travels in
+   the first key frame.  Only the picture size is known in advance, and only because the container
+   says so."
+  (make-decoder :cfg (make-config :version -1 :width width :height height)))
+
 (defun %slice-states (d cfg sl i key-p)
   "The state arrays for slice I, kept from last frame unless this one is a key frame."
   (let ((n (* (cfg-h-slices cfg) (cfg-v-slices cfg))))
@@ -382,14 +504,21 @@
       (when (or key-p (null cur))
         (setf cur (make-array (cfg-plane-count cfg)))
         (dotimes (k (cfg-plane-count cfg))
-          (let* ((qi (aref (sl-quant-index sl) (min k 3)))
-                 (tbl (make-array (list (aref (cfg-context-counts cfg) qi) +context-size+)
-                                  :element-type '(unsigned-byte 8) :initial-element 128))
-                 (init (aref (cfg-initial-states cfg) qi)))
-            (when init
-              (dotimes (j (aref (cfg-context-counts cfg) qi))
-                (dotimes (m +context-size+) (setf (aref tbl j m) (aref init j m)))))
-            (setf (aref cur k) tbl)))
+          (let ((qi (aref (sl-quant-index sl) (min k 3))))
+            (setf (aref cur k)
+                  (if (zerop (cfg-ac cfg))
+                      ;; the Rice coder's per-context state is four running numbers, not a row of
+                      ;; range-coder probabilities, and it has no transmitted initial values
+                      (%fresh-vlc-states (aref (cfg-context-counts cfg) qi))
+                      (let ((tbl (make-array (list (aref (cfg-context-counts cfg) qi)
+                                                   +context-size+)
+                                             :element-type '(unsigned-byte 8)
+                                             :initial-element 128))
+                            (init (aref (cfg-initial-states cfg) qi)))
+                        (when init
+                          (dotimes (j (aref (cfg-context-counts cfg) qi))
+                            (dotimes (m +context-size+) (setf (aref tbl j m) (aref init j m)))))
+                        tbl)))))
         (setf (aref (d-states d) i) cur))
       cur)))
 
@@ -397,9 +526,7 @@
   "One FFV1 packet into a frame."
   (declare (type octets bytes) (type fixnum start end))
   (let* ((cfg (d-cfg d))
-         (frame (make-frame-for cfg))
-         (bounds (%find-slices cfg bytes start end))
-         (rgb (= 1 (cfg-colorspace cfg)))
+         (frame nil) (bounds nil) (rgb nil)
          ;; THE PACKET BEGINS WITH ONE BIT, and slice zero does not get a fresh coder afterwards —
          ;; it CONTINUES this one.  That bit says whether the frame carries a header, which for
          ;; version 3 it never does because the header is in the container; but the bit is there,
@@ -410,13 +537,45 @@
          (keystate (make-array 1 :element-type '(unsigned-byte 8) :initial-element 128))
          (key-p nil))
     (setf key-p (= 1 (get-rac frame-rc keystate 0)))
+    ;; VERSIONS 0 AND 1 PUT THE HEADER HERE, right after that bit, on every key frame.  So the
+    ;; picture's shape is not known until the frame has started being read, which is why the frame
+    ;; buffer and the slice table below are built after this and not before.
+    (when (< (cfg-version cfg) 2)
+      (if key-p
+          (parse-frame-header cfg frame-rc (fresh-state))
+          (when (minusp (cfg-version cfg))
+            (%err "a version 0 or 1 stream beginning at a frame that is not a key frame"))))
+    (setf frame (make-frame-for cfg)
+          bounds (%find-slices cfg bytes start end)
+          rgb (= 1 (cfg-colorspace cfg)))
     (dotimes (i (length bounds))
       (destructuring-bind (a . b) (aref bounds i)
         (let* ((sl (make-slice :rc (if (zerop i)
                                        (progn (setf (rc-end frame-rc) b) frame-rc)
                                        (make-decoder-over bytes a b)))))
+          (setf (sl-start sl) (if (zerop i) start a))
           (%apply-state-transition cfg (sl-rc sl))
-          (%read-slice-header cfg sl frame)
+          (if (> (cfg-version cfg) 2)
+              (%read-slice-header cfg sl frame)
+              ;; before version 3 there is no per-slice header at all — one slice, the whole
+              ;; picture, and the single quantiser table set every plane shares
+              (setf (sl-x sl) 0 (sl-y sl) 0
+                    (sl-w sl) (cfg-width cfg) (sl-h sl) (cfg-height cfg)))
+          ;; THE TWO CODERS SHARE THE SLICE, ONE AFTER THE OTHER.  Even a Golomb-Rice file range
+          ;; codes its slice header, so the Rice bits begin wherever that finished — and they begin
+          ;; ONE BYTE BEFORE the range coder's read position, because the coder has always read one
+          ;; byte further than it has used.  Version 3.2 and later spend one more range-coded bit
+          ;; here first, purely to flush that byte to a known place.
+          (when (zerop (cfg-ac cfg))
+            (when (>= (+ (ash (cfg-version cfg) 16) (cfg-micro cfg)) #x30002)
+              (get-rac (sl-rc sl) (make-array 1 :element-type '(unsigned-byte 8)
+                                                :initial-element 129)
+                       0))
+            (setf (sl-gb sl)
+                  (make-bits-over bytes
+                                  (+ (sl-start sl)
+                                     (- (rc-pos (sl-rc sl)) (sl-start sl) 1))
+                                  (rc-end (sl-rc sl)))))
           ;; THE TWO CHROMA PLANES SHARE ONE SET OF CONTEXTS, and share them RUNNING: the states
           ;; the U plane finished with are the states the V plane starts from.  They are the same
           ;; kind of picture, so what one learns is worth having for the other — and a decoder that
@@ -463,6 +622,7 @@
     (declare (type fixnum w h n offset stride))
     (dotimes (p 3) (setf (aref bufs p) (make-array (* 2 n) :element-type 'fixnum
                                                    :initial-element 0)))
+    (setf (sl-run-index sl) 0)
     (dotimes (y h)
       (declare (type fixnum y))
       (dotimes (p 3)
@@ -472,10 +632,16 @@
           (setf (aref buf (- (aref cur p) 1)) (aref buf (aref last p))
                 (aref buf (+ (aref last p) w)) (aref buf (+ (aref last p) w -1)))
           (let ((ctx (if (zerop p) 0 1)))
-            (%decode-line cfg sl (aref states ctx)
+            (%line cfg sl (aref states ctx)
                           (aref (cfg-quant-tables cfg) (aref (sl-quant-index sl) (min ctx 3)))
                           w buf (aref cur p) (aref last p) (aref cur p)
-                          (if (zerop p) (cfg-bits cfg) (1+ (cfg-bits cfg)))))))
+                          ;; ONE BIT WIDER THAN THE SAMPLES, ALL THREE PLANES.  Two of them need it
+                          ;; — the colour transform's differences span twice the range — and the
+                          ;; third does not, but every version before 4.8 widened it anyway and the
+                          ;; format is what shipped.  It costs nothing under the range coder, which
+                          ;; only uses the width as a mask, and it is not free under the Rice coder,
+                          ;; where the width is the escape field's size.
+                          (1+ (cfg-bits cfg))))))
       (let ((o (+ (* (+ (sl-y sl) y) stride) (sl-x sl))))
         (declare (type fixnum o))
         (dotimes (x w)
@@ -498,7 +664,7 @@
     (when tr
       (let ((os (rc-one-state c)) (zs (rc-zero-state c)))
         (replace os tr)
-        (loop for i of-type fixnum from 1 below 255
+        (loop for i of-type fixnum from 1 to 255
               do (setf (aref zs i) (logand (- 256 (aref os (- 256 i))) 255)))))))
 
 

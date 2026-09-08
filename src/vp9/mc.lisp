@@ -17,7 +17,7 @@
 
 (declaim (inline %tap8))
 (defun %tap8 (f fbase s0 s1 s2 s3 s4 s5 s6 s7)
-  (declare (type (simple-array (signed-byte 32) (3 16 8)) f) (type fixnum fbase)
+  (declare (type (simple-array (signed-byte 32) (4 16 8)) f) (type fixnum fbase)
            (type fixnum s0 s1 s2 s3 s4 s5 s6 s7) (optimize (speed 3) (safety 0)))
   (let ((v (+ (* (row-major-aref f (+ fbase 0)) s0) (* (row-major-aref f (+ fbase 1)) s1)
               (* (row-major-aref f (+ fbase 2)) s2) (* (row-major-aref f (+ fbase 3)) s3)
@@ -79,7 +79,7 @@
          (iy (+ y (ash mvy (- shift))))
          (px (if eighths (* 2 (logand mvx mask)) (logand mvx mask)))
          (py (if eighths (* 2 (logand mvy mask)) (logand mvy mask)))
-         (f +subpel-filters+)
+         (f +subpel-filters-all+)
          (fxb (+ (* 128 filter) (* 8 px)))
          (fyb (+ (* 128 filter) (* 8 py)))
          ;; the filter reaches three samples back and four forward, and only along an axis it filters

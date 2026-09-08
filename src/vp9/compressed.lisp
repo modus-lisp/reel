@@ -199,7 +199,7 @@
     (dotimes (i 3) (%maybe-update c (aref (pr-skip p) i)))
     (unless key-or-intra
       (dotimes (i 7) (dotimes (j 3) (%maybe-update c (aref (pr-mv-mode p) i j))))
-      (when (= 3 (h-filter-mode h))
+      (when (h-filter-switchable h)
         (dotimes (i 4) (dotimes (j 2) (%maybe-update c (aref (pr-filter p) i j)))))
       (dotimes (i 4) (%maybe-update c (aref (pr-intra p) i)))
       (if (h-allow-comp-inter h)

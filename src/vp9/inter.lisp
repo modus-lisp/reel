@@ -325,7 +325,7 @@
             (incf (aref (cn-mv-mode (st-counts st)) k (- v 10)))
             (dotimes (i 4) (setf (aref m i) v)))))
     ;; ---- the interpolation filter
-    (if (= 3 (h-filter-mode h))
+    (if (h-filter-switchable h)
         (let ((k (cond ((and have-a (>= (aref (st-above-mode st) col) +nearestmv+))
                         (if (and have-l (>= (aref (st-left-mode st) row7) +nearestmv+))
                             (if (= (aref (st-above-filter st) col)
@@ -383,10 +383,11 @@
         (aref (st-bref st) 0))))
 
 (defparameter +filter-lut+
-  (make-array 3 :element-type '(signed-byte 32) :initial-contents '(1 0 2))
-  "The filter tree's three symbols are not the filter numbers: the tree is ordered by how often each
-   is chosen and the filters by how smooth they are.")
-(declaim (type (simple-array (signed-byte 32) (3)) +filter-lut+))
+  (make-array 4 :element-type '(signed-byte 32) :initial-contents '(1 0 2 3))
+  "The filter tree's symbols are not the filter numbers: the tree is ordered by how often each is
+   chosen and the filters by how smooth they are.  The fourth is bilinear, which the tree never
+   reaches — a frame that uses it says so in its header and every block takes it.")
+(declaim (type (simple-array (signed-byte 32) (4)) +filter-lut+))
 
 (defun %store-mv-contexts (st bs row7 col bw4 bh4)
   "The vectors a later block will read as its above and left neighbours.

@@ -72,7 +72,13 @@
   (sign-bias (make-array 3 :element-type '(signed-byte 32) :initial-element 0)
              :type (simple-array (signed-byte 32) (3)))
   (high-precision-mv nil)
-  (filter-mode 0 :type fixnum)                  ; 0..2 a fixed filter, 3 switchable per block
+  ;; THE FILTER AND WHETHER IT IS PER BLOCK ARE TWO FACTS, and they were one field until the
+  ;; conformance vectors arrived.  A frame either names one filter for every block or says the
+  ;; blocks choose for themselves — and the four filters are numbered 0..3, so using 3 to mean
+  ;; "switchable" collides with bilinear, which is filter 3.  No ordinary encode contains a
+  ;; bilinear frame, so the collision cost nothing until vp90-2-06-bilinear.
+  (filter-mode 0 :type fixnum)                  ; 0 smooth, 1 regular, 2 sharp, 3 bilinear
+  (filter-switchable nil)                       ; each block names its own
   (allow-comp-inter nil)
   (fix-comp-ref 0 :type fixnum)
   (var-comp-ref (make-array 2 :element-type '(signed-byte 32) :initial-element 0)
@@ -262,7 +268,8 @@
                       (setf (h-render-width h) (h-width h) (h-render-height h) (h-height h)))
                   (size)))
             (setf (h-high-precision-mv h) (plusp (read-bit br)))
-            (setf (h-filter-mode h) (if (plusp (read-bit br)) 3 (read-bits br 2)))
+            (setf (h-filter-switchable h) (plusp (read-bit br)))
+            (unless (h-filter-switchable h) (setf (h-filter-mode h) (read-bits br 2)))
             ;; two references may be combined only if they point in different directions in time,
             ;; which is what the sign biases say
             (let ((sb (h-sign-bias h)))

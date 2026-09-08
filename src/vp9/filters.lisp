@@ -1,7 +1,7 @@
-;;;; vp9/filters.lisp — GENERATED.  The three eight-tap interpolation filters.
+;;;; vp9/filters.lisp — GENERATED (the three eight-tap filters) plus the bilinear one.
 ;;;;
 ;;;; A motion vector addresses eighths of a sample, and the sample at a fractional position is an
-;;;; eight-tap filter of its neighbours.  VP9 has THREE such filters and a block chooses between
+;;;; eight-tap filter of its neighbours.  VP9 has three such filters and a block chooses between
 ;;;; them: regular, sharp, and smooth.  That is unusual — most codecs have one — and it is there
 ;;;; because the right filter depends on the content: a sharp filter preserves detail and rings on
 ;;;; noise, a smooth one does the opposite.
@@ -72,4 +72,29 @@
 ))
   "[filter][phase][tap].  The filters are in the order the bitstream numbers them — smooth, regular,
    sharp — which is not the order ffmpeg declares them in.")
+
+;;; ---- and a fourth, which is not an eight-tap filter at all ---------------------------------------
+;;;
+;;; A FOURTH INTERPOLATION FILTER EXISTS and this file said for a long time that there were three.
+;;; BILINEAR is a two-tap linear blend padded out to eight taps so that one piece of code serves all
+;;; four — phase k weights the two samples either side by 128-8k and 8k.  Encoders reach for it at
+;;; very low bit rates and in speed-oriented modes, so no ordinary encode contains one and the
+;;; omission survived a corpus of seven clips decoding bit-exact.  The official conformance vector
+;;; vp90-2-06-bilinear is what found it.
+;;;
+;;; It is generated rather than transcribed because it is arithmetic, not a table.
+
+(defparameter +subpel-filters-all+
+  (let ((all (make-array '(4 16 8) :element-type '(signed-byte 32) :initial-element 0)))
+    (dotimes (f 3)
+      (dotimes (p 16)
+        (dotimes (tap 8)
+          (setf (aref all f p tap) (aref +subpel-filters+ f p tap)))))
+    (dotimes (p 16)
+      (setf (aref all 3 p 3) (- 128 (* 8 p))
+            (aref all 3 p 4) (* 8 p)))
+    all)
+  "The three eight-tap filters, and bilinear as the fourth.")
+(declaim (type (simple-array (signed-byte 32) (4 16 8)) +subpel-filters-all+))
+
 (declaim (type (simple-array (signed-byte 32) (3 16 8)) +subpel-filters+))

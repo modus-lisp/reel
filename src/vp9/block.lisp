@@ -405,7 +405,7 @@
        (unless (st-intra st)
          (%splat (st-above-ref st) col bw4 vref)
          (%splat (st-left-ref st) row7 bh4 vref)
-         (when (= 3 (h-filter-mode h))
+         (when (h-filter-switchable h)
            (%splat (st-above-filter st) col bw4 (st-bfilter-id st))
            (%splat (st-left-filter st) row7 bh4 (st-bfilter-id st))))
        (%store-mv-contexts st bs row7 col bw4 bh4)))

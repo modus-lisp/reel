@@ -191,7 +191,7 @@
         (%adapt (aref (pr-tx32p p) i 1) (aref (cn-tx32p cn) i 1)
                 (+ (aref (cn-tx32p cn) i 2) (aref (cn-tx32p cn) i 3)))
         (%adapt (aref (pr-tx32p p) i 2) (aref (cn-tx32p cn) i 2) (aref (cn-tx32p cn) i 3))))
-    (when (= 3 (h-filter-mode h))
+    (when (h-filter-switchable h)
       (dotimes (i 4)
         (%adapt (aref (pr-filter p) i 0) (aref (cn-filter cn) i 0)
                 (+ (aref (cn-filter cn) i 1) (aref (cn-filter cn) i 2)))

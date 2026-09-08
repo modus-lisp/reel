@@ -91,6 +91,9 @@ because nobody knows to disbelieve it.
 - FFV1: version 2, which was experimental and never shipped; more than 8 bits per sample; and Bayer. The player additionally
   refuses anything but 4:2:0, because one picture type serves every codec here and it is 4:2:0 —
   the decoder itself handles the others.
+- VP9: profiles 1, 2 and 3 — anything but eight bits and 4:2:0 — and, for now, VP9 itself: the
+  headers parse and a picture is not yet produced, so the player names the track rather than
+  half-decoding it.
 - AC-3 and DTS, which a DVD may carry instead of MPEG audio. A file's video plays and the audio
   track is named as undecodable rather than guessed at.
 
@@ -100,6 +103,12 @@ because nobody knows to disbelieve it.
 
 The other half of what the web actually serves. Big, but the better target than HEVC if the goal is
 playing what people link you.
+
+Underway. The tables, both readers and the uncompressed frame header are in and verified: every
+frame of a 176x144 and a 1280x720 encode parses, the header agrees with the container about the
+size and the tiling, and superframes split. `reel/src/vp9/NOTES.md` says what remains, which is
+most of it: the compressed header, the partition tree, reconstruction, motion, and the loop
+filter.
 
 ## Not worth it, and why
 

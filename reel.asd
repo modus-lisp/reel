@@ -102,6 +102,14 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
        (:file "golomb")      ; the OTHER entropy coder: adaptive Rice codes and a run mode
        (:file "decode"))   ; the configuration record, slices, and prediction
       )
+     ;; ---- VP9, headers only for now: the codec itself is refused
+     (:module "vp9"
+      :serial t
+      :components
+      ((:file "tables")      ; GENERATED: the quantiser lookups and the symbol trees
+       (:file "bits")        ; the plain bit reader, and VP8's arithmetic coder above it
+       (:file "headers"))    ; the superframe index and the uncompressed frame header
+      )
      ;; ---- Theora, a VP3 descendant, in Ogg
      (:module "theora"
       :serial t

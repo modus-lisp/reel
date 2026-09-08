@@ -77,6 +77,17 @@
    #:frame #:fr-width #:fr-height #:fr-cwidth #:fr-cheight #:fr-keyframe
    #:fr-y #:fr-u #:fr-v #:fr-ystride #:fr-cstride #:fr-timestamp #:as-picture))
 
+(defpackage #:reel.vp9
+  (:use #:cl)
+  (:export
+   #:vp9-error #:vp9-error-message
+   #:split-superframe
+   #:header #:parse-header
+   #:h-profile #:h-keyframe #:h-show-frame #:h-show-existing #:h-intra-only
+   #:h-width #:h-height #:h-render-width #:h-render-height
+   #:h-base-q #:h-lossless #:h-filter-level #:h-refresh-mask
+   #:h-log2-tile-cols #:h-log2-tile-rows #:h-compressed-size))
+
 (defpackage #:reel.ffv1
   (:use #:cl)
   (:export

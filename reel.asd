@@ -72,6 +72,15 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
        (:file "decode")      ; NAL units in, pictures out
        (:file "parallel"))    ; independent pictures, decoded at the same time
       )
+     ;; ---- HEVC / H.265, its own package again.  Nothing here is shared with h264 except the
+     ;; shape of the ideas: the CABAC arithmetic engine is bit-identical, but its context set,
+     ;; its binarizations and everything they drive are not.
+     (:module "hevc"
+      :serial t
+      :components
+      ((:file "bits")         ; NAL units (a TWO byte header), RBSP, the Exp-Golomb bit reader
+       (:file "params")))     ; profile/tier/level, sequence and picture parameter sets, slices
+
      ;; ---- MPEG-1 and MPEG-2 video, which are one bitstream with one of them extended
      (:module "mpeg2"
       :serial t

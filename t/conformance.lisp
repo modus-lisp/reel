@@ -119,9 +119,57 @@
     (format t "~&H.264: ~d passed, ~d failed, ~d refused~%" pass fail refused)
     fail))
 
+;;; ---- HEVC: the JCT-VC conformance streams, headers only for now -------------------------------
+;;;
+;;; The decoder is still being built and reads no pictures yet, so what can be checked is what the
+;;; parser claims about a stream's geometry against what ffprobe says it is.  That is a real test
+;;; and not a placeholder: the sequence parameter set declares the coding tree size, the quadtree
+;;; depths and the conformance window, and getting any of them wrong moves the picture size.  A
+;;; stream this cannot parse at all is a FAILURE; one it refuses by naming a tool is not.
+
+(defun run-hevc ()
+  (let ((pass 0) (fail 0) (refused 0))
+    (dolist (f (sort (directory (format nil "~a/hevc/*.bit" *conf*)) #'string< :key #'namestring))
+      (let ((dims (probe-file (format nil "~a.dims" (namestring f)))))
+        (handler-case
+            (let ((spss (make-hash-table)) (ppss (make-hash-table))
+                  (w 0) (h 0) (slices 0))
+              (dolist (n (reel.hevc:annex-b-nals (slurp f)))
+                ;; an enhancement layer is not ours to decode; Annex F says discard it
+                (when (reel.hevc:nal-base-layer-p n)
+                  (cond
+                    ((= (reel.hevc::nal-type n) reel.hevc::+nal-sps+)
+                     (let ((sp (reel.hevc:parse-sps (reel.hevc:nal-rbsp n))))
+                       (setf (gethash (reel.hevc:sps-id sp) spss) sp
+                             w (reel.hevc:sps-display-width sp)
+                             h (reel.hevc:sps-display-height sp))))
+                    ((= (reel.hevc::nal-type n) reel.hevc::+nal-pps+)
+                     (let ((pp (reel.hevc:parse-pps (reel.hevc:nal-rbsp n))))
+                       (setf (gethash (reel.hevc:pps-id pp) ppss) pp)))
+                    ((reel.hevc:nal-slice-p n)
+                     (reel.hevc:parse-slice-header
+                      (reel.hevc:make-bitreader (reel.hevc:nal-rbsp n)) n spss ppss)
+                     (incf slices)))))
+              (let ((want (and dims (with-open-file (s dims) (read-line s nil "")))))
+                (cond ((zerop slices)
+                       (incf fail)
+                       (format t "~&  FAIL ~a: no slice headers~%" (pathname-name f)))
+                      ((and want (string/= want (format nil "~dx~d" w h)))
+                       (incf fail)
+                       (format t "~&  FAIL ~a: parsed ~dx~d, ffprobe says ~a~%"
+                               (pathname-name f) w h want))
+                      (t (incf pass)))))
+          (reel.hevc:hevc-error (e) (incf refused)
+            (format t "~&  --   ~a: refused — ~a~%" (pathname-name f) e))
+          (error (e) (incf fail) (format t "~&  FAIL ~a: ~a~%" (pathname-name f) e)))))
+    (format t "~&HEVC: ~d streams parsed with the geometry ffprobe reports, ~d failed, ~d refused~%"
+            pass fail refused)
+    fail))
+
 (let ((bad 0))
   (format t "~&== VP8, the official libvpx vectors~%")   (incf bad (run-vp8))
   (format t "~&== VP9, the official feature vectors~%")  (incf bad (run-vp9))
   (format t "~&== H.264, a spread of the JVT streams~%") (incf bad (run-h264))
+  (format t "~&== HEVC, the JCT-VC streams (headers)~%")  (incf bad (run-hevc))
   (format t "~&~:[CONFORMANCE OK~;CONFORMANCE: ~:*~d streams decode incorrectly~]~%"
           (if (plusp bad) bad nil)))

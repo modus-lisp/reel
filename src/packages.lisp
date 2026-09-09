@@ -161,3 +161,27 @@
    #:picture-y-stride #:picture-uv-stride #:picture-y-offset #:picture-uv-offset
    #:picture-timestamp #:picture->rgb #:picture->rgb-into #:picture->yuv420))
 
+
+;;; HEVC / H.265.  Its own package for the same reason every other codec here has one: the names
+;;; collide with H.264's almost everywhere — SPS, PPS, PARSE-SLICE-HEADER, MAKE-BITREADER — and the
+;;; two mean different things by them.
+(defpackage #:reel.hevc
+  (:use #:cl)
+  (:export
+   #:hevc-error #:hevc-error-message
+   ;; the bitstream layer
+   #:nal #:nal-type #:nal-layer-id #:nal-temporal-id #:nal-rbsp
+   #:nal-slice-p #:nal-irap-p #:nal-idr-p #:nal-bla-p #:nal-reference-p #:nal-base-layer-p
+   #:annex-b-nals #:length-prefixed-nals #:parse-nal #:hvcc-parameter-sets #:rbsp-from
+   #:bitreader #:make-bitreader #:u1 #:ub #:ue #:se #:byte-align #:more-rbsp-data-p
+   ;; parameter sets
+   #:sps #:parse-sps #:sps-id #:sps-width #:sps-height
+   #:sps-display-width #:sps-display-height
+   #:sps-chroma-format #:sps-bit-depth-luma #:sps-bit-depth-chroma
+   #:sps-ctb-log2 #:sps-ctb-size #:sps-ctbs-wide #:sps-ctbs-high #:sps-ctbs
+   #:sps-min-cb-log2 #:sps-min-tb-log2 #:sps-max-tb-log2
+   #:sps-sao-enabled #:sps-amp-enabled #:sps-pcm-enabled #:sps-strong-intra-smoothing
+   #:sps-ptl #:ptl-profile-idc #:ptl-level #:ptl-tier
+   #:pps #:parse-pps #:pps-id #:pps-sps-id
+   #:slice #:parse-slice-header #:sh-type #:sh-qp #:sh-first-in-pic #:sh-dependent
+   #:sh-segment-address #:sh-poc-lsb #:sh-i-slice-p #:sh-p-slice-p #:sh-b-slice-p))

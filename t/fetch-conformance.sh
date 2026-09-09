@@ -57,6 +57,10 @@ for f in BA1_FT_C.264 BA1_Sony_D.jsv BA2_Sony_F.jsv BA3_SVA_C.264 BAMQ1_JVC_C.26
   get h264 h264-conformance "$f"
 done
 
+echo "HEVC: the JCT-VC conformance streams"
+curl -sSL "$BASE/hevc-conformance/" | grep -oE 'href="[A-Za-z0-9_.-]+\.bit"' | sed 's/href="//;s/"//' \
+  | while read -r f; do get hevc hevc-conformance "$f"; done
+
 echo "AC-3: real Dolby-encoded material, which ffmpeg's encoder cannot stand in for"
 for f in millers_crossing_4.0.ac3 monsters_inc_2.0_192_small.ac3 monsters_inc_5.1_448_small.ac3; do
   get ac3 ac3 "$f"
@@ -74,6 +78,15 @@ for f in "$CONF"/vp8/*.ivf "$CONF"/vp9/*.webm "$CONF"/h264/*.264 "$CONF"/h264/*.
   ffmpeg -v error -y -i "$f" -fps_mode passthrough -f rawvideo -pix_fmt yuv420p "$f.ref.yuv" \
     2>/dev/null || true
 done
+# HEVC has no reference decodes yet — the decoder is still being built and only reads headers — so
+# what is recorded for it is the picture geometry ffprobe reports, which is what the sequence
+# parameter set parser can be held to today.  A few bytes per stream rather than a raw YUV.
+for f in "$CONF"/hevc/*.bit; do
+  [ -f "$f" ] || continue
+  ffprobe -v error -select_streams v -show_entries stream=width,height -of csv=p=0 "$f" 2>/dev/null \
+    | head -1 | tr ',' 'x' > "$f.dims"
+done
+
 # CVFC1 is the one stream in the suite that crops from the LEFT as well as the right, and ffmpeg
 # does not apply frame_crop_left_offset: it emits 326-wide frames where the sequence parameter set
 # says 300, with the picture sitting 26 samples in.  Its own stream metadata says 300, so this is an

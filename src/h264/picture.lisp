@@ -71,6 +71,12 @@ the thirty-two bits the array is, which is why it is not MOST-NEGATIVE-FIXNUM.")
 
 (defstruct (picture (:conc-name pic-))
   (width 0 :type dim) (height 0 :type dim)                ; displayed, after cropping
+  ;; Where the displayed picture STARTS inside the coded one, in luma samples.  Cropping has an
+  ;; origin as well as a size, and almost every encoder ever written leaves this at zero — it crops
+  ;; only the right and bottom, because that is where macroblock alignment puts the waste.  A
+  ;; decoder that ignores it is right about every stream it is likely to meet and wrong about the
+  ;; conformance stream written to check.
+  (crop-x 0 :type dim) (crop-y 0 :type dim)
   (mb-width 0 :type dim) (mb-height 0 :type dim)
   ;; TYPED, and it matters more than it looks.  Every sample the decoder reads or writes goes
   ;; through one of these slots, and an untyped slot makes each of those a generic array dispatch
@@ -138,6 +144,8 @@ the thirty-two bits the array is, which is why it is not MOST-NEGATIVE-FIXNUM.")
          (ys (+ aw (* 2 +pad+))) (cs (+ (ash aw -1) (* 2 +pad+))))
     (make-picture
      :width (sps-width sps) :height (sps-height sps)
+     ;; the crop offsets are in chroma sample units for 4:2:0, so two luma samples each
+     :crop-x (* 2 (sps-crop-left sps)) :crop-y (* 2 (sps-crop-top sps))
      :mb-width mbw :mb-height mbh
      :y (make-array (* ys (+ ah (* 2 +pad+))) :element-type '(unsigned-byte 8) :initial-element 128)
      :u (make-array (* cs (+ (ash ah -1) (* 2 +pad+))) :element-type '(unsigned-byte 8) :initial-element 128)

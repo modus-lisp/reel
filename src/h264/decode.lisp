@@ -412,17 +412,22 @@
    caller wants the picture the file says it is."
   (let* ((w (pic-width pic)) (h (pic-height pic))
          (cw (ceiling w 2)) (ch (ceiling h 2))
+         ;; the crop has an ORIGIN, not just a size: the visible picture may start inside the
+         ;; coded one on the left and top as well as ending early on the right and bottom
+         (ybase (+ (pic-yoff pic) (* (pic-crop-y pic) (pic-ystride pic)) (pic-crop-x pic)))
+         (cbase (+ (pic-coff pic) (* (ash (pic-crop-y pic) -1) (pic-cstride pic))
+                   (ash (pic-crop-x pic) -1)))
          (out (make-array (+ (* w h) (* 2 cw ch)) :element-type '(unsigned-byte 8)))
          (o 0))
     (dotimes (y h)
       (replace out (pic-y pic) :start1 o
-                               :start2 (+ (pic-yoff pic) (* y (pic-ystride pic)))
-                               :end2 (+ (pic-yoff pic) (* y (pic-ystride pic)) w))
+                               :start2 (+ ybase (* y (pic-ystride pic)))
+                               :end2 (+ ybase (* y (pic-ystride pic)) w))
       (incf o w))
     (dolist (plane (list (pic-u pic) (pic-v pic)))
       (dotimes (y ch)
         (replace out plane :start1 o
-                           :start2 (+ (pic-coff pic) (* y (pic-cstride pic)))
-                           :end2 (+ (pic-coff pic) (* y (pic-cstride pic)) cw))
+                           :start2 (+ cbase (* y (pic-cstride pic)))
+                           :end2 (+ cbase (* y (pic-cstride pic)) cw))
         (incf o cw)))
     out))

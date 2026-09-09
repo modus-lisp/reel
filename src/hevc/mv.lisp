@@ -59,16 +59,19 @@
         (aref c (+ (* +cand-size+ i) 6)) -1))
 
 (defun %same-motion-p (c i j)
-  "Do two candidates have identical motion in both lists?  This is the redundancy test the
-   standard's pruning is written in terms of, and it compares the reference PICTURE rather than the
-   index — two indices into different lists can name the same picture."
+  "Do two candidates have the same vectors and the same reference INDICES?
+
+   Indices, not pictures.  A reference list may legitimately hold the same picture twice — it is
+   filled by repeating the set until it is long enough — so two different indices can name one
+   picture, and the standard treats those as different motion.  Comparing pictures instead merges
+   candidates the encoder kept apart, and every merge index after the merged pair is then off by
+   one."
   (dotimes (lx 2 t)
     (let ((ri (cand-ref c i lx)) (rj (cand-ref c j lx)))
-      (unless (and (= (if (minusp ri) -1 1) (if (minusp rj) -1 1))
+      (unless (and (= ri rj)
                    (or (minusp ri)
                        (and (= (cand-mvx c i lx) (cand-mvx c j lx))
-                            (= (cand-mvy c i lx) (cand-mvy c j lx))
-                            (= (cand-poc c i lx) (cand-poc c j lx)))))
+                            (= (cand-mvy c i lx) (cand-mvy c j lx)))))
         (return nil)))))
 
 (defun %neighbour-motion (c x y)
@@ -110,23 +113,32 @@
         (declare (type fixnum td tb tx scale v))
         (%clip3 -32768 32767 (* (if (minusp v) -1 1) (ash (+ (abs v) 127) -8))))))
 
-(defun %temporal-candidate (c cands i x0 y0 w h)
+(defun %temporal-candidate (c cands i x0 y0 w h &optional (ref-idx 0) (lists (list 0 1)))
   "The collocated candidate (8.5.3.2.8): the motion of the block at the same place in another
    picture, scaled for the difference in temporal distance.
 
    Bottom-right first and the centre as a fallback, because the bottom-right of a moving object is
-   more likely to still be the object in the next picture than its centre is to still be its
-   centre.  It is read at SIXTEEN-sample granularity — the collocated field is stored coarsely, so
-   a decoder need not keep a full-resolution motion field for every reference picture."
-  (declare (type ctx c) (type fixnum i x0 y0 w h))
+   more likely to still be the object in the next picture than its centre is to still be its centre.
+   Read at SIXTEEN-sample granularity, so a decoder need not keep a full-resolution motion field
+   for every reference picture.
+
+   WHICH OF THE COLLOCATED BLOCK'S TWO VECTORS TO TAKE is the part with real content.  If it used
+   only one list, that one.  If it used both, then it depends on whether the current picture has
+   any reference AFTER it in output order: in a low-delay stream, where everything points
+   backwards, take the list being derived; otherwise take the one OPPOSITE the collocated picture's
+   own list, because that is the vector pointing across the current picture rather than away from
+   it.  Taking list 0 whenever it exists — the obvious reading — is right for every P picture and
+   wrong for most B ones."
+  (declare (type ctx c) (type fixnum i x0 y0 w h ref-idx))
   (%clear-cand cands i)
   (let ((col (cx-collocated c)))
     (unless col (return-from %temporal-candidate nil))
     (let* ((pic (cx-pic c))
            (cw (pic-width pic)) (ch (pic-height pic))
+           (log2 (pic-ctb-log2 pic))
            (bx (+ x0 w)) (by (+ y0 h))
            (found nil))
-      (declare (type fixnum bx by))
+      (declare (type fixnum cw ch bx by))
       (flet ((probe (px py)
                ;; the collocated position is rounded down to a multiple of sixteen
                (let ((qx (logandc2 px 15)) (qy (logandc2 py 15)))
@@ -136,25 +148,32 @@
                       (cons qx qy)))))
         (let ((at (or (and (< bx cw) (< by ch)
                            ;; and only when it is still inside this coding tree block row
-                           (= (ash by (- (pic-ctb-log2 pic))) (ash y0 (- (pic-ctb-log2 pic))))
+                           (= (ash by (- log2)) (ash y0 (- log2)))
                            (probe bx by))
                       (probe (+ x0 (ash w -1)) (+ y0 (ash h -1))))))
           (when at
-            ;; the collocated block's own list 0 is preferred; where it used only list 1, that
-            ;; vector serves for both of ours
-            (let ((src (if (minusp (nth-value 2 (pic-motion col (car at) (cdr at) 0))) 1 0)))
-              (multiple-value-bind (mvx mvy ref poc) (pic-motion col (car at) (cdr at) src)
-                (unless (minusp ref)
-                  (dotimes (lx 2)
-                    (let ((list (if (zerop lx) (cx-list0 c) (cx-list1 c))))
-                      (when (plusp (length list))
-                        (let* ((target (aref list 0))
-                               (tb (- (pic-poc pic) (pic-poc target)))
-                               (td (- (pic-poc col) poc)))
-                          (setf found t)
-                          (%set-cand cands i lx (%scale-mv mvx td tb) (%scale-mv mvy td tb)
-                                     0 (pic-poc target)))))))))
-            found))))))
+            (let* ((r0 (nth-value 2 (pic-motion col (car at) (cdr at) 0)))
+                   (r1 (nth-value 2 (pic-motion col (car at) (cdr at) 1)))
+                   ;; does anything this picture may predict from come AFTER it on screen?
+                   (any-after
+                     (or (some (lambda (p) (> (pic-poc p) (pic-poc pic))) (cx-list0 c))
+                         (some (lambda (p) (> (pic-poc p) (pic-poc pic))) (cx-list1 c)))))
+              (dolist (lx lists)
+                (let ((src (cond ((minusp r0) 1)
+                                 ((minusp r1) 0)
+                                 (any-after (if (sh-collocated-from-l0 (cx-sh c)) 1 0))
+                                 (t lx))))
+                  (multiple-value-bind (mvx mvy ref poc) (pic-motion col (car at) (cdr at) src)
+                    (when (>= ref 0)
+                      (let ((list (if (zerop lx) (cx-list0 c) (cx-list1 c))))
+                        (when (< ref-idx (length list))
+                          (let* ((target (aref list ref-idx))
+                                 (tb (- (pic-poc pic) (pic-poc target)))
+                                 (td (- (pic-poc col) poc)))
+                            (setf found t)
+                            (%set-cand cands i lx (%scale-mv mvx td tb) (%scale-mv mvy td tb)
+                                       ref-idx (pic-poc target)))))))))
+              found)))))))
 
 (defun %merge-candidates (c x0 y0 w h part-idx part-mode out)
   "The merge list (8.5.3.2.2), in order and deduplicated.
@@ -235,62 +254,70 @@
     n))
 
 (defun %amvp (c x0 y0 w h lx ref-idx)
-  "The two motion vector predictors (8.5.3.2.6), as (values ax ay bx by count).
+  "The two motion vector predictors (8.5.3.2.7), as (values ax ay bx by count).
 
-   Each side is searched twice: first for a neighbour that used the SAME reference picture, whose
-   vector can be taken as it is, and only then for one that used a different reference, whose
-   vector has to be scaled by the ratio of temporal distances.  Doing it in one pass and scaling
-   everything gives a different predictor whenever an unscaled one was available."
+   Each side is searched TWICE: first for a neighbour that used the same reference picture, whose
+   vector is taken as it is, and only then for one that used a different reference, whose vector is
+   scaled by the ratio of temporal distances.  One pass that scales everything gives a different
+   predictor wherever an unscaled one was available.
+
+   ISSCALEDFLAG is the part with no obvious motivation and it changes the answer.  If NEITHER of the
+   two left positions is even a decoded block — the block is at the left edge of a slice, say — then
+   the B side's first-pass result becomes the A candidate, and B is derived again with scaling.  So
+   a block with no left neighbour does not simply get one candidate; it gets two, from the same
+   three positions read twice under different rules."
   (declare (type ctx c) (type fixnum x0 y0 w h lx ref-idx))
   (let* ((pic (cx-pic c))
          (list (if (zerop lx) (cx-list0 c) (cx-list1 c)))
-         (target (and (< ref-idx (length list)) (pic-poc (aref list ref-idx))))
-         (cur (pic-poc pic))
-         (ax 0) (ay 0) (a-found nil)
-         (bx 0) (by 0) (b-found nil))
-    (declare (type fixnum ax ay bx by))
-    (unless target (return-from %amvp (values 0 0 0 0 0)))
-    (labels ((probe (px py want-same)
-               ;; (values mvx mvy) from this neighbour, or NIL
-               (when (%neighbour-motion c px py)
-                 (dotimes (l 2)
-                   ;; the neighbour's own list LX first, then the other one: a vector is a vector,
-                   ;; and which list it was coded in does not change where it points
-                   (let ((k (if (zerop l) lx (- 1 lx))))
-                     (multiple-value-bind (mvx mvy ref poc) (pic-motion pic px py k)
-                       (declare (ignore ref))
-                       (let ((r (nth-value 2 (pic-motion pic px py k))))
-                         (unless (minusp r)
-                           (if want-same
-                               (when (= poc target) (return-from probe (values mvx mvy)))
-                               (return-from probe
+         (cur (pic-poc pic)))
+    (when (>= ref-idx (length list)) (return-from %amvp (values 0 0 0 0 0)))
+    (let* ((target (pic-poc (aref list ref-idx)))
+           (a-pos (list (cons (1- x0) (+ y0 h)) (cons (1- x0) (+ y0 h -1))))       ; A0, A1
+           (b-pos (list (cons (+ x0 w) (1- y0)) (cons (+ x0 w -1) (1- y0))
+                        (cons (1- x0) (1- y0))))                                    ; B0, B1, B2
+           ;; whether the LEFT positions are decoded blocks at all, regardless of what they hold
+           (scaled-flag (some (lambda (at) (%neighbour-motion c (car at) (cdr at))) a-pos)))
+      (labels
+          ((probe (px py same)
+             ;; (values mvx mvy) from this neighbour: its own list first, then the other one,
+             ;; because a vector points where it points whichever list carried it
+             (when (%neighbour-motion c px py)
+               (dotimes (l 2)
+                 (let ((k (if (zerop l) lx (- 1 lx))))
+                   (multiple-value-bind (mvx mvy ref poc) (pic-motion pic px py k)
+                     (when (>= ref 0)
+                       (if same
+                           (when (= poc target) (return-from probe (values mvx mvy)))
+                           (return-from probe
+                             (if (= poc target)
+                                 (values mvx mvy)
                                  (values (%scale-mv mvx (- cur poc) (- cur target))
-                                         (%scale-mv mvy (- cur poc) (- cur target))))))))))
-                 nil)))
-      ;; ---- A, from below-left then left
-      (dolist (same '(t nil))
-        (unless a-found
-          (dolist (at (list (cons (1- x0) (+ y0 h)) (cons (1- x0) (+ y0 h -1))))
-            (unless a-found
-              (multiple-value-bind (mx my) (probe (car at) (cdr at) same)
-                (when mx (setf ax mx ay my a-found t)))))))
-      ;; ---- B, from above-right, above, then the corner
-      (dolist (same '(t nil))
-        (unless b-found
-          (dolist (at (list (cons (+ x0 w) (1- y0)) (cons (+ x0 w -1) (1- y0))
-                            (cons (1- x0) (1- y0))))
-            (unless b-found
-              (multiple-value-bind (mx my) (probe (car at) (cdr at) same)
-                (when mx (setf bx mx by my b-found t))))))))
-    (let ((n 0))
-      (declare (type fixnum n))
-      (when a-found (incf n))
-      (when (and b-found (or (not a-found) (/= ax bx) (/= ay by)))
-        (if a-found (setf n 2) (setf ax bx ay by n 1)))
-      (when (and (< n 2) (sh-temporal-mvp (cx-sh c)))
-        (let ((tmp (make-array (* +cand-size+ 6) :element-type 'fixnum :initial-element 0)))
-          (when (%temporal-candidate c tmp 5 x0 y0 w h)
-            (let ((mx (cand-mvx tmp 5 lx)) (my (cand-mvy tmp 5 lx)))
-              (unless (minusp (cand-ref tmp 5 lx))
-                (if (zerop n) (setf ax mx ay my n 1) (setf bx mx by my n 2)))))))
-      (values ax ay bx by n))))
+                                         (%scale-mv mvy (- cur poc) (- cur target)))))))))))
+             nil)
+           (search-positions (positions same)
+             (dolist (at positions nil)
+               (multiple-value-bind (mx my) (probe (car at) (cdr at) same)
+                 (when mx (return (cons mx my)))))))
+        (let* ((a (or (search-positions a-pos t)
+                      (search-positions a-pos nil)))
+               (b (search-positions b-pos t)))
+          ;; with no left neighbour at all, B's unscaled result becomes A and B is redone scaled
+          (unless scaled-flag
+            (setf a b)
+            (setf b (search-positions b-pos nil)))
+          ;; two candidates that say the same thing are one candidate
+          (when (and a b (= (car a) (car b)) (= (cdr a) (cdr b)))
+            (setf b nil))
+          (let ((cands (remove nil (list a b))))
+            ;; then the collocated one, and then zeros, to a total of two
+            (when (and (< (length cands) 2) (sh-temporal-mvp (cx-sh c)))
+              (let ((tmp (make-array (* +cand-size+ 6) :element-type 'fixnum :initial-element 0)))
+                (when (%temporal-candidate c tmp 5 x0 y0 w h ref-idx (list lx))
+                  (unless (minusp (cand-ref tmp 5 lx))
+                    (setf cands (append cands
+                                        (list (cons (cand-mvx tmp 5 lx)
+                                                    (cand-mvy tmp 5 lx)))))))))
+            (loop while (< (length cands) 2) do (setf cands (append cands (list (cons 0 0)))))
+            (values (car (first cands)) (cdr (first cands))
+                    (car (second cands)) (cdr (second cands))
+                    2)))))))

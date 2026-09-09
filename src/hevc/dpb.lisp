@@ -60,8 +60,11 @@
    — which is the whole design: the encoder states the buffer rather than editing it."
   (let ((strps (sh-strps sh)))
     (when (or (nal-idr-p nal) (nal-bla-p nal))
-      ;; a random access point that resets: nothing before it survives
-      (setf (dec-dpb d) '())
+      ;; A random access point that resets: nothing before it may be PREDICTED FROM again.  That is
+      ;; not the same as nothing before it surviving — a picture still waiting to be displayed has
+      ;; to stay until it has been, and discarding it here loses frames from the middle of the
+      ;; output rather than producing a wrong one, which is harder to notice.
+      (setf (dec-dpb d) (remove-if #'pic-output-done (dec-dpb d)))
       (return-from %apply-rps (values #() #())))
     (unless strps (return-from %apply-rps (values #() #())))
     (let ((before '()) (after '()) (keep '()))
@@ -79,8 +82,12 @@
                    (when pic
                      (push pic keep)
                      (when (aref (strps-used-pos strps) i) (push pic after)))))
-        ;; the lists were built by walking the set, which is already sorted by distance
-        (setf (dec-dpb d) (remove-if-not (lambda (p) (member p keep)) (dec-dpb d)))
+        ;; the lists were built by walking the set, which is already sorted by distance.
+        ;; A picture the set does not name is no longer a reference; it is only DISCARDED once it
+        ;; has also been output.
+        (setf (dec-dpb d)
+              (remove-if-not (lambda (p) (or (member p keep) (not (pic-output-done p))))
+                             (dec-dpb d)))
         (values (coerce (nreverse before) 'simple-vector)
                 (coerce (nreverse after) 'simple-vector))))))
 

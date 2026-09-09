@@ -63,6 +63,7 @@
    :type (simple-array (signed-byte 32) (*)))
   (mv-w 0 :type fixnum) (mv-h 0 :type fixnum)
   (reference-p nil)
+  (output-done nil)                     ; has this picture been handed out yet
   ;; true where a 4x4 block was coded intra, which the candidate derivations test constantly
   (intra (make-array 0 :element-type 'bit) :type simple-bit-vector))
 

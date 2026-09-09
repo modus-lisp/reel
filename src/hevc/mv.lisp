@@ -169,8 +169,8 @@
         (tmp (make-array (* +cand-size+ 6) :element-type 'fixnum :initial-element 0))
         ;; the second partition of a split may not merge with the first: that would code the split
         ;; and then undo it
-        (skip-a1 (and (= part-idx 1) (member part-mode '(2 4 5))))     ; Nx2N, nLx2N, nRx2N
-        (skip-b1 (and (= part-idx 1) (member part-mode '(1 6 7)))))    ; 2NxN, 2NxnU, 2NxnD
+        (skip-a1 (and (= part-idx 1) (member part-mode '(2 6 7))))     ; Nx2N, nLx2N, nRx2N
+        (skip-b1 (and (= part-idx 1) (member part-mode '(1 4 5)))))    ; 2NxN, 2NxnU, 2NxnD
     (declare (type fixnum n maxn))
     (flet ((emit (from)
              (when (< n maxn)

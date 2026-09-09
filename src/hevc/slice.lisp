@@ -50,6 +50,8 @@
   (part-mode 0 :type fixnum)            ; 0 = 2Nx2N, 3 = NxN; only those two occur in intra
   (intra-split nil)
   (max-trafo-depth 0 :type fixnum)
+  (cu-depth 0 :type fixnum)             ; the coding quadtree depth, which inter_pred_idc's context uses
+  (merge-2nx2n nil)                     ; did the single prediction unit of this unit merge?
   (qp 26 :type fixnum)
   (qp-delta-coded nil)
   (%chroma-idx 4 :type fixnum)          ; this coding unit's intra_chroma_pred_mode
@@ -129,7 +131,7 @@
 (declaim (ftype function %build-z-scan %intra-predict %dequantise %inverse-transform
                 %transform-skip %chroma-qp %available-p
                 %merge-candidates %amvp %mc-luma %mc-chroma %write-uni %write-bi
-                cand-ref cand-mvx cand-mvy cand-poc))
+                %prediction-units cand-ref cand-mvx cand-mvy cand-poc))
 
 ;;; ---- the syntax elements that are one bin each -------------------------------------------------
 
@@ -144,10 +146,85 @@
     (when (and (%gc c x0 (1- y0)) (> (%gd c x0 (1- y0)) depth)) (incf inc))
     (%bin c (+ +ctx-split-coding-unit-flag+ inc))))
 
-(defun %part-mode-intra (c)
-  "part_mode for an intra coding unit: one bin, and only asked at the smallest size.
-   1 means the block is left whole, 0 means it is quartered into four prediction blocks."
-  (if (= 1 (%bin c +ctx-part-mode+)) 0 3))
+(defun %cu-skip-flag (c x0 y0)
+  "cu_skip_flag, whose context counts how many neighbours were themselves skipped.
+
+   A skipped unit is one merged prediction and no residual at all — the cheapest thing HEVC can
+   say, and worth its own flag rather than a merge with an empty transform tree because a region
+   that is not changing tends to be a run of them."
+  (let ((inc 0) (s (sps-min-cb-log2 (cx-sps c))) (w (cx-min-cb-width c)))
+    (when (and (%gc c (1- x0) y0)
+               (plusp (aref (cx-skip c) (+ (* (ash y0 (- s)) w) (ash (1- x0) (- s))))))
+      (incf inc))
+    (when (and (%gc c x0 (1- y0))
+               (plusp (aref (cx-skip c) (+ (* (ash (1- y0) (- s)) w) (ash x0 (- s))))))
+      (incf inc))
+    (%bin c (+ +ctx-skip-flag+ inc))))
+
+(defun %part-mode (c log2-size intra-p)
+  "part_mode (Table 9-43): how a coding unit is cut into prediction units.
+
+   For intra it is one bin and only at the smallest size.  For inter it is a tree over up to four
+   bins plus a bypass one, and the ASYMMETRIC shapes at the end — a quarter and three quarters
+   rather than two halves — are what amp_enabled_flag turns on.  They exist because an object edge
+   rarely falls down the middle of a block."
+  (let ((min-p (= log2-size (sps-min-cb-log2 (cx-sps c)))))
+    (cond
+      ((= 1 (%bin c +ctx-part-mode+)) 0)                        ; 1        -> 2Nx2N
+      (min-p
+       (cond (intra-p 3)                                        ; 0        -> NxN
+             ((= 1 (%bin c (+ +ctx-part-mode+ 1))) 1)           ; 01       -> 2NxN
+             ((= log2-size 3) 2)                                ; 00       -> Nx2N
+             ((= 1 (%bin c (+ +ctx-part-mode+ 2))) 2)           ; 001      -> Nx2N
+             (t 3)))                                            ; 000      -> NxN
+      ((not (sps-amp-enabled (cx-sps c)))
+       (if (= 1 (%bin c (+ +ctx-part-mode+ 1))) 1 2))
+      ((= 1 (%bin c (+ +ctx-part-mode+ 1)))
+       (cond ((= 1 (%bin c (+ +ctx-part-mode+ 3))) 1)           ; 011      -> 2NxN
+             ((= 1 (%bypass c)) 5)                              ; 0101     -> 2NxnD
+             (t 4)))                                            ; 0100     -> 2NxnU
+      (t
+       (cond ((= 1 (%bin c (+ +ctx-part-mode+ 3))) 2)           ; 001      -> Nx2N
+             ((= 1 (%bypass c)) 7)                              ; 0001     -> nRx2N
+             (t 6))))))                                         ; 0000     -> nLx2N
+
+(defun %ref-idx (c n)
+  "ref_idx_lX: two context-coded bins then bypass, truncated at the list length."
+  (let ((i 0) (maxi (1- n)))
+    (declare (type fixnum i maxi))
+    (loop while (and (< i (min maxi 2)) (= 1 (%bin c (+ +ctx-ref-idx-l0+ i)))) do (incf i))
+    (when (= i 2)
+      (loop while (and (< i maxi) (= 1 (%bypass c))) do (incf i)))
+    i))
+
+(defun %mvd-component (c)
+  "One component of a motion vector difference, after its greater-than-one flag said it is large:
+   an order-one Exp-Golomb remainder and a sign, both in bypass."
+  (let ((v 2) (k 1))
+    (declare (type fixnum v k))
+    (loop while (and (< k 31) (= 1 (%bypass c)))
+          do (incf v (ash 1 k)) (incf k))
+    (when (>= k 31) (%err "runaway motion vector difference"))
+    (loop while (plusp k) do (decf k) (incf v (ash (%bypass c) k)))
+    (if (= 1 (%bypass c)) (- v) v)))
+
+(defun %mvd (c)
+  "mvd_coding (7.3.8.9): (values dx dy).
+
+   BOTH components' greater-than-zero flags come before EITHER greater-than-one flag, and both of
+   those before either remainder.  Reading it component by component is the natural shape and the
+   wrong one — it interleaves bins that share a context with bins that do not."
+  (let* ((g0x (= 1 (%bin c +ctx-abs-mvd-greater0-flag+)))
+         (g0y (= 1 (%bin c +ctx-abs-mvd-greater0-flag+)))
+         (g1x (and g0x (= 1 (%bin c (+ +ctx-abs-mvd-greater1-flag+ 1)))))
+         (g1y (and g0y (= 1 (%bin c (+ +ctx-abs-mvd-greater1-flag+ 1)))))
+         (dx 0) (dy 0))
+    (declare (type fixnum dx dy))
+    (when g0x
+      (setf dx (if g1x (%mvd-component c) (if (= 1 (%bypass c)) -1 1))))
+    (when g0y
+      (setf dy (if g1y (%mvd-component c) (if (= 1 (%bypass c)) -1 1))))
+    (values dx dy)))
 
 (defun %intra-chroma-pred-mode (c)
   "intra_chroma_pred_mode: one context-coded bin, then two bypass ones if it was set.
@@ -483,7 +560,14 @@
          (plane (pic-plane pic c-idx))
          (stride (pic-stride pic c-idx)))
     (declare (type fixnum n stride))
-    (%intra-predict c pic x0 y0 log2-size c-idx mode pred)
+    (if (cx-cu-intra c)
+        (%intra-predict c pic x0 y0 log2-size c-idx mode pred)
+        ;; an INTER block's prediction was written straight into the picture by motion
+        ;; compensation, before the transform tree was even parsed; the residual is added to it
+        (dotimes (y n)
+          (dotimes (x n)
+            (setf (aref pred (+ (* y n) x))
+                  (aref plane (+ (* (+ y0 y) stride) x0 x))))))
     (when residual-p
       (let* ((qp (%qp-for c c-idx))
              ;; the picture parameter set's lists override the sequence's when it sends any
@@ -512,6 +596,31 @@
             (setf (aref plane (+ row x)) (max 0 (min 255 v)))))))
     (when (zerop c-idx) (%mark-for-filters c x0 y0 n))))
 
+(defun %mark-inter-blocks (c x0 y0 size intra)
+  "Record over a coding unit's 8x8 blocks what the loop filter reads: the quantiser, and whether
+   the block is exempt.  An inter unit does this itself because its prediction units write samples
+   before any transform block exists to do it for them."
+  (declare (type ctx c) (type fixnum x0 y0 size) (ignore intra))
+  (let ((pic (cx-pic c))
+        (w (pic-blk-w (cx-pic c)))
+        (nofilt (if (cx-cu-transquant-bypass c) 1 0)))
+    (loop for y of-type fixnum from y0 below (+ y0 size) by 8
+          do (loop for x of-type fixnum from x0 below (+ x0 size) by 8
+                   do (let ((i (+ (* (ash y -3) w) (ash x -3))))
+                        (setf (aref (pic-blk-qp pic) i) (max 0 (min 255 (cx-qp c)))
+                              (aref (pic-blk-nofilt pic) i) nofilt))))
+    ;; the unit's own outer edges are prediction unit edges, and so are deblocked
+    (when (and (plusp x0) (zerop (logand x0 7)))
+      (loop for y of-type fixnum from y0 below (+ y0 size) by 4
+            do (setf (aref (pic-bs-v pic) (+ (* (ash y -2) (pic-bs-vw pic)) (ash x0 -3)))
+                     (max 1 (aref (pic-bs-v pic)
+                                  (+ (* (ash y -2) (pic-bs-vw pic)) (ash x0 -3)))))))
+    (when (and (plusp y0) (zerop (logand y0 7)))
+      (loop for x of-type fixnum from x0 below (+ x0 size) by 4
+            do (setf (aref (pic-bs-h pic) (+ (* (ash y0 -3) (pic-bs-hw pic)) (ash x -2)))
+                     (max 1 (aref (pic-bs-h pic)
+                                  (+ (* (ash y0 -3) (pic-bs-hw pic)) (ash x -2)))))))))
+
 (defun %mark-for-filters (c x0 y0 n)
   "Record what the loop filters will want to know about this luma transform block.
 
@@ -524,12 +633,15 @@
    a filter that reads there reads the row above."
   (declare (type ctx c) (type fixnum x0 y0 n) (optimize (speed 3) (safety 1)))
   (let ((pic (cx-pic c)))
-    (when (and (plusp x0) (zerop (logand x0 7)))
-      (loop for y of-type fixnum from y0 below (+ y0 n) by 4
-            do (setf (aref (pic-bs-v pic) (+ (* (ash y -2) (pic-bs-vw pic)) (ash x0 -3))) 2)))
-    (when (and (plusp y0) (zerop (logand y0 7)))
-      (loop for x of-type fixnum from x0 below (+ x0 n) by 4
-            do (setf (aref (pic-bs-h pic) (+ (* (ash y0 -3) (pic-bs-hw pic)) (ash x -2))) 2)))
+    (let ((bs (if (cx-cu-intra c) 2 1)))
+      (when (and (plusp x0) (zerop (logand x0 7)))
+        (loop for y of-type fixnum from y0 below (+ y0 n) by 4
+              do (let ((i (+ (* (ash y -2) (pic-bs-vw pic)) (ash x0 -3))))
+                   (setf (aref (pic-bs-v pic) i) (max bs (aref (pic-bs-v pic) i))))))
+      (when (and (plusp y0) (zerop (logand y0 7)))
+        (loop for x of-type fixnum from x0 below (+ x0 n) by 4
+              do (let ((i (+ (* (ash y0 -3) (pic-bs-hw pic)) (ash x -2))))
+                   (setf (aref (pic-bs-h pic) i) (max bs (aref (pic-bs-h pic) i)))))))
     ;; the quantiser, per eight-by-eight block, and whether this block may be filtered at all
     (let ((w (pic-blk-w pic))
           (nofilt (if (cx-cu-transquant-bypass c) 1 0)))
@@ -628,8 +740,17 @@
    blocks share one chroma pair, which is why the leaf has to know its index among its siblings."
   (declare (type fixnum x0 y0 xb yb log2-size depth blk-idx))
   (let* ((sps (cx-sps c))
+         ;; interSplitFlag: an inter unit whose transform hierarchy is one level deep and whose
+         ;; prediction is SPLIT must still cut its transform to match, because a transform block
+         ;; may not straddle two prediction units with different motion.  No flag is sent for it,
+         ;; and a decoder that reads one where the encoder sent none loses the slice.
+         (inter-split (and (not (cx-cu-intra c))
+                           (zerop (sps-max-transform-depth-inter sps))
+                           (/= (cx-part-mode c) 0)
+                           (zerop depth)))
          (split (cond ((> log2-size (sps-max-tb-log2 sps)) 1)
                       ((and (cx-intra-split c) (zerop depth)) 1)
+                      (inter-split 1)
                       ((and (<= log2-size (sps-max-tb-log2 sps))
                             (> log2-size (sps-min-tb-log2 sps))
                             (< depth (cx-max-trafo-depth c)))
@@ -678,12 +799,39 @@
           (cx-part-mode c) 0
           (cx-intra-split c) nil)
     (incf (cx-n-cu c))
+    ;; ---- a SKIPPED unit: one merged prediction, no residual, nothing else to read
+    (when (and (not (sh-i-slice-p (cx-sh c))) (= 1 (%cu-skip-flag c x0 y0)))
+      (setf (cx-cu-intra c) nil)
+      (let ((s (sps-min-cb-log2 sps)) (w (cx-min-cb-width c)))
+        (dotimes (j (ash size (- s)))
+          (dotimes (i (ash size (- s)))
+            (setf (aref (cx-skip c) (+ (* (+ (ash y0 (- s)) j) w) (ash x0 (- s)) i)) 1))))
+      (%derive-qp c)
+      (%prediction-units c x0 y0 size 0 t)
+      (%mark-inter-blocks c x0 y0 size nil)
+      (return-from %coding-unit 0))
     (when (pps-transquant-bypass pps)
       (setf (cx-cu-transquant-bypass c) (= 1 (%bin c +ctx-cu-transquant-bypass-flag+))))
-    ;; part_mode is only asked at the smallest coding block; above it the answer can only be 2Nx2N
-    (when (= log2-size (sps-min-cb-log2 sps))
-      (setf (cx-part-mode c) (%part-mode-intra c)))
-    (setf (cx-intra-split c) (= (cx-part-mode c) 3))
+    ;; pred_mode_flag: 1 is MODE_INTRA, 0 is MODE_INTER.  Reading it the other way round is not a
+    ;; parse error anywhere — both branches are valid syntax — so the slice decodes to the end of
+    ;; something plausible and only the picture is wrong.
+    (unless (sh-i-slice-p (cx-sh c))
+      (setf (cx-cu-intra c) (= 1 (%bin c +ctx-pred-mode-flag+))))
+    ;; part_mode is asked of every inter unit, and of an intra one only at the smallest size
+    (when (or (not (cx-cu-intra c)) (= log2-size (sps-min-cb-log2 sps)))
+      (setf (cx-part-mode c) (%part-mode c log2-size (cx-cu-intra c))))
+    (setf (cx-intra-split c) (and (cx-cu-intra c) (= (cx-part-mode c) 3)))
+    (unless (cx-cu-intra c)
+      (%derive-qp c)
+      (%prediction-units c x0 y0 size (cx-part-mode c) nil)
+      (%mark-inter-blocks c x0 y0 size nil)
+      (let ((root-cbf (if (and (= (cx-part-mode c) 0) (cx-merge-2nx2n c))
+                          1
+                          (%bin c +ctx-no-residual-data-flag+))))
+        (when (plusp root-cbf)
+          (setf (cx-max-trafo-depth c) (sps-max-transform-depth-inter sps))
+          (%transform-tree c x0 y0 x0 y0 log2-size 0 0 1 1)))
+      (return-from %coding-unit 0))
     ;; record MODE_INTRA over the whole coding unit before the modes are derived, because a later
     ;; block in the same unit asks — and again in the picture's motion field, which is where a
     ;; LATER PICTURE asks when it looks for a collocated candidate
@@ -761,6 +909,7 @@
               (dotimes (i (ash size (- s)))
                 (setf (aref (cx-ct-depth c) (+ (* (+ (ash y0 (- s)) j) w) (ash x0 (- s)) i))
                       depth))))
+          (setf (cx-cu-depth c) depth)
           (%coding-unit c x0 y0 log2-size)))))
 
 ;;; ---- the slice ---------------------------------------------------------------------------------
@@ -848,7 +997,7 @@
       (setf (aref (pic-sao-off pic) (+ (* 12 to) (* 4 comp) i))
             (aref (pic-sao-off pic) (+ (* 12 from) (* 4 comp) i))))))
 
-(defun decode-slice-data (sps pps sh br &optional pic)
+(defun decode-slice-data (sps pps sh br &optional pic list0 list1 collocated)
   "Walk one independent slice segment's coding tree units.
 
    Returns the context, whose counters are what stands in for a picture until reconstruction
@@ -859,6 +1008,8 @@
     (%err "tiles and wavefront entropy coding are not supported"))
   (when (sh-dependent sh)
     (%err "dependent slice segments are not supported"))
+  (when (and (not (sh-i-slice-p sh)) (zerop (length (or list0 #()))))
+    (%err "an inter slice with no reference pictures"))
   (let* ((cab (init-cabac br (sh-qp sh) (sh-type sh) (sh-cabac-init sh)))
          (c (%make-ctx sps pps sh cab))
          (pic (or pic (make-picture-for sps)))
@@ -867,6 +1018,8 @@
          (log2 (sps-ctb-log2 sps)))
     (setf (cx-slice-addr c) (sh-segment-address sh)
           (cx-pic c) pic
+          (cx-list0 c) (or list0 #()) (cx-list1 c) (or list1 #())
+          (cx-collocated c) collocated
           (cx-qg-x c) 0 (cx-qg-y c) 0)
     (loop for addr of-type fixnum from (sh-segment-address sh) below total do
       (let ((rx (mod addr wide)) (ry (floor addr wide)))

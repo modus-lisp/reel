@@ -98,7 +98,9 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
        ;; calls back into it through the FTYPE declaim at the top of that file
        (:file "intra")        ; the thirty-five intra prediction modes
        (:file "mv")           ; merge and AMVP candidate derivation
-       (:file "filter")))     ; deblocking and sample adaptive offset
+       (:file "inter")        ; prediction units, and using the motion they carry
+       (:file "filter")       ; deblocking and sample adaptive offset
+       (:file "decode")))     ; NAL units in, pictures out
 
      ;; ---- MPEG-1 and MPEG-2 video, which are one bitstream with one of them extended
      (:module "mpeg2"

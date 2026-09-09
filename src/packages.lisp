@@ -183,5 +183,6 @@
    #:sps-sao-enabled #:sps-amp-enabled #:sps-pcm-enabled #:sps-strong-intra-smoothing
    #:sps-ptl #:ptl-profile-idc #:ptl-level #:ptl-tier
    #:pps #:parse-pps #:pps-id #:pps-sps-id
+   #:decode-slice-data #:ctx #:cx-n-cu #:cx-n-tu #:cx-n-coeff
    #:slice #:parse-slice-header #:sh-type #:sh-qp #:sh-first-in-pic #:sh-dependent
    #:sh-segment-address #:sh-poc-lsb #:sh-i-slice-p #:sh-p-slice-p #:sh-b-slice-p))

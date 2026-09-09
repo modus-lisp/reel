@@ -127,8 +127,56 @@
 ;;; depths and the conformance window, and getting any of them wrong moves the picture size.  A
 ;;; stream this cannot parse at all is a FAILURE; one it refuses by naming a tool is not.
 
+(defun %hevc-intra-pictures (f spss ppss)
+  "Decode the slice data of every ALL-INTRA picture in F.  Returns (values checked good reason).
+
+   The property being checked is that a picture's slice segments TILE it: each one stops on its own
+   end_of_slice_segment_flag, and together they cover every coding tree unit exactly once.  Nothing
+   is reconstructed yet, so this is what stands in for a picture — and it is not a weak stand-in,
+   because a single misread syntax element desynchronises the arithmetic decoder and a
+   desynchronised decoder does not stop in the right place."
+  (let ((pics 0) (good 0) (why nil) (refusal nil)
+        (any nil) (inter nil) (covered 0) (broke nil) (total 0))
+    (labels ((finish ()
+               ;; a picture with a P or B slice in it is not something this can decode yet, so it
+               ;; is not counted either way
+               (when (and any (not inter))
+                 (incf pics)
+                 (if (and (not broke) (= covered total))
+                     (incf good)
+                     (unless why (setf why (format nil "covered ~d of ~d CTBs" covered total)))))
+               (setf any nil inter nil covered 0 broke nil)))
+      (dolist (nal (reel.hevc:annex-b-nals (slurp f)))
+        (when (reel.hevc:nal-base-layer-p nal)
+          (cond
+            ((= (reel.hevc::nal-type nal) reel.hevc::+nal-sps+)
+             (let ((sp (reel.hevc:parse-sps (reel.hevc:nal-rbsp nal))))
+               (setf (gethash (reel.hevc:sps-id sp) spss) sp)))
+            ((= (reel.hevc::nal-type nal) reel.hevc::+nal-pps+)
+             (let ((pp (reel.hevc:parse-pps (reel.hevc:nal-rbsp nal))))
+               (setf (gethash (reel.hevc:pps-id pp) ppss) pp)))
+            ((reel.hevc:nal-slice-p nal)
+             (let* ((br (reel.hevc:make-bitreader (reel.hevc:nal-rbsp nal)))
+                    (sh (reel.hevc:parse-slice-header br nal spss ppss)))
+               (when (reel.hevc:sh-first-in-pic sh) (finish))
+               (setf total (reel.hevc:sps-ctbs (reel.hevc::sh-sps sh)) any t)
+               (if (not (reel.hevc:sh-i-slice-p sh))
+                   (setf inter t)
+                   (handler-case
+                       (multiple-value-bind (c n term)
+                           (reel.hevc:decode-slice-data (reel.hevc::sh-sps sh)
+                                                        (reel.hevc::sh-pps sh) sh br)
+                         (declare (ignore c))
+                         (if term (incf covered n) (setf broke t)))
+                     ;; a refusal names a tool this does not implement; it is not a wrong answer
+                     (reel.hevc:hevc-error (e)
+                       (setf broke t)
+                       (unless refusal (setf refusal (reel.hevc:hevc-error-message e))))))))))) 
+      (finish))
+    (values pics good (or refusal why) (and refusal t))))
+
 (defun run-hevc ()
-  (let ((pass 0) (fail 0) (refused 0))
+  (let ((pass 0) (fail 0) (refused 0) (intra-ok 0))
     (dolist (f (sort (directory (format nil "~a/hevc/*.bit" *conf*)) #'string< :key #'namestring))
       (let ((dims (probe-file (format nil "~a.dims" (namestring f)))))
         (handler-case
@@ -158,12 +206,25 @@
                        (incf fail)
                        (format t "~&  FAIL ~a: parsed ~dx~d, ffprobe says ~a~%"
                                (pathname-name f) w h want))
-                      (t (incf pass)))))
+                      (t
+                       ;; the headers agree; now decode the slice data of the all-intra pictures
+                       (multiple-value-bind (pics good why refused-p)
+                           (%hevc-intra-pictures f (make-hash-table) (make-hash-table))
+                         (incf intra-ok good)
+                         (cond ((or (zerop pics) (= good pics)) (incf pass))
+                               (refused-p
+                                (incf refused)
+                                (format t "~&  --   ~a: refused — ~a~%" (pathname-name f) why))
+                               (t (incf fail)
+                                  (format t "~&  FAIL ~a: ~d of ~d intra pictures~@[ — ~a~]~%"
+                                          (pathname-name f) good pics why))))))))
           (reel.hevc:hevc-error (e) (incf refused)
             (format t "~&  --   ~a: refused — ~a~%" (pathname-name f) e))
           (error (e) (incf fail) (format t "~&  FAIL ~a: ~a~%" (pathname-name f) e)))))
     (format t "~&HEVC: ~d streams parsed with the geometry ffprobe reports, ~d failed, ~d refused~%"
             pass fail refused)
+    (format t "      and ~d all-intra pictures whose slice data parses to exactly the right end~%"
+            intra-ok)
     fail))
 
 (let ((bad 0))

@@ -79,7 +79,13 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
       :serial t
       :components
       ((:file "bits")         ; NAL units (a TWO byte header), RBSP, the Exp-Golomb bit reader
-       (:file "params")))     ; profile/tier/level, sequence and picture parameter sets, slices
+       (:file "params")       ; profile/tier/level, sequence and picture parameter sets, slices
+       (:file "cabac-tables") ; GENERATED: the 179 context initialisation values
+       (:file "cabac-state-tables") ; GENERATED: rangeTabLps and the state transitions
+       (:file "cabac")        ; the arithmetic decoder and the binarizations above it
+       (:file "scan")         ; the coefficient scan orders, derived rather than tabulated
+       (:file "sig-ctx-tables")   ; GENERATED: sig_coeff_flag's context by position
+       (:file "slice")))      ; the coding tree, coding units, and residual coding
 
      ;; ---- MPEG-1 and MPEG-2 video, which are one bitstream with one of them extended
      (:module "mpeg2"

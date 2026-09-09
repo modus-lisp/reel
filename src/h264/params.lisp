@@ -258,6 +258,7 @@
   (frame-num 0)
   (idr-pic-id 0)
   (poc-lsb 0) (delta-poc-bottom 0)
+  (delta-poc-0 0) (delta-poc-1 0)       ; pic_order_cnt_type 1's per-picture corrections
   (redundant-pic-cnt 0)
   ;; NIL, not 1: this is the flag for "the slice did not override it", and a default of 1 makes
   ;; the fallback to the picture parameter set below unreachable — which reads no reference indices
@@ -384,8 +385,8 @@
         (setf (sh-poc-lsb sh) (ub br (sps-log2-max-poc-lsb sps)))
         (when (pps-bottom-field-order pps) (setf (sh-delta-poc-bottom sh) (se br))))
       (when (and (= 1 (sps-poc-type sps)) (not (sps-delta-poc-always-zero sps)))
-        (se br)                                        ; delta_pic_order_cnt[0]
-        (when (pps-bottom-field-order pps) (se br)))
+        (setf (sh-delta-poc-0 sh) (se br))
+        (when (pps-bottom-field-order pps) (setf (sh-delta-poc-1 sh) (se br))))
       (when (pps-redundant-pic-cnt pps) (setf (sh-redundant-pic-cnt sh) (ue br)))
       ;; which of the two direct prediction methods a B slice uses, chosen per slice
       (when (sh-b-slice-p sh)

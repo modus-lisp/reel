@@ -59,6 +59,39 @@
          (when (plusp (nal-ref-idc nal))
            (setf (h264-prev-poc-msb d) msb (h264-prev-poc-lsb d) lsb))
          (+ msb lsb)))
+      (1
+       ;; 8.2.1.2.  The sequence describes a repeating CYCLE of order-count steps once, in the
+       ;; parameter set, and each picture's count is where frame_num lands in that cycle plus a
+       ;; correction it carries itself.  It is how a stream states a fixed display pattern — two
+       ;; B pictures between every pair of references, say — without spending bits restating it.
+       ;;
+       ;; frame_num counts CODED pictures and wraps, so it cannot be used directly; FrameNumOffset
+       ;; accumulates the wraps.  A non-reference picture steps back one, because it is not in the
+       ;; cycle the following pictures measure themselves against.
+       (let* ((max-fn (ash 1 (sps-log2-max-frame-num sps)))
+              (fn (sh-frame-num sh))
+              (cycle (sps-poc-cycle sps))
+              (n (length cycle))
+              (offset (cond ((nal-idr-p nal) 0)
+                            ((> (h264-prev-frame-num d) fn) (+ (h264-prev-frame-num-offset d) max-fn))
+                            (t (h264-prev-frame-num-offset d))))
+              (abs-fn (if (plusp n) (+ offset fn) 0))
+              (expected 0))
+         ;; the predictors follow the previous picture in DECODING order, reference or not
+         (setf (h264-prev-frame-num-offset d) offset (h264-prev-frame-num d) fn)
+         (when (and (zerop (nal-ref-idc nal)) (plusp abs-fn)) (decf abs-fn))
+         (when (plusp abs-fn)
+           (setf expected (* (floor (1- abs-fn) n) (reduce #'+ cycle :initial-value 0)))
+           (loop for step in cycle
+                 repeat (1+ (mod (1- abs-fn) n))
+                 do (incf expected step)))
+         (when (zerop (nal-ref-idc nal))
+           (incf expected (sps-offset-for-non-ref-pic sps)))
+         ;; frame_mbs_only is asserted, so this is a frame and its count is the earlier of its two
+         ;; notional fields
+         (let* ((top (+ expected (sh-delta-poc-0 sh)))
+                (bottom (+ top (sps-offset-for-top-to-bottom sps) (sh-delta-poc-1 sh))))
+           (min top bottom))))
       (2
        ;; type 2 asserts that decoding order IS display order, so there is nothing to reorder
        (let* ((max-fn (ash 1 (sps-log2-max-frame-num sps)))

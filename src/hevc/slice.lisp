@@ -69,6 +69,14 @@
   ;; scratch: one transform block's prediction, and the transform's intermediate array
   (pred (make-array (* 32 32) :element-type '(signed-byte 32))
    :type (simple-array (signed-byte 32) (*)))
+  ;; the reference lists in force, and the picture the temporal candidate comes from
+  (list0 #() :type simple-vector) (list1 #() :type simple-vector)
+  collocated
+  ;; two prediction buffers at 14-bit precision, for the two halves of a bi-predicted block
+  (p0 (make-array (* 64 64) :element-type '(signed-byte 32))
+   :type (simple-array (signed-byte 32) (*)))
+  (p1 (make-array (* 64 64) :element-type '(signed-byte 32))
+   :type (simple-array (signed-byte 32) (*)))
   (scratch (make-array (* 32 32) :element-type '(signed-byte 32))
    :type (simple-array (signed-byte 32) (*)))
   ;; scratch for one transform block's coefficients, biggest first
@@ -119,7 +127,9 @@
 ;;; The reconstruction lives in intra.lisp and transform.lisp, which are loaded after this file
 ;;; because they read the state defined above.
 (declaim (ftype function %build-z-scan %intra-predict %dequantise %inverse-transform
-                %transform-skip %chroma-qp))
+                %transform-skip %chroma-qp %available-p
+                %merge-candidates %amvp %mc-luma %mc-chroma %write-uni %write-bi
+                cand-ref cand-mvx cand-mvy cand-poc))
 
 ;;; ---- the syntax elements that are one bin each -------------------------------------------------
 
@@ -675,11 +685,16 @@
       (setf (cx-part-mode c) (%part-mode-intra c)))
     (setf (cx-intra-split c) (= (cx-part-mode c) 3))
     ;; record MODE_INTRA over the whole coding unit before the modes are derived, because a later
-    ;; block in the same unit asks
+    ;; block in the same unit asks — and again in the picture's motion field, which is where a
+    ;; LATER PICTURE asks when it looks for a collocated candidate
     (let ((s (sps-min-cb-log2 sps)) (w (cx-min-cb-width c)))
       (dotimes (j (ash size (- s)))
         (dotimes (i (ash size (- s)))
           (setf (aref (cx-is-intra c) (+ (* (+ (ash y0 (- s)) j) w) (ash x0 (- s)) i)) 1))))
+    (let ((pic (cx-pic c)))
+      (dotimes (j (ash size -2))
+        (dotimes (i (ash size -2))
+          (setf (aref (pic-intra pic) (pic-mv-index pic (+ x0 (* 4 i)) (+ y0 (* 4 j)))) 1))))
     (when (and (sps-pcm-enabled sps) (= (cx-part-mode c) 0)
                (>= log2-size (sps-pcm-min-cb-log2 sps))
                (<= log2-size (sps-pcm-max-cb-log2 sps)))

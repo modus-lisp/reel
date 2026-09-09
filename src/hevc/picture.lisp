@@ -50,7 +50,21 @@
   (sao-off (make-array 0 :element-type '(signed-byte 32))
    :type (simple-array (signed-byte 32) (*)))
   (sao-param (make-array 0 :element-type '(unsigned-byte 8)) :type samples)
-  (ctbs-wide 0 :type fixnum) (ctbs-high 0 :type fixnum) (ctb-log2 0 :type fixnum))
+  (ctbs-wide 0 :type fixnum) (ctbs-high 0 :type fixnum) (ctb-log2 0 :type fixnum)
+  ;; ---- the motion field, per 4x4 block and per list
+  ;;
+  ;; Kept on the PICTURE rather than in the slice state because a later picture reads it: the
+  ;; temporal merge candidate comes from the collocated block of another picture, so a reference
+  ;; picture's motion has to outlive its decode.  REF-POC holds what the index pointed AT rather
+  ;; than the index itself, because an index only means something relative to a list that is gone.
+  (mv (make-array 0 :element-type '(signed-byte 16)) :type (simple-array (signed-byte 16) (*)))
+  (ref-idx (make-array 0 :element-type '(signed-byte 8)) :type (simple-array (signed-byte 8) (*)))
+  (ref-poc (make-array 0 :element-type '(signed-byte 32))
+   :type (simple-array (signed-byte 32) (*)))
+  (mv-w 0 :type fixnum) (mv-h 0 :type fixnum)
+  (reference-p nil)
+  ;; true where a 4x4 block was coded intra, which the candidate derivations test constantly
+  (intra (make-array 0 :element-type 'bit) :type simple-bit-vector))
 
 (defun make-picture-for (sps)
   (let* ((w (sps-width sps)) (h (sps-height sps))
@@ -83,7 +97,39 @@
      :sao-param (make-array (* 3 (sps-ctbs sps)) :element-type '(unsigned-byte 8)
                                                  :initial-element 0)
      :ctbs-wide (sps-ctbs-wide sps) :ctbs-high (sps-ctbs-high sps)
-     :ctb-log2 (sps-ctb-log2 sps))))
+     :ctb-log2 (sps-ctb-log2 sps)
+     :mv (make-array (* 4 (ash w -2) (ash h -2)) :element-type '(signed-byte 16)
+                                                 :initial-element 0)
+     :ref-idx (make-array (* 2 (ash w -2) (ash h -2)) :element-type '(signed-byte 8)
+                                                      :initial-element -1)
+     :ref-poc (make-array (* 2 (ash w -2) (ash h -2)) :element-type '(signed-byte 32)
+                                                      :initial-element 0)
+     :mv-w (ash w -2) :mv-h (ash h -2)
+     :intra (make-array (* (ash w -2) (ash h -2)) :element-type 'bit :initial-element 0))))
+
+(declaim (inline pic-mv-index))
+(defun pic-mv-index (pic x y)
+  "The motion field index of the 4x4 block containing luma sample (X,Y)."
+  (declare (type fixnum x y))
+  (+ (* (ash y -2) (pic-mv-w pic)) (ash x -2)))
+
+(defun pic-motion (pic x y lx)
+  "(values mvx mvy ref-idx ref-poc) for the 4x4 block at (X,Y) in list LX.
+   A REF-IDX of -1 means this block does not predict from that list."
+  (declare (type fixnum x y lx))
+  (let ((i (pic-mv-index pic x y)))
+    (values (aref (pic-mv pic) (+ (* 4 i) (* 2 lx)))
+            (aref (pic-mv pic) (+ (* 4 i) (* 2 lx) 1))
+            (aref (pic-ref-idx pic) (+ (* 2 i) lx))
+            (aref (pic-ref-poc pic) (+ (* 2 i) lx)))))
+
+(defun set-pic-motion (pic x y lx mvx mvy idx poc)
+  (declare (type fixnum x y lx mvx mvy idx poc))
+  (let ((i (pic-mv-index pic x y)))
+    (setf (aref (pic-mv pic) (+ (* 4 i) (* 2 lx))) mvx
+          (aref (pic-mv pic) (+ (* 4 i) (* 2 lx) 1)) mvy
+          (aref (pic-ref-idx pic) (+ (* 2 i) lx)) idx
+          (aref (pic-ref-poc pic) (+ (* 2 i) lx)) poc)))
 
 (declaim (inline pic-plane pic-stride))
 (defun pic-plane (pic c-idx)

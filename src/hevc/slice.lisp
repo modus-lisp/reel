@@ -734,6 +734,19 @@
           (setf (aref (cx-qp-y c)
                       (+ (* (+ (ash (cx-cu-y c) (- s)) j) w) (ash (cx-cu-x c) (- s)) i))
                 qp))))
+    ;; and over the whole unit for the deblocking filter, WHICH IS WHY THIS IS HERE AND NOT IN THE
+    ;; TRANSFORM BLOCKS.  cu_qp_delta arrives inside the first transform unit that has any
+    ;; coefficients, so a transform block reconstructed before it — one with nothing to send —
+    ;; would otherwise record the quantiser this unit was PREDICTED to have.  Rederiving rewrites
+    ;; the unit's whole area, so the filter always reads the value the encoder used.
+    (let* ((pic (cx-pic c))
+           (bw (pic-blk-w pic))
+           (size (ash 1 (cx-cu-log2 c)))
+           (v (max 0 (min 255 qp))))
+      (declare (type fixnum bw size v))
+      (loop for y of-type fixnum from (cx-cu-y c) below (+ (cx-cu-y c) size) by 8
+            do (loop for x of-type fixnum from (cx-cu-x c) below (+ (cx-cu-x c) size) by 8
+                     do (setf (aref (pic-blk-qp pic) (+ (* (ash y -3) bw) (ash x -3))) v))))
     qp))
 
 (defun %cu-qp-delta (c)

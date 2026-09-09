@@ -76,6 +76,8 @@
   (or (= (nal-type n) +nal-idr-w-radl+) (= (nal-type n) +nal-idr-n-lp+)))
 
 (defun nal-bla-p (n) (<= +nal-bla-w-lp+ (nal-type n) +nal-bla-n-lp+))
+(defun nal-cra-p (n) (= (nal-type n) +nal-cra+))
+(defun nal-rasl-p (n) (<= +nal-rasl-n+ (nal-type n) +nal-rasl-r+))
 
 (defun nal-reference-p (n)
   "Is this picture kept as a reference by its own sub-layer?

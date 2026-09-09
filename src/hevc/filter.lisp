@@ -354,9 +354,13 @@
                       (loop for y of-type fixnum from y0 below y1 do
                         (loop for x of-type fixnum from x0 below x1 do
                           (let* ((v (aref ref (+ (* y stride) x)))
-                                 (band (- (ash v -3) param)))
+                                 ;; THE FOUR BANDS WRAP.  They start at sao_band_position and run
+                                 ;; upwards through the thirty-two bands MODULO thirty-two, so a
+                                 ;; position of 30 offsets bands 30, 31, 0 and 1.  Subtracting
+                                 ;; without the wrap silently drops the bands that came round.
+                                 (band (mod (- (ash v -3) param) 32)))
                             (declare (type fixnum v band))
-                            (when (and (<= 0 band 3) (not (exempt x y)))
+                            (when (and (<= band 3) (not (exempt x y)))
                               (setf (aref plane (+ (* y stride) x))
                                     (%clip8 (+ v (aref (pic-sao-off pic)
                                                        (+ base (* 4 comp) band)))))))))

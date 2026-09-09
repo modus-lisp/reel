@@ -37,11 +37,31 @@
                    (setf pending (remove next pending)))))
       pic)))
 
-(defun %start-picture (d sh nal)
+(defun %random-access-gate (d nal poc)
+  "True when this picture is a RANDOM ACCESS SKIPPED LEADING picture that cannot be decoded.
+
+   A stream may legitimately begin at a clean random access point rather than an IDR, and the
+   pictures that FOLLOW that point in decode order but PRECEDE it on screen were encoded to predict
+   from pictures before it — which a decoder joining here has never seen.  They are not corrupt and
+   they are not an error; they are addressed to a decoder that started earlier.  Decoding them
+   anyway produces plausible garbage and, worse, shifts every frame after them by one.
+
+   The gate opens once: whichever picture arrives first fixes the boundary, and an IDR fixes it at
+   nothing to skip because an IDR's leading pictures can all be decoded."
+  (declare (type decoder d))
+  (when (= (dec-max-ra d) most-positive-fixnum)
+    (cond ((or (nal-cra-p nal) (nal-bla-p nal)) (setf (dec-max-ra d) poc))
+          ((nal-idr-p nal) (setf (dec-max-ra d) most-negative-fixnum))))
+  (cond
+    ((and (nal-rasl-p nal) (<= poc (dec-max-ra d))) t)
+    (t (when (and (= (nal-type nal) +nal-rasl-r+) (> poc (dec-max-ra d)))
+         (setf (dec-max-ra d) most-negative-fixnum))
+       nil)))
+
+(defun %start-picture (d sh nal poc)
   "Everything a new picture needs before its first macroblock: its order count, the buffer it may
    predict from, and the two reference lists."
   (let* ((sps (sh-sps sh))
-         (poc (%picture-order-count d sh nal))
          (pic (make-picture-for sps)))
     (setf (pic-poc pic) poc
           (pic-reference-p pic) (nal-reference-p nal))
@@ -66,7 +86,11 @@
             (sh (parse-slice-header br nal (dec-sps d) (dec-pps d))))
        (when (sh-first-in-pic sh)
          (%finish-picture d)
-         (%start-picture d sh nal))
+         (let ((poc (%picture-order-count d sh nal)))
+           (setf (dec-skipping d) (%random-access-gate d nal poc))
+           (unless (dec-skipping d)
+             (%start-picture d sh nal poc))))
+       (when (dec-skipping d) (return-from feed-nal nil))
        (unless (dec-current d) (%err "a slice arrived before any picture was started"))
        (setf (dec-cur-sh d) sh)
        (decode-slice-data (sh-sps sh) (sh-pps sh) sh br (dec-current d)

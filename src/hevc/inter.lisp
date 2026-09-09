@@ -27,6 +27,17 @@
     v)
   "Where each prediction unit sits inside its coding unit, in sixteenths.")
 
+(declaim (inline %mv-wrap))
+(defun %mv-wrap (v)
+  "A motion vector component after adding its difference (8.5.3.2.6).
+
+   THE SUM WRAPS, IT DOES NOT SATURATE.  The standard spells it out — add, take the result modulo
+   2^16, and read it back as a signed sixteen-bit number — and ffmpeg gets it for free by storing
+   the vector in an int16_t.  Clipping to the same range instead is right for every vector an
+   encoder would ever choose and wrong for the ones a conformance stream chooses on purpose."
+  (declare (type fixnum v))
+  (- (mod (+ v 32768) 65536) 32768))
+
 (defun %inter-pred-idc (c w h)
   "inter_pred_idc: 0 list 0 only, 1 list 1 only, 2 both.
 
@@ -170,8 +181,8 @@
                       (declare (ignore n-cand))
                       (let ((px (if (zerop which) ax bx))
                             (py (if (zerop which) ay by)))
-                        (setf (aref mv (* 4 lx)) (%clip3 -32768 32767 (+ px dx))
-                              (aref mv (+ (* 4 lx) 1)) (%clip3 -32768 32767 (+ py dy))
+                        (setf (aref mv (* 4 lx)) (%mv-wrap (+ px dx))
+                              (aref mv (+ (* 4 lx) 1)) (%mv-wrap (+ py dy))
                               (aref mv (+ (* 4 lx) 2)) ref
                               (aref mv (+ (* 4 lx) 3))
                               (if (< ref n) (pic-poc (aref list ref)) 0)))))))))))

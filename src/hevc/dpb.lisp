@@ -23,6 +23,10 @@
   ;; the reference lists in force for the slice being decoded
   (list0 #() :type simple-vector) (list1 #() :type simple-vector)
   (out '() :type list)                  ; decoded and ready, in output order
+  ;; the highest order count whose RANDOM ACCESS SKIPPED LEADING pictures cannot be decoded, and
+  ;; whether the picture currently being read is one of them
+  (max-ra most-positive-fixnum :type fixnum)
+  (skipping nil)
   (frames 0 :type fixnum))
 
 (defun make-hevc-decoder () (make-decoder))
@@ -44,10 +48,16 @@
          (msb (cond ((and (< lsb prev-lsb) (>= (- prev-lsb lsb) half)) (+ prev-msb max-lsb))
                     ((and (> lsb prev-lsb) (> (- lsb prev-lsb) half)) (- prev-msb max-lsb))
                     (t prev-msb))))
-    ;; only a picture at the base temporal sub-layer that is not a leading picture updates the
-    ;; predictors, because a decoder that drops the upper sub-layers must still agree about them
+    ;; Only a picture at the base temporal sub-layer that is neither a leading picture nor a
+    ;; SUB-LAYER NON-REFERENCE one updates the predictors.  Both exclusions have the same
+    ;; motivation: a decoder that discards pictures the stream says are discardable must still
+    ;; derive the same order counts as one that keeps them, so nothing discardable may be a
+    ;; predictor.  Leaving the sub-layer non-reference types in gets the count right until the
+    ;; first stream that has one, and then puts one picture in the wrong place on screen while
+    ;; every picture still decodes bit-exactly — which looks like a reconstruction bug and is not.
     (when (and (zerop (nal-temporal-id nal))
-               (not (member (nal-type nal) (list +nal-radl-n+ +nal-radl-r+
+               (not (member (nal-type nal) (list +nal-trail-n+ +nal-tsa-n+ +nal-stsa-n+
+                                                 +nal-radl-n+ +nal-radl-r+
                                                  +nal-rasl-n+ +nal-rasl-r+))))
       (setf (dec-prev-poc-msb d) msb (dec-prev-poc-lsb d) lsb))
     (+ msb lsb)))

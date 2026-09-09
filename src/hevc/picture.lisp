@@ -64,7 +64,12 @@
   (mv-w 0 :type fixnum) (mv-h 0 :type fixnum)
   (reference-p nil)
   (output-done nil)                     ; has this picture been handed out yet
-  ;; true where a 4x4 block was coded intra, which the candidate derivations test constantly
+  ;; true where a 4x4 block was coded intra, which the candidate derivations test constantly.
+  ;; IT STARTS AS ALL ONES.  A block that has not been decoded yet must look unavailable to the
+  ;; candidate derivations, and "intra" is how they spell unavailable — an intra block has no
+  ;; motion to lend.  Starting at zero instead makes an undecoded neighbour look like an inter
+  ;; block with no motion, which is the same answer for the merge list and the OPPOSITE one for
+  ;; AMVP's isScaledFlag, where the question is whether the position is a decoded block at all.
   (intra (make-array 0 :element-type 'bit) :type simple-bit-vector)
   ;; and true where its transform block carried any non-zero coefficient, which is one of the
   ;; three things the deblocking filter's boundary strength is derived from
@@ -109,7 +114,7 @@
      :ref-poc (make-array (* 2 (ash w -2) (ash h -2)) :element-type '(signed-byte 32)
                                                       :initial-element 0)
      :mv-w (ash w -2) :mv-h (ash h -2)
-     :intra (make-array (* (ash w -2) (ash h -2)) :element-type 'bit :initial-element 0)
+     :intra (make-array (* (ash w -2) (ash h -2)) :element-type 'bit :initial-element 1)
      :cbf (make-array (* (ash w -2) (ash h -2)) :element-type 'bit :initial-element 0))))
 
 (declaim (inline pic-mv-index))

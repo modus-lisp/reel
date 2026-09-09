@@ -125,14 +125,32 @@
                             (loop while (and (< i (1- maxn)) (= 1 (%bypass c))) do (incf i)))
                           i)
                         0))
-               (cands (make-array (* +cand-size+ 8) :element-type 'fixnum :initial-element 0)))
+               (cands (make-array (* +cand-size+ 8) :element-type 'fixnum :initial-element 0))
+               ;; A SINGLE MERGE CANDIDATE LIST for a whole 8x8 coding unit: above the default
+               ;; parallel merge level every prediction unit of an 8x8 unit uses the list derived
+               ;; for the unit as a whole, so none of them has to wait for its siblings.  The
+               ;; substitution is of the POSITION and SIZE the list is derived at, not of the unit
+               ;; being predicted — the vectors still land where this unit is.
+               (single (and (> (pps-log2-parallel-merge-level (cx-pps c)) 2)
+                            (= 8 (ash 1 (cx-cu-log2 c)))))
+               (mx0 (if single (cx-cu-x c) x0))
+               (my0 (if single (cx-cu-y c) y0))
+               (mw (if single 8 w)) (mh (if single 8 h))
+               (mpi (if single 0 part-idx)))
           (setf (cx-merge-2nx2n c) (and (= (cx-part-mode c) 0) t))
-          (%merge-candidates c x0 y0 w h part-idx (cx-part-mode c) cands)
+          (%merge-candidates c mx0 my0 mw mh mpi (cx-part-mode c) cands single)
           (dotimes (lx 2)
             (setf (aref mv (* 4 lx)) (cand-mvx cands idx lx)
                   (aref mv (+ (* 4 lx) 1)) (cand-mvy cands idx lx)
                   (aref mv (+ (* 4 lx) 2)) (cand-ref cands idx lx)
-                  (aref mv (+ (* 4 lx) 3)) (cand-poc cands idx lx))))
+                  (aref mv (+ (* 4 lx) 3)) (cand-poc cands idx lx)))
+          ;; An 8x4 or 4x8 unit may not be bi-predicted, and a merged one enforces that by DROPPING
+          ;; LIST 1 rather than by refusing the candidate.  The list is built as if bi-prediction
+          ;; were allowed and then cut down, so the candidate at a given index is the same one
+          ;; either way — and the motion stored for later blocks to predict from is the cut-down
+          ;; one, which is how a single small unit changes the vectors of everything after it.
+          (when (and (= 12 (+ w h)) (>= (aref mv 2) 0) (>= (aref mv 6) 0))
+            (setf (aref mv 6) -1)))
         ;; ---- coded: a reference, a difference, and which predictor to add it to
         (let* ((b (sh-b-slice-p (cx-sh c)))
                (idc (if b (%inter-pred-idc c w h) 0)))
@@ -158,7 +176,7 @@
                               (aref mv (+ (* 4 lx) 3))
                               (if (< ref n) (pic-poc (aref list ref)) 0)))))))))))
     (%store-motion c x0 y0 w h mv)
-    (%mark-edges c x0 y0 w h)
+    (%mark-edges c x0 y0 w h 1)
     (%motion-compensate c x0 y0 w h mv)))
 
 (defun %prediction-units (c x0 y0 size part-mode skip)

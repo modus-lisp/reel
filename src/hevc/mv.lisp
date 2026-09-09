@@ -219,7 +219,21 @@
                                        ref-idx (pic-poc target)))))))))
               found)))))))
 
-(defun %merge-candidates (c x0 y0 w h part-idx part-mode out)
+(defun %same-mer (c xn yn x0 y0)
+  "Are the neighbour and this prediction unit in the same MOTION ESTIMATION REGION?
+
+   A candidate from inside one's own region is refused.  The point is parallelism: an encoder that
+   sets log2_parallel_merge_level above 2 promises that every prediction unit in a region can have
+   its merge list built without waiting for the others, which is only true if none of them may name
+   each other.  It costs compression and buys parallel motion estimation, and at the default level
+   of 2 the test can never fire — every neighbour position is already in a different region."
+  (declare (type ctx c) (type fixnum xn yn x0 y0))
+  (let ((p (pps-log2-parallel-merge-level (cx-pps c))))
+    (declare (type fixnum p))
+    (and (= (ash xn (- p)) (ash x0 (- p)))
+         (= (ash yn (- p)) (ash y0 (- p))))))
+
+(defun %merge-candidates (c x0 y0 w h part-idx part-mode out single)
   "The merge list (8.5.3.2.2), in order and deduplicated.
 
    OUT is filled with up to MaxNumMergeCand candidates and the count is returned.  The order is
@@ -232,8 +246,10 @@
         (tmp (make-array (* +cand-size+ 6) :element-type 'fixnum :initial-element 0))
         ;; the second partition of a split may not merge with the first: that would code the split
         ;; and then undo it
-        (skip-a1 (and (= part-idx 1) (member part-mode '(2 6 7))))     ; Nx2N, nLx2N, nRx2N
-        (skip-b1 (and (= part-idx 1) (member part-mode '(1 4 5)))))    ; 2NxN, 2NxnU, 2NxnD
+        (skip-a1 (or (and (not single) (= part-idx 1) (member part-mode '(2 6 7)))
+                     (%same-mer c (1- x0) (+ y0 h -1) x0 y0)))         ; Nx2N, nLx2N, nRx2N
+        (skip-b1 (or (and (not single) (= part-idx 1) (member part-mode '(1 4 5)))
+                     (%same-mer c (+ x0 w -1) (1- y0) x0 y0))))        ; 2NxN, 2NxnU, 2NxnD
     (declare (type fixnum n maxn))
     (multiple-value-bind (av-left av-up av-up-left av-up-right av-bottom-left)
         (%pu-neighbours c x0 y0 w h)
@@ -249,16 +265,20 @@
         (let ((b1 (and (not skip-b1) av-up (%take-neighbour c tmp 1 (+ x0 w -1) (1- y0)))))
           (when (and b1 (or (not a1) (not (%same-motion-p tmp 1 0)))) (emit 1))
           ;; ---- B0, above-right, which may point at an undecoded part of this block
-          (let ((b0 (and av-up-right (%z-avail c (+ x0 w) (1- y0))
+          (let ((b0 (and av-up-right (%z-avail c (+ x0 w) (1- y0) x0 y0)
+                         (not (%same-mer c (+ x0 w) (1- y0) x0 y0))
                          (%take-neighbour c tmp 2 (+ x0 w) (1- y0)))))
             (when (and b0 (or (not b1) (not (%same-motion-p tmp 2 1)))) (emit 2)))
           ;; ---- A0, below-left, likewise
-          (let ((a0 (and av-bottom-left (%z-avail c (1- x0) (+ y0 h))
+          (let ((a0 (and av-bottom-left (%z-avail c (1- x0) (+ y0 h) x0 y0)
+                         (not (%same-mer c (1- x0) (+ y0 h) x0 y0))
                          (%take-neighbour c tmp 3 (1- x0) (+ y0 h)))))
             (when (and a0 (or (not a1) (not (%same-motion-p tmp 3 0)))) (emit 3)))
           ;; ---- B2, the corner, and only when the other four did not fill the list
           (when (< n 4)
-            (let ((b2 (and av-up-left (%take-neighbour c tmp 4 (1- x0) (1- y0)))))
+            (let ((b2 (and av-up-left
+                           (not (%same-mer c (1- x0) (1- y0) x0 y0))
+                           (%take-neighbour c tmp 4 (1- x0) (1- y0)))))
               (when (and b2
                          (or (not a1) (not (%same-motion-p tmp 4 0)))
                          (or (not b1) (not (%same-motion-p tmp 4 1))))
@@ -301,19 +321,26 @@
           (incf zero) (incf n)))))
     n))
 
-(defun %z-avail (c xn yn)
-  "Only the z-scan half of availability, for the two directions that need it."
-  (declare (type fixnum xn yn))
+(defun %z-avail (c xn yn x0 y0)
+  "Only the z-scan half of availability, for the two directions that need it.
+
+   THE COMPARISON IS AGAINST THE PREDICTION UNIT, NOT THE CODING UNIT.  For a 2Nx2N unit the two
+   origins are the same and the distinction cannot show; for the lower half of a split one they are
+   not, and asking whether the neighbour precedes the CODING unit says a position is undecoded when
+   the prediction unit that wants it has in fact already passed it — the second and third quarters
+   of an NxN unit lose their above-right and below-left candidates, and every vector after them
+   shifts by one place in the merge list."
+  (declare (type fixnum xn yn x0 y0))
   (let ((sps (cx-sps c)))
     (and (>= xn 0) (>= yn 0) (< xn (sps-width sps)) (< yn (sps-height sps))
          (let ((ctb (sps-ctb-log2 sps))
                (s (sps-min-tb-log2 sps))
                (zw (cx-z-width c)))
-           (or (< (ash yn (- ctb)) (ash (cx-cu-y c) (- ctb)))
-               (< (ash xn (- ctb)) (ash (cx-cu-x c) (- ctb)))
+           (or (< (ash yn (- ctb)) (ash y0 (- ctb)))
+               (< (ash xn (- ctb)) (ash x0 (- ctb)))
                (<= (aref (cx-zscan c) (+ (* (ash yn (- s)) zw) (ash xn (- s))))
-                   (aref (cx-zscan c) (+ (* (ash (cx-cu-y c) (- s)) zw)
-                                         (ash (cx-cu-x c) (- s))))))))))
+                   (aref (cx-zscan c) (+ (* (ash y0 (- s)) zw)
+                                         (ash x0 (- s))))))))))
 
 (defun %amvp (c x0 y0 w h lx ref-idx)
   "The two motion vector predictors (8.5.3.2.7), as (values ax ay bx by count).
@@ -339,10 +366,10 @@
             ;; each position with the availability its DIRECTION gets: only the two that can point
             ;; into an undecoded part of this coding tree block are asked about z-scan order
             (a-pos (list (list (1- x0) (+ y0 h)
-                               (and av-bottom-left (%z-avail c (1- x0) (+ y0 h))))
+                               (and av-bottom-left (%z-avail c (1- x0) (+ y0 h) x0 y0)))
                          (list (1- x0) (+ y0 h -1) av-left)))
             (b-pos (list (list (+ x0 w) (1- y0)
-                               (and av-up-right (%z-avail c (+ x0 w) (1- y0))))
+                               (and av-up-right (%z-avail c (+ x0 w) (1- y0) x0 y0)))
                          (list (+ x0 w -1) (1- y0) av-up)
                          (list (1- x0) (1- y0) av-up-left)))
             ;; whether either LEFT position is a usable block at all, whatever it holds

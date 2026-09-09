@@ -54,6 +54,23 @@
   (qp-delta-coded nil)
   (%chroma-idx 4 :type fixnum)          ; this coding unit's intra_chroma_pred_mode
   (sao-type-cr 0 :type fixnum)          ; the two chroma components share one SAO type
+  pic                                   ; where the samples go
+  ;; the z-scan address of every smallest transform block, which is how availability is decided in
+  ;; a quadtree: decoding order is not raster, so "is my neighbour decoded" is an address compare
+  (zscan (make-array 0 :element-type '(signed-byte 32))
+   :type (simple-array (signed-byte 32) (*)))
+  (z-width 0 :type fixnum)
+  ;; the luma quantiser at each min-CB, and the running predictor cu_qp_delta is relative to
+  (qp-y (make-array 0 :element-type '(signed-byte 32))
+   :type (simple-array (signed-byte 32) (*)))
+  (qp-y-prev 26 :type fixnum)
+  (qg-x 0 :type fixnum) (qg-y 0 :type fixnum)
+  (cu-qp-delta 0 :type fixnum)
+  ;; scratch: one transform block's prediction, and the transform's intermediate array
+  (pred (make-array (* 32 32) :element-type '(signed-byte 32))
+   :type (simple-array (signed-byte 32) (*)))
+  (scratch (make-array (* 32 32) :element-type '(signed-byte 32))
+   :type (simple-array (signed-byte 32) (*)))
   ;; scratch for one transform block's coefficients, biggest first
   (coeffs (make-array (* 32 32) :element-type '(signed-byte 32))
    :type (simple-array (signed-byte 32) (*)))
@@ -76,6 +93,11 @@
               :skip (make-array (* mcw mch) :element-type 'bit :initial-element 0)
               :ctb-slice (make-array (sps-ctbs sps) :element-type '(signed-byte 32)
                                                     :initial-element -1)
+              :zscan (%build-z-scan sps)
+              :z-width (ash (sps-width sps) (- (sps-min-tb-log2 sps)))
+              :qp-y (make-array (* mcw mch) :element-type '(signed-byte 32)
+                                            :initial-element (sh-qp sh))
+              :qp-y-prev (sh-qp sh)
               :qp (sh-qp sh))))
 
 (declaim (inline %gc %gd))
@@ -93,6 +115,11 @@
   (declare (type ctx c) (type fixnum x y))
   (let ((s (sps-min-cb-log2 (cx-sps c))))
     (aref (cx-ct-depth c) (+ (* (ash y (- s)) (cx-min-cb-width c)) (ash x (- s))))))
+
+;;; The reconstruction lives in intra.lisp and transform.lisp, which are loaded after this file
+;;; because they read the state defined above.
+(declaim (ftype function %build-z-scan %intra-predict %dequantise %inverse-transform
+                %transform-skip %chroma-qp))
 
 ;;; ---- the syntax elements that are one bin each -------------------------------------------------
 
@@ -418,44 +445,126 @@
                                   (yc (+ (ash ycg 2) (aref off-y n))))
                               (setf (aref coeffs (+ (* yc size) xc)) level))
                             (incf (cx-n-coeff c)))))))))))
-          (%on-residual c x0 y0 log2-size c-idx))))))
+          (incf (cx-n-tu c))
+          transform-skip)))))
 
-(defun %on-residual (c x0 y0 log2-size c-idx)
-  "Where reconstruction will hook in: dequantise, inverse transform, add to the prediction.
-   For now the coefficients have been decoded and counted, and that is all."
-  (declare (ignore x0 y0 log2-size c-idx))
-  (incf (cx-n-tu c))
-  nil)
+;;; ---- reconstruction ----------------------------------------------------------------------------
+
+(defun %qp-for (c c-idx)
+  "The quantiser this component's residual was scaled by (8.6.1)."
+  (let ((sh (cx-sh c)) (pps (cx-pps c)) (qp (cx-qp c)))
+    (case c-idx
+      (0 qp)
+      (1 (%chroma-qp qp (+ (pps-cb-qp-offset pps) (sh-cb-qp-offset sh))))
+      (t (%chroma-qp qp (+ (pps-cr-qp-offset pps) (sh-cr-qp-offset sh)))))))
+
+(defun %reconstruct (c x0 y0 log2-size c-idx mode residual-p transform-skip)
+  "Predict this transform block, add its residual if it has one, and write it to the picture.
+
+   The prediction reads the picture, the residual reads the bitstream, and neither reads the other
+   — so the only ordering that matters is that a block is FINISHED before the next one starts,
+   because the next one predicts from these samples."
+  (declare (type ctx c) (type fixnum x0 y0 log2-size c-idx mode)
+           (optimize (speed 3) (safety 1)))
+  (let* ((pic (cx-pic c))
+         (n (ash 1 log2-size))
+         (pred (cx-pred c))
+         (coeffs (cx-coeffs c))
+         (plane (pic-plane pic c-idx))
+         (stride (pic-stride pic c-idx)))
+    (declare (type fixnum n stride))
+    (%intra-predict c pic x0 y0 log2-size c-idx mode pred)
+    (when residual-p
+      (let* ((qp (%qp-for c c-idx))
+             ;; the picture parameter set's lists override the sequence's when it sends any
+             (sl (and (sps-scaling-list-enabled (cx-sps c))
+                      (or (pps-scaling (cx-pps c)) (sps-scaling (cx-sps c)))))
+             ;; six matrices: intra Y, Cb, Cr then inter Y, Cb, Cr
+             (mid (+ (if (cx-cu-intra c) 0 3) c-idx))
+             (matrix (and sl (aref (sl-sl sl) (- log2-size 2) mid)))
+             (dc (and sl (>= log2-size 4) (aref (sl-dc sl) (- log2-size 4) mid))))
+        (if (cx-cu-transquant-bypass c)
+            nil                                 ; the levels ARE the residual, unscaled
+            (%dequantise coeffs (* n n) log2-size qp 8 matrix dc))
+        (cond ((cx-cu-transquant-bypass c) nil)
+              (transform-skip (%transform-skip coeffs (* n n) log2-size 8))
+              (t (%inverse-transform coeffs (cx-scratch c) log2-size
+                                     ;; the DST is for 4x4 intra LUMA only
+                                     (and (= log2-size 2) (zerop c-idx) (cx-cu-intra c))
+                                     8)))))
+    (dotimes (y n)
+      (let ((row (+ (* (+ y0 y) stride) x0)))
+        (declare (type fixnum row))
+        (dotimes (x n)
+          (let ((v (aref pred (+ (* y n) x))))
+            (declare (type fixnum v))
+            (when residual-p (incf v (aref coeffs (+ (* y n) x))))
+            (setf (aref plane (+ row x)) (max 0 (min 255 v)))))))))
 
 ;;; ---- the transform tree ------------------------------------------------------------------------
 
 (defun %transform-unit (c x0 y0 xb yb log2-size depth blk-idx cbf-luma cbf-cb cbf-cr)
   (declare (type fixnum x0 y0 xb yb log2-size depth blk-idx))
-  (let* ((sps (cx-sps c))
-         (pps (cx-pps c))
+  (let* ((pps (cx-pps c))
          ;; At 4x4 the chroma flags handed down are the PARENT's, and they count for all four
          ;; siblings — not only for the one that carries the chroma residual.  Whether a quantiser
          ;; delta is sent depends on this, so restricting it to blkIdx 3 loses bits on the other
          ;; three blocks rather than merely mislabelling them.
-         (cbf-chroma (or (plusp cbf-cb) (plusp cbf-cr))))
-    (declare (ignorable sps))
-    (when (or (plusp cbf-luma) cbf-chroma)
-      (when (and (pps-cu-qp-delta-enabled pps) (not (cx-qp-delta-coded c)))
-        (%cu-qp-delta c))
-      (when (plusp cbf-luma)
-        (%residual-coding c x0 y0 log2-size 0 (%intra-mode-at c x0 y0)))
-      (let ((cmode (%chroma-intra-mode (%intra-mode-at c (cx-cu-x c) (cx-cu-y c))
-                                       (cx-chroma-idx c))))
-        (cond
-          ((> log2-size 2)
-           (when (plusp cbf-cb)
-             (%residual-coding c x0 y0 (1- log2-size) 1 cmode))
-           (when (plusp cbf-cr)
-             (%residual-coding c x0 y0 (1- log2-size) 2 cmode)))
-          ;; four 4x4 luma blocks share one 4x4 chroma pair, sent with the last of them
-          ((= blk-idx 3)
-           (when (plusp cbf-cb) (%residual-coding c xb yb 2 1 cmode))
-           (when (plusp cbf-cr) (%residual-coding c xb yb 2 2 cmode))))))))
+         (cbf-chroma (or (plusp cbf-cb) (plusp cbf-cr)))
+         ;; chroma at 4x4 covers the PARENT's area, and is sent once with the last sibling
+         (chroma-here (or (> log2-size 2) (= blk-idx 3)))
+         (clog2 (if (> log2-size 2) (1- log2-size) 2))
+         (cx0 (ash (if (> log2-size 2) x0 xb) -1))
+         (cy0 (ash (if (> log2-size 2) y0 yb) -1))
+         (cmode (%chroma-intra-mode (%intra-mode-at c (cx-cu-x c) (cx-cu-y c))
+                                    (cx-chroma-idx c))))
+    (when (and (or (plusp cbf-luma) cbf-chroma)
+               (pps-cu-qp-delta-enabled pps) (not (cx-qp-delta-coded c)))
+      (%cu-qp-delta c))
+    ;; luma
+    (let ((skip (and (plusp cbf-luma)
+                     (%residual-coding c x0 y0 log2-size 0 (%intra-mode-at c x0 y0)))))
+      (%reconstruct c x0 y0 log2-size 0 (%intra-mode-at c x0 y0) (plusp cbf-luma) skip))
+    ;; chroma, both components, in the order the bitstream sends them
+    (when chroma-here
+      (let ((skip (and (plusp cbf-cb) (%residual-coding c cx0 cy0 clog2 1 cmode))))
+        (%reconstruct c cx0 cy0 clog2 1 cmode (plusp cbf-cb) skip))
+      (let ((skip (and (plusp cbf-cr) (%residual-coding c cx0 cy0 clog2 2 cmode))))
+        (%reconstruct c cx0 cy0 clog2 2 cmode (plusp cbf-cr) skip)))))
+
+(defun %derive-qp (c)
+  "Qp'Y for the current coding unit (8.6.1), and record it over the unit's area.
+
+   The quantiser is PREDICTED, from the left and above neighbours of the quantisation group and
+   from whichever unit was decoded last, so a delta of zero — which is what almost every unit sends
+   — still tracks a picture whose quantiser drifts.  A decoder that simply accumulated the deltas
+   would agree with the encoder until the first unit that has a neighbour it does not."
+  (let* ((sps (cx-sps c))
+         (s (sps-min-cb-log2 sps))
+         (w (cx-min-cb-width c))
+         (prev (cx-qp-y-prev c))
+         (xq (cx-qg-x c)) (yq (cx-qg-y c))
+         (ctb-mask (- (ash 1 (sps-ctb-log2 sps))))
+         ;; a neighbour outside the current coding tree block does not count: the standard would
+         ;; otherwise need a picture-wide row of quantisers kept live
+         (a (if (and (plusp xq) (%gc c (1- xq) yq)
+                     (= (logand (1- xq) ctb-mask) (logand xq ctb-mask))
+                     (= (logand yq ctb-mask) (logand yq ctb-mask)))
+                (aref (cx-qp-y c) (+ (* (ash yq (- s)) w) (ash (1- xq) (- s))))
+                prev))
+         (b (if (and (plusp yq) (%gc c xq (1- yq))
+                     (= (logand (1- yq) ctb-mask) (logand yq ctb-mask)))
+                (aref (cx-qp-y c) (+ (* (ash (1- yq) (- s)) w) (ash xq (- s))))
+                prev))
+         (qp (mod (+ (ash (+ a b 1) -1) (cx-cu-qp-delta c) 52) 52)))
+    (setf (cx-qp c) qp)
+    (let ((n (ash (ash 1 (cx-cu-log2 c)) (- s))))
+      (dotimes (j n)
+        (dotimes (i n)
+          (setf (aref (cx-qp-y c)
+                      (+ (* (+ (ash (cx-cu-y c) (- s)) j) w) (ash (cx-cu-x c) (- s)) i))
+                qp))))
+    qp))
 
 (defun %cu-qp-delta (c)
   "cu_qp_delta_abs and its sign: five context-coded bins then an Exp-Golomb escape."
@@ -467,8 +576,9 @@
     (when (= v 5) (incf v (%egk-bypass (cx-cabac c) 0)))
     (when (plusp v)
       (when (= 1 (%bypass c)) (setf v (- v))))
-    (setf (cx-qp-delta-coded c) t)
-    (incf (cx-qp c) v)
+    (setf (cx-qp-delta-coded c) t
+          (cx-cu-qp-delta c) v)
+    (%derive-qp c)
     v))
 
 (defun %transform-tree (c x0 y0 xb yb log2-size depth blk-idx parent-cb parent-cr)
@@ -571,6 +681,7 @@
       (setf (cx-%chroma-idx c) (%intra-chroma-pred-mode c)))
     (setf (cx-max-trafo-depth c)
           (+ (sps-max-transform-depth-intra sps) (if (cx-intra-split c) 1 0)))
+    (%derive-qp c)
     (%transform-tree c x0 y0 x0 y0 log2-size 0 0 1 1)))
 
 ;;; ---- the coding quadtree -----------------------------------------------------------------------
@@ -588,7 +699,10 @@
                       (t nil))))
     (when (and (pps-cu-qp-delta-enabled pps)
                (>= log2-size (- (sps-ctb-log2 sps) (pps-diff-cu-qp-delta-depth pps))))
-      (setf (cx-qp-delta-coded c) nil))
+      (setf (cx-qp-delta-coded c) nil
+            (cx-cu-qp-delta c) 0
+            (cx-qp-y-prev c) (cx-qp c)
+            (cx-qg-x c) x0 (cx-qg-y c) y0))
     (if split
         (let* ((half (ash 1 (1- log2-size)))
                (x1 (+ x0 half)) (y1 (+ y0 half)))
@@ -657,7 +771,7 @@
                       (when (< comp 2) (dotimes (i 2) (%bypass c)))))))))))  ; sao_eo_class
     nil))
 
-(defun decode-slice-data (sps pps sh br)
+(defun decode-slice-data (sps pps sh br &optional pic)
   "Walk one independent slice segment's coding tree units.
 
    Returns the context, whose counters are what stands in for a picture until reconstruction
@@ -670,10 +784,13 @@
     (%err "dependent slice segments are not supported"))
   (let* ((cab (init-cabac br (sh-qp sh) (sh-type sh) (sh-cabac-init sh)))
          (c (%make-ctx sps pps sh cab))
+         (pic (or pic (make-picture-for sps)))
          (wide (sps-ctbs-wide sps))
          (total (sps-ctbs sps))
          (log2 (sps-ctb-log2 sps)))
-    (setf (cx-slice-addr c) (sh-segment-address sh))
+    (setf (cx-slice-addr c) (sh-segment-address sh)
+          (cx-pic c) pic
+          (cx-qg-x c) 0 (cx-qg-y c) 0)
     (loop for addr of-type fixnum from (sh-segment-address sh) below total do
       (let ((rx (mod addr wide)) (ry (floor addr wide)))
         (setf (aref (cx-ctb-slice c) addr) (cx-slice-addr c))

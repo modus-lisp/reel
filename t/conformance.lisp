@@ -127,6 +127,38 @@
 ;;; depths and the conformance window, and getting any of them wrong moves the picture size.  A
 ;;; stream this cannot parse at all is a FAILURE; one it refuses by naming a tool is not.
 
+(defun %hevc-first-picture (f spss ppss)
+  "Decode F's first picture, if it is entirely intra.  Returns (values picture reason).
+
+   Comparing this against ffmpeg is what the tiling check was standing in for: the whole
+   reconstruction path — prediction, dequantisation, both transforms — either agrees to the sample
+   or it does not.  The reference is decoded with the loop filters off on BOTH sides, because
+   deblocking and SAO are not implemented here yet and their absence is not what is being measured."
+  (let ((pic nil) (done nil) (why nil))
+    (handler-case
+        (dolist (nal (reel.hevc:annex-b-nals (slurp f)))
+          (when (and (reel.hevc:nal-base-layer-p nal) (not done))
+            (cond
+              ((= (reel.hevc::nal-type nal) reel.hevc::+nal-sps+)
+               (let ((sp (reel.hevc:parse-sps (reel.hevc:nal-rbsp nal))))
+                 (setf (gethash (reel.hevc:sps-id sp) spss) sp)))
+              ((= (reel.hevc::nal-type nal) reel.hevc::+nal-pps+)
+               (let ((pp (reel.hevc:parse-pps (reel.hevc:nal-rbsp nal))))
+                 (setf (gethash (reel.hevc:pps-id pp) ppss) pp)))
+              ((reel.hevc:nal-slice-p nal)
+               (let* ((br (reel.hevc:make-bitreader (reel.hevc:nal-rbsp nal)))
+                      (sh (reel.hevc:parse-slice-header br nal spss ppss)))
+                 (cond
+                   ((and pic (reel.hevc:sh-first-in-pic sh)) (setf done t))
+                   ((not (reel.hevc:sh-i-slice-p sh))
+                    (setf why "the first picture is not all intra" done t pic nil))
+                   (t (unless pic
+                        (setf pic (reel.hevc:make-picture-for (reel.hevc::sh-sps sh))))
+                      (reel.hevc:decode-slice-data (reel.hevc::sh-sps sh)
+                                                   (reel.hevc::sh-pps sh) sh br pic))))))))
+      (reel.hevc:hevc-error (e) (setf why (reel.hevc:hevc-error-message e) pic nil)))
+    (values pic why)))
+
 (defun %hevc-intra-pictures (f spss ppss)
   "Decode the slice data of every ALL-INTRA picture in F.  Returns (values checked good reason).
 
@@ -176,7 +208,7 @@
     (values pics good (or refusal why) (and refusal t))))
 
 (defun run-hevc ()
-  (let ((pass 0) (fail 0) (refused 0) (intra-ok 0))
+  (let ((pass 0) (fail 0) (refused 0) (intra-ok 0) (exact 0))
     (dolist (f (sort (directory (format nil "~a/hevc/*.bit" *conf*)) #'string< :key #'namestring))
       (let ((dims (probe-file (format nil "~a.dims" (namestring f)))))
         (handler-case
@@ -211,20 +243,42 @@
                        (multiple-value-bind (pics good why refused-p)
                            (%hevc-intra-pictures f (make-hash-table) (make-hash-table))
                          (incf intra-ok good)
-                         (cond ((or (zerop pics) (= good pics)) (incf pass))
-                               (refused-p
-                                (incf refused)
-                                (format t "~&  --   ~a: refused — ~a~%" (pathname-name f) why))
-                               (t (incf fail)
-                                  (format t "~&  FAIL ~a: ~d of ~d intra pictures~@[ — ~a~]~%"
-                                          (pathname-name f) good pics why))))))))
+                         (cond
+                           ((and (plusp pics) (< good pics))
+                            (if refused-p
+                                (progn (incf refused)
+                                       (format t "~&  --   ~a: refused — ~a~%"
+                                               (pathname-name f) why))
+                                (progn (incf fail)
+                                       (format t "~&  FAIL ~a: ~d of ~d intra pictures~@[ — ~a~]~%"
+                                               (pathname-name f) good pics why))))
+                           ;; the syntax ends where it should; now the SAMPLES, against ffmpeg
+                           (t
+                            (let ((refp (probe-file (format nil "~a.f1.yuv" (namestring f))))
+                                  (pic (%hevc-first-picture f (make-hash-table)
+                                                            (make-hash-table))))
+                              (cond
+                                ((or (null refp) (null pic)) (incf pass))
+                                (t (let ((mine (reel.hevc:picture->yuv420 pic))
+                                         (ref (slurp refp)))
+                                     (cond
+                                       ((/= (length mine) (length ref))
+                                        (incf fail)
+                                        (format t "~&  FAIL ~a: ~d sample bytes, reference ~d~%"
+                                                (pathname-name f) (length mine) (length ref)))
+                                       ((loop for i below (length mine)
+                                              always (= (aref mine i) (aref ref i)))
+                                        (incf pass) (incf exact))
+                                       (t (incf fail)
+                                          (format t "~&  FAIL ~a: not bit-exact~%"
+                                                  (pathname-name f)))))))))))))))
           (reel.hevc:hevc-error (e) (incf refused)
             (format t "~&  --   ~a: refused — ~a~%" (pathname-name f) e))
           (error (e) (incf fail) (format t "~&  FAIL ~a: ~a~%" (pathname-name f) e)))))
     (format t "~&HEVC: ~d streams parsed with the geometry ffprobe reports, ~d failed, ~d refused~%"
             pass fail refused)
-    (format t "      and ~d all-intra pictures whose slice data parses to exactly the right end~%"
-            intra-ok)
+    (format t "      ~d all-intra pictures parse to exactly the right end~%" intra-ok)
+    (format t "      ~d first pictures reconstruct BIT-EXACTLY against ffmpeg~%" exact)
     fail))
 
 (let ((bad 0))

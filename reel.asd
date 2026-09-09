@@ -79,13 +79,22 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
       :serial t
       :components
       ((:file "bits")         ; NAL units (a TWO byte header), RBSP, the Exp-Golomb bit reader
+       ;; the scan orders and the default scaling lists come first: the parameter set parser
+       ;; scatters a transmitted scaling list through the diagonal scan as it reads it
+       (:file "scan")         ; the coefficient scan orders, derived rather than tabulated
+       (:file "scaling-tables")   ; GENERATED: the default scaling lists
        (:file "params")       ; profile/tier/level, sequence and picture parameter sets, slices
        (:file "cabac-tables") ; GENERATED: the 179 context initialisation values
        (:file "cabac-state-tables") ; GENERATED: rangeTabLps and the state transitions
        (:file "cabac")        ; the arithmetic decoder and the binarizations above it
-       (:file "scan")         ; the coefficient scan orders, derived rather than tabulated
        (:file "sig-ctx-tables")   ; GENERATED: sig_coeff_flag's context by position
-       (:file "slice")))      ; the coding tree, coding units, and residual coding
+       (:file "transform-tables") ; GENERATED: the inverse transform matrices
+       (:file "transform")    ; dequantisation and the inverse transforms
+       (:file "picture")      ; the decoded picture
+       (:file "slice")        ; the coding tree, coding units, and residual coding
+       ;; AFTER slice.lisp: prediction reads the decode state defined there, and the slice walk
+       ;; calls back into it through the FTYPE declaim at the top of that file
+       (:file "intra")))      ; the thirty-five intra prediction modes
 
      ;; ---- MPEG-1 and MPEG-2 video, which are one bitstream with one of them extended
      (:module "mpeg2"

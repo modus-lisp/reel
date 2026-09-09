@@ -61,34 +61,64 @@
 
 ;;; ---- scaling lists ----------------------------------------------------------------------------
 
+(defstruct (scaling (:conc-name sl-))
+  "The dequantisation weights, as RASTER matrices ready to index.
+
+   SL is four sizes by six matrices — intra Y, Cb, Cr then inter Y, Cb, Cr — each 16 entries at
+   4x4 and 64 at every larger size, because 16x16 and 32x32 both weight through the 8x8 list with
+   each entry repeated.  DC holds the separately transmitted DC weight for those two sizes."
+  (sl (make-array '(4 6)) :type (simple-array t (4 6)))
+  (dc (make-array '(2 6) :element-type 'fixnum :initial-element 16)
+   :type (simple-array fixnum (2 6))))
+
+(defun %default-scaling ()
+  "Every matrix at its default: flat at 4x4, and the two 8x8 defaults above it."
+  (let ((s (make-scaling)))
+    (dotimes (m 6)
+      (setf (aref (sl-sl s) 0 m)
+            (make-array 16 :element-type '(unsigned-byte 8) :initial-element 16)))
+    (loop for size from 1 to 3
+          do (dotimes (m 6)
+               (setf (aref (sl-sl s) size m)
+                     (copy-seq (if (< m 3) +default-scaling-intra+ +default-scaling-inter+)))))
+    s))
+
 (defun %parse-scaling-list-data (br)
-  "scaling_list_data (7.3.4): four sizes by six matrices, each either copied or sent as deltas.
+  "scaling_list_data (7.3.4): four sizes by six matrices, each defaulted, copied, or sent.
 
    The coefficients are a DELTA CHAIN modulo 256 rather than absolute values, and the chain starts
-   at 8 — or, for the 16x16 and 32x32 sizes, at the DC coefficient that is sent separately and does
-   not itself take part in the chain's ordering.  Returns the raw lists; turning them into
-   dequantisation weights is the transform's business, not the parser's."
-  (let ((out (make-array '(4 6) :initial-element nil))
-        (dc (make-array '(4 6) :element-type 'fixnum :initial-element 16)))
+   at 8 — or, above 8x8, at the DC weight that is sent first and then also seeds the chain.  They
+   arrive in the DIAGONAL SCAN and are scattered into raster here, because that is the order
+   dequantisation indexes them in and doing it later would mean doing it per coefficient."
+  (let ((s (%default-scaling)))
     (dotimes (size-id 4)
       (do ((matrix-id 0 (+ matrix-id (if (= size-id 3) 3 1))))
           ((>= matrix-id 6))
         (if (zerop (u1 br))                     ; scaling_list_pred_mode_flag
-            ;; predicted: 0 means "the default list", otherwise a reference to an earlier matrix
-            (let ((delta (ue br)))
-              (setf (aref out size-id matrix-id)
-                    (if (zerop delta) :default (- matrix-id (* delta (if (= size-id 3) 3 1))))))
+            ;; 0 means the default, which is already in place; anything else names an earlier matrix
+            (let ((delta (* (ue br) (if (= size-id 3) 3 1))))
+              (when (plusp delta)
+                (when (< matrix-id delta)
+                  (%err "a scaling list refers to matrix ~d, which is before the first"
+                        (- matrix-id delta)))
+                (setf (aref (sl-sl s) size-id matrix-id)
+                      (copy-seq (aref (sl-sl s) size-id (- matrix-id delta))))
+                (when (> size-id 1)
+                  (setf (aref (sl-dc s) (- size-id 2) matrix-id)
+                        (aref (sl-dc s) (- size-id 2) (- matrix-id delta))))))
             (let* ((n (min 64 (ash 1 (+ 4 (ash size-id 1)))))
-                   (list (make-array n :element-type 'fixnum))
+                   (m (aref (sl-sl s) size-id matrix-id))
+                   (xs (if (zerop size-id) (first +diag4x4+) (first +diag8x8+)))
+                   (ys (if (zerop size-id) (second +diag4x4+) (second +diag8x8+)))
+                   (w (if (zerop size-id) 4 8))
                    (next 8))
               (when (> size-id 1)
                 (setf next (+ 8 (se br))
-                      (aref dc size-id matrix-id) next))
+                      (aref (sl-dc s) (- size-id 2) matrix-id) next))
               (dotimes (i n)
                 (setf next (mod (+ next (se br) 256) 256)
-                      (aref list i) next))
-              (setf (aref out size-id matrix-id) list)))))
-    (values out dc)))
+                      (aref m (+ (* w (aref ys i)) (aref xs i))) next))))))
+    s))
 
 ;;; ---- short-term reference picture sets --------------------------------------------------------
 
@@ -196,7 +226,7 @@
   (min-cb-log2 3) (ctb-log2 6)
   (min-tb-log2 2) (max-tb-log2 5)
   (max-transform-depth-inter 0) (max-transform-depth-intra 0)
-  (scaling-list-enabled nil) (scaling-lists nil) (scaling-dc nil)
+  (scaling-list-enabled nil) (scaling nil)
   (amp-enabled nil) (sao-enabled nil)
   (pcm-enabled nil) (pcm-bit-depth-luma 8) (pcm-bit-depth-chroma 8)
   (pcm-min-cb-log2 3) (pcm-max-cb-log2 3) (pcm-loop-filter-disabled nil)
@@ -256,10 +286,12 @@
           (sps-max-transform-depth-inter s) (ue br)
           (sps-max-transform-depth-intra s) (ue br))
     (when (= 1 (u1 br))                         ; scaling_list_enabled_flag
-      (setf (sps-scaling-list-enabled s) t)
-      (when (= 1 (u1 br))                       ; sps_scaling_list_data_present_flag
-        (multiple-value-bind (lists dc) (%parse-scaling-list-data br)
-          (setf (sps-scaling-lists s) lists (sps-scaling-dc s) dc))))
+      (setf (sps-scaling-list-enabled s) t
+            ;; enabled but not transmitted means the defaults, which is a real setting and not the
+            ;; same thing as disabled: the default lists are not flat
+            (sps-scaling s) (if (= 1 (u1 br))   ; sps_scaling_list_data_present_flag
+                                (%parse-scaling-list-data br)
+                                (%default-scaling))))
     (setf (sps-amp-enabled s) (= 1 (u1 br))
           (sps-sao-enabled s) (= 1 (u1 br))
           (sps-pcm-enabled s) (= 1 (u1 br)))
@@ -324,7 +356,7 @@
   (loop-filter-across-slices nil)
   (deblocking-control-present nil) (deblocking-override-enabled nil)
   (deblocking-disabled nil) (beta-offset 0) (tc-offset 0)
-  (scaling-lists nil) (scaling-dc nil)
+  (scaling nil)
   (lists-modification-present nil)
   (log2-parallel-merge-level 2)
   (slice-header-extension nil))
@@ -375,8 +407,7 @@
         (setf (pps-beta-offset p) (* 2 (se br))
               (pps-tc-offset p) (* 2 (se br)))))
     (when (= 1 (u1 br))                         ; pps_scaling_list_data_present_flag
-      (multiple-value-bind (lists dc) (%parse-scaling-list-data br)
-        (setf (pps-scaling-lists p) lists (pps-scaling-dc p) dc)))
+      (setf (pps-scaling p) (%parse-scaling-list-data br)))
     (setf (pps-lists-modification-present p) (= 1 (u1 br))
           (pps-log2-parallel-merge-level p) (+ 2 (ue br))
           (pps-slice-header-extension p) (= 1 (u1 br)))

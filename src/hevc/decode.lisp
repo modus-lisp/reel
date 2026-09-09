@@ -9,13 +9,19 @@
 
 (in-package #:reel.hevc)
 
+(defvar *skip-loop-filters* nil
+  "When true, neither in-loop filter runs.  For separating a reconstruction error from a filter
+   error: ffmpeg's -skip_loop_filter gives the matching reference, and the difference between the
+   two comparisons says which half of the decoder to look at.")
+
 (defun %finish-picture (d)
   "Filter the picture currently open, put it in the buffer, and hand out whatever is now due."
   (let ((pic (dec-current d))
         (sh (dec-cur-sh d)))
     (when (and pic sh)
-      (deblock-picture pic (sh-pps sh) sh)
-      (sao-picture pic sh)
+      (unless *skip-loop-filters*
+        (deblock-picture pic (sh-pps sh) sh)
+        (sao-picture pic sh))
       (incf (dec-frames d))
       (push pic (dec-dpb d))
       (setf (dec-current d) nil (dec-cur-sh d) nil)

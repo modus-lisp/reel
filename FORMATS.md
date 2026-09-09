@@ -16,7 +16,7 @@ as data.
 | | verified against |
 |---|---|
 | **VP8**, key and inter frames | libvpx, bit-exact on eight clips and on Big Buck Bunny |
-| **H.264 Baseline, Main and High** | ffmpeg, bit-exact on twenty-two fixtures, on a 7672-frame YouTube file and on 300 frames of 640x360 High profile, every frame |
+| **H.264 Baseline, Main and High** | 69 of the JVT conformance streams bit-exact, plus ffmpeg's output on a 7672-frame YouTube file and 300 frames of 640x360 High profile, every frame |
 | **MPEG-1 and MPEG-2 video** | ffmpeg, bit-exact on thirteen fixtures, every frame |
 | **MPEG-4 Part 2** (DivX, XviD) | ffmpeg, bit-exact on eleven fixtures, every frame |
 | **WebM and Matroska** | they are the same demuxer; `.mkv` with H.264 decodes today |
@@ -113,7 +113,8 @@ because nobody knows to disbelieve it.
 - H.264: more than 8 bits per sample, 4:2:2 and 4:4:4, MBAFF and field coding, FMO, long-term
   references, and `memory_management_control_operation` 5. Each is refused on the FLAG that turns it
   on rather than on the profile that permits it, so a High profile stream using none of them decodes
-  here.
+  here. Multiple slices per picture, I_PCM macroblocks and both remaining `pic_order_cnt_type`s are
+  decoded, not refused.
 - MPEG-2: field pictures, dual-prime motion vectors, and anything but 4:2:0.
 - MPEG-4 Part 2: sprites and global motion, interlaced objects, data partitioning, scalability, and
   arbitrary shapes. Also Microsoft's pre-standard MPEG-4 variants (DIV3, MP42), which share a name
@@ -171,7 +172,7 @@ than it looks. `t/fetch-conformance.sh` pulls the official suites; here is what 
 |---|---|
 | **VP8**, the seventeen official libvpx vectors | **17 of 17 bit-exact**, 833 frames |
 | **VP9**, the official feature vectors | **34 of 34 bit-exact**; 11 profile 1/2/3 streams correctly refused |
-| **H.264**, a spread of 37 JVT conformance streams | 20 bit-exact, 15 refused, 2 wrong |
+| **H.264**, 71 of the 125 JVT conformance streams | **69 of 69 accepted are bit-exact**; 2 refused for field/MBAFF coding |
 | **AC-3**, three real Dolby-encoded tracks | two at 0.9998; one is a near-silent excerpt where correlation measures rounding |
 
 What that exercise found, none of which the synthetic corpus could:
@@ -209,19 +210,59 @@ What that exercise found, none of which the synthetic corpus could:
   ffmpeg's AC-3 encoder never emits the field, and Dolby's uses it constantly. Fixed.
 - **Vorbis crashed on truncated Ogg files** rather than decoding what was there. Fixed.
 
-And what it found that is *not* fixed, which is the honest part:
+Then the fifteen H.264 streams the decoder had been REFUSING, on the theory that a refusal is only
+honest if it names a feature rather than hides a bug. Nine of the fifteen were bugs. All but one are
+in code that a stream with one slice per picture never reaches, which is why a corpus of ffmpeg
+output could not have found them — and having found them, the remaining 88 streams of the suite were
+swept too, which turned up one more.
 
-- **H.264 refuses more than this document admits.** Alongside the documented refusals it turns away
-  I_PCM macroblocks, `pic_order_cnt_type` 1, and several streams whose reference lists it cannot
-  build.
-- **Two JVT streams still decode to the wrong picture rather than being refused**, which is worse
-  than either. `CACQP3_Sony_D` decodes every luma sample of every picture correctly and gets the
-  chroma badly wrong — which points at the chroma quantiser and is not the chroma quantiser: its
-  `chroma_qp_index_offset` of 12 is parsed correctly, Table 8-15 maps it correctly, and forcing the
-  offset to zero or skipping the table both make matters worse rather than better. Since CABAC
-  cannot desynchronise for one plane and not the other, the coefficients must be right and the
-  chroma reconstruction wrong somewhere after them. `CI_MW_D` gets thirty-two pictures exactly right
-  and then diverges, which is the signature of reference management rather than of a block decode.
+- **Nothing knew where a slice ended.** Macroblock availability tested "inside the picture and
+  already decoded" and never asked which SLICE had decoded it. A slice is defined to be
+  independently decodable, so a neighbour across the boundary is unavailable however plainly it is
+  sitting there. The failure is not a soft one: a stale coefficient count picks the wrong
+  coeff_token table and the bitstream is lost from the second slice's first macroblock onward. Six
+  streams died there, and three more died in the CABAC contexts, which had the same hole in a second
+  place — a picture coded as alternating I and P slices gave the P slice's `ref_idx` a context from
+  the I slice above it, and the index came out past the end of the reference list. That last one had
+  been misfiled here as a reference list problem, and the reference lists were right all along.
+- **The whole per-picture epilogue ran once per slice.** A three-slice picture was deblocked three
+  times over, its first slice filtered three times and its last once. Small errors everywhere rather
+  than an obvious one somewhere, and invisible to every single-slice fixture there is. The loop
+  filter, reference marking and reordering now wait for the picture to end.
+- **Parameter sets were hoisted past the slices they govern.** The concurrent path lifts every SPS
+  and PPS to the front so workers can share them, and the serial path was replaying that. Streams
+  that RE-SEND a parameter set with different contents are then decoded entirely under the last
+  version of it. Where the field is a reference count the failure is loud; where it is
+  `chroma_qp_index_offset` it is silent, and that was `CACQP3_Sony_D` — every luma sample right and
+  the chroma wrong by a little, everywhere. This document previously recorded that its chroma
+  quantiser had been ruled out. It had been: the offset parsed correctly every time, just from the
+  wrong PPS.
+- **`constrained_intra_pred_flag` was parsed and never used**, so intra macroblocks predicted from
+  inter neighbours the encoder had ruled out. One whole macroblock wrong, isolated, in an otherwise
+  perfect picture. It is deliberately NOT applied to the coefficient counts, which only ignore inter
+  neighbours in a slice-data-partitioned stream — a tool this decoder refuses anyway.
+- **Cropping has an origin, not just a size.** The samples were read from the coded top-left corner,
+  which is right for every stream a real encoder makes — they crop the right and bottom, where
+  macroblock alignment puts the waste — and wrong for the one stream in the suite written to check
+  it.
+
+Two features were added rather than fixed, because both turned out to be small: I_PCM macroblocks
+and `pic_order_cnt_type` 1. I_PCM is a memcpy whose three real difficulties are all about what the
+NEIGHBOURS are told afterwards, and each was a separate bug.
+
+And a third oracle trap, after the two above: **ffmpeg does not apply `frame_crop_left_offset` for
+`CVFC1_Sony_C`.** It emits 326-wide frames where the sequence parameter set says 300 — and where
+ffmpeg's own stream metadata says 300 — with the picture sitting 26 samples in. Decoding it and
+comparing at that offset gives zero differing samples. The decoder is right and the reference is
+what needed correcting, which `t/fetch-conformance.sh` now does and says why.
+
+What remains, which is the honest part:
+
+- **Field and MBAFF coding is the whole of what is left.** Of the 125 JVT streams, 71 are in the
+  suite and 69 of those are bit-exact; the two refused and most of the 54 not carried are interlaced
+  or macroblock-adaptive frame/field. It is a real feature and a large one: a second neighbour
+  derivation, a second deblocking geometry, and field-paired reference handling throughout.
+- Long-term references and slice groups (FMO) account for the rest. Both are refused by name.
 
 ## Not worth it, and why
 

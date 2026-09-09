@@ -74,16 +74,58 @@
                             (= (cand-mvy c i lx) (cand-mvy c j lx)))))
         (return nil)))))
 
+(defun %ctb-avail (c cx cy)
+  "Is the coding tree block at (CX,CY) decoded and in this slice segment?"
+  (declare (type fixnum cx cy))
+  (let ((wide (sps-ctbs-wide (cx-sps c))) (high (sps-ctbs-high (cx-sps c))))
+    (and (>= cx 0) (>= cy 0) (< cx wide) (< cy high)
+         (= (aref (cx-ctb-slice c) (+ (* cy wide) cx)) (cx-slice-addr c)))))
+
+(defun %pu-neighbours (c x0 y0 w h)
+  "(values left up up-left up-right bottom-left) for a prediction unit.
+
+   THE FIVE DIRECTIONS ARE NOT ALL ASKED THE SAME QUESTION, and this is the part that is easy to
+   over-think into being wrong.  Left, above and above-left need only that the direction exists:
+   either the neighbour is inside this coding tree block — in which case it is decoded, because the
+   quadtree visits left before right and above before below — or it is in an adjacent block, and
+   whether THAT is decoded is a question about slices.
+
+   Only ABOVE-RIGHT and BELOW-LEFT need the z-scan order compared, because only those two can
+   point at a position inside the current coding tree block that has NOT been reached yet.
+
+   Deriving all five from the z-scan comparison seems more principled and is wrong: it rejects the
+   left neighbour of a vertically split unit's second half, which lies in the first half and is
+   perfectly well decoded.  The predictor then comes from somewhere else and the vector is off by
+   a little — one quarter sample, in the streams that showed it."
+  (declare (type ctx c) (type fixnum x0 y0 w h))
+  (let* ((sps (cx-sps c))
+         (log2 (sps-ctb-log2 sps))
+         (mask (1- (ash 1 log2)))
+         (x0b (logand x0 mask)) (y0b (logand y0 mask))
+         (cx (ash x0 (- log2))) (cy (ash y0 (- log2)))
+         (up (or (plusp y0b) (%ctb-avail c cx (1- cy))))
+         (left (or (plusp x0b) (%ctb-avail c (1- cx) cy)))
+         (up-left (if (or (plusp x0b) (plusp y0b))
+                      (and left up)
+                      (%ctb-avail c (1- cx) (1- cy))))
+         (up-right (and (if (= (+ x0b w) (ash 1 log2))
+                            (and (%ctb-avail c (1+ cx) (1- cy)) (zerop y0b))
+                            up)
+                        (< (+ x0 w) (sps-width sps))))
+         (bottom-left (and (< (+ y0 h) (sps-height sps)) left)))
+    (values left up up-left up-right bottom-left)))
+
 (defun %neighbour-motion (c x y)
   "(values available-p) for the 4x4 block at luma (X,Y), and its motion through the picture.
 
    Available means inside the picture, decoded before us in z-scan order, in the same slice, and
    NOT intra — an intra neighbour has no motion to lend."
   (declare (type ctx c) (type fixnum x y))
-  ;; NOT for intra: constrained_intra_pred narrows which neighbours may lend SAMPLES, and says
-  ;; nothing about which may lend motion
-  (and (%available-p c (cx-cu-x c) (cx-cu-y c) x y nil)
-       (zerop (aref (pic-intra (cx-pic c)) (pic-mv-index (cx-pic c) x y)))))
+  ;; The DIRECTION's availability is the caller's business — see %PU-NEIGHBOURS — so all that is
+  ;; left here is whether the block is inside the picture and has any motion to lend at all.
+  (let ((sps (cx-sps c)))
+    (and (>= x 0) (>= y 0) (< x (sps-width sps)) (< y (sps-height sps))
+         (zerop (aref (pic-intra (cx-pic c)) (pic-mv-index (cx-pic c) x y))))))
 
 (defun %take-neighbour (c cands i x y)
   "Copy the motion at (X,Y) into candidate slot I.  Returns true when there was any."
@@ -193,26 +235,30 @@
         (skip-a1 (and (= part-idx 1) (member part-mode '(2 6 7))))     ; Nx2N, nLx2N, nRx2N
         (skip-b1 (and (= part-idx 1) (member part-mode '(1 4 5)))))    ; 2NxN, 2NxnU, 2NxnD
     (declare (type fixnum n maxn))
-    (flet ((emit (from)
+    (multiple-value-bind (av-left av-up av-up-left av-up-right av-bottom-left)
+        (%pu-neighbours c x0 y0 w h)
+     (flet ((emit (from)
              (when (< n maxn)
                (dotimes (k +cand-size+)
                  (setf (aref out (+ (* +cand-size+ n) k)) (aref tmp (+ (* +cand-size+ from) k))))
                (incf n))))
       ;; ---- A1, left, level with the bottom of the block
-      (let ((a1 (and (not skip-a1) (%take-neighbour c tmp 0 (1- x0) (+ y0 h -1)))))
+      (let ((a1 (and (not skip-a1) av-left (%take-neighbour c tmp 0 (1- x0) (+ y0 h -1)))))
         (when a1 (emit 0))
         ;; ---- B1, above, level with the right of the block
-        (let ((b1 (and (not skip-b1) (%take-neighbour c tmp 1 (+ x0 w -1) (1- y0)))))
+        (let ((b1 (and (not skip-b1) av-up (%take-neighbour c tmp 1 (+ x0 w -1) (1- y0)))))
           (when (and b1 (or (not a1) (not (%same-motion-p tmp 1 0)))) (emit 1))
-          ;; ---- B0, above-right
-          (let ((b0 (%take-neighbour c tmp 2 (+ x0 w) (1- y0))))
+          ;; ---- B0, above-right, which may point at an undecoded part of this block
+          (let ((b0 (and av-up-right (%z-avail c (+ x0 w) (1- y0))
+                         (%take-neighbour c tmp 2 (+ x0 w) (1- y0)))))
             (when (and b0 (or (not b1) (not (%same-motion-p tmp 2 1)))) (emit 2)))
-          ;; ---- A0, below-left
-          (let ((a0 (%take-neighbour c tmp 3 (1- x0) (+ y0 h))))
+          ;; ---- A0, below-left, likewise
+          (let ((a0 (and av-bottom-left (%z-avail c (1- x0) (+ y0 h))
+                         (%take-neighbour c tmp 3 (1- x0) (+ y0 h)))))
             (when (and a0 (or (not a1) (not (%same-motion-p tmp 3 0)))) (emit 3)))
           ;; ---- B2, the corner, and only when the other four did not fill the list
           (when (< n 4)
-            (let ((b2 (%take-neighbour c tmp 4 (1- x0) (1- y0))))
+            (let ((b2 (and av-up-left (%take-neighbour c tmp 4 (1- x0) (1- y0)))))
               (when (and b2
                          (or (not a1) (not (%same-motion-p tmp 4 0)))
                          (or (not b1) (not (%same-motion-p tmp 4 1))))
@@ -252,8 +298,22 @@
               (%set-cand out n 0 0 0 r (pic-poc (aref (cx-list0 c) r))))
             (when (and (sh-b-slice-p (cx-sh c)) (plusp (length (cx-list1 c))))
               (%set-cand out n 1 0 0 r (pic-poc (aref (cx-list1 c) r)))))
-          (incf zero) (incf n))))
+          (incf zero) (incf n)))))
     n))
+
+(defun %z-avail (c xn yn)
+  "Only the z-scan half of availability, for the two directions that need it."
+  (declare (type fixnum xn yn))
+  (let ((sps (cx-sps c)))
+    (and (>= xn 0) (>= yn 0) (< xn (sps-width sps)) (< yn (sps-height sps))
+         (let ((ctb (sps-ctb-log2 sps))
+               (s (sps-min-tb-log2 sps))
+               (zw (cx-z-width c)))
+           (or (< (ash yn (- ctb)) (ash (cx-cu-y c) (- ctb)))
+               (< (ash xn (- ctb)) (ash (cx-cu-x c) (- ctb)))
+               (<= (aref (cx-zscan c) (+ (* (ash yn (- s)) zw) (ash xn (- s))))
+                   (aref (cx-zscan c) (+ (* (ash (cx-cu-y c) (- s)) zw)
+                                         (ash (cx-cu-x c) (- s))))))))))
 
 (defun %amvp (c x0 y0 w h lx ref-idx)
   "The two motion vector predictors (8.5.3.2.7), as (values ax ay bx by count).
@@ -273,12 +333,22 @@
          (list (if (zerop lx) (cx-list0 c) (cx-list1 c)))
          (cur (pic-poc pic)))
     (when (>= ref-idx (length list)) (return-from %amvp (values 0 0 0 0 0)))
-    (let* ((target (pic-poc (aref list ref-idx)))
-           (a-pos (list (cons (1- x0) (+ y0 h)) (cons (1- x0) (+ y0 h -1))))       ; A0, A1
-           (b-pos (list (cons (+ x0 w) (1- y0)) (cons (+ x0 w -1) (1- y0))
-                        (cons (1- x0) (1- y0))))                                    ; B0, B1, B2
-           ;; whether the LEFT positions are decoded blocks at all, regardless of what they hold
-           (scaled-flag (some (lambda (at) (%neighbour-motion c (car at) (cdr at))) a-pos)))
+    (multiple-value-bind (av-left av-up av-up-left av-up-right av-bottom-left)
+        (%pu-neighbours c x0 y0 w h)
+     (let* ((target (pic-poc (aref list ref-idx)))
+            ;; each position with the availability its DIRECTION gets: only the two that can point
+            ;; into an undecoded part of this coding tree block are asked about z-scan order
+            (a-pos (list (list (1- x0) (+ y0 h)
+                               (and av-bottom-left (%z-avail c (1- x0) (+ y0 h))))
+                         (list (1- x0) (+ y0 h -1) av-left)))
+            (b-pos (list (list (+ x0 w) (1- y0)
+                               (and av-up-right (%z-avail c (+ x0 w) (1- y0))))
+                         (list (+ x0 w -1) (1- y0) av-up)
+                         (list (1- x0) (1- y0) av-up-left)))
+            ;; whether either LEFT position is a usable block at all, whatever it holds
+            (scaled-flag (some (lambda (at)
+                                 (and (third at) (%neighbour-motion c (first at) (second at))))
+                               a-pos)))
       (labels
           ((probe (px py same)
              ;; (values mvx mvy) from this neighbour: its own list first, then the other one,
@@ -298,8 +368,9 @@
              nil)
            (search-positions (positions same)
              (dolist (at positions nil)
-               (multiple-value-bind (mx my) (probe (car at) (cdr at) same)
-                 (when mx (return (cons mx my)))))))
+               (when (third at)
+                 (multiple-value-bind (mx my) (probe (first at) (second at) same)
+                   (when mx (return (cons mx my))))))))
         (let* ((a (or (search-positions a-pos t)
                       (search-positions a-pos nil)))
                (b (search-positions b-pos t)))
@@ -322,4 +393,4 @@
             (loop while (< (length cands) 2) do (setf cands (append cands (list (cons 0 0)))))
             (values (car (first cands)) (cdr (first cands))
                     (car (second cands)) (cdr (second cands))
-                    2)))))))
+                    2))))))))

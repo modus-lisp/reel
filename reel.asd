@@ -94,7 +94,8 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
        (:file "slice")        ; the coding tree, coding units, and residual coding
        ;; AFTER slice.lisp: prediction reads the decode state defined there, and the slice walk
        ;; calls back into it through the FTYPE declaim at the top of that file
-       (:file "intra")))      ; the thirty-five intra prediction modes
+       (:file "intra")        ; the thirty-five intra prediction modes
+       (:file "filter")))     ; deblocking and sample adaptive offset
 
      ;; ---- MPEG-1 and MPEG-2 video, which are one bitstream with one of them extended
      (:module "mpeg2"

@@ -130,11 +130,10 @@
 (defun %hevc-first-picture (f spss ppss)
   "Decode F's first picture, if it is entirely intra.  Returns (values picture reason).
 
-   Comparing this against ffmpeg is what the tiling check was standing in for: the whole
-   reconstruction path — prediction, dequantisation, both transforms — either agrees to the sample
-   or it does not.  The reference is decoded with the loop filters off on BOTH sides, because
-   deblocking and SAO are not implemented here yet and their absence is not what is being measured."
-  (let ((pic nil) (done nil) (why nil))
+   Comparing this against ffmpeg is what the tiling check was standing in for: the whole pipeline —
+   prediction, dequantisation, both transforms, deblocking and sample adaptive offset — either
+   agrees to the sample or it does not."
+  (let ((pic nil) (done nil) (why nil) (last-sh nil))
     (handler-case
         (dolist (nal (reel.hevc:annex-b-nals (slurp f)))
           (when (and (reel.hevc:nal-base-layer-p nal) (not done))
@@ -154,9 +153,15 @@
                     (setf why "the first picture is not all intra" done t pic nil))
                    (t (unless pic
                         (setf pic (reel.hevc:make-picture-for (reel.hevc::sh-sps sh))))
+                      (setf last-sh sh)
                       (reel.hevc:decode-slice-data (reel.hevc::sh-sps sh)
                                                    (reel.hevc::sh-pps sh) sh br pic))))))))
       (reel.hevc:hevc-error (e) (setf why (reel.hevc:hevc-error-message e) pic nil)))
+    ;; the in-loop filters run over the finished picture, every vertical edge before any
+    ;; horizontal one and SAO after all of them
+    (when pic
+      (reel.hevc:deblock-picture pic (reel.hevc::sh-pps last-sh) last-sh)
+      (reel.hevc:sao-picture pic last-sh))
     (values pic why)))
 
 (defun %hevc-intra-pictures (f spss ppss)
@@ -254,7 +259,7 @@
                                                (pathname-name f) good pics why))))
                            ;; the syntax ends where it should; now the SAMPLES, against ffmpeg
                            (t
-                            (let ((refp (probe-file (format nil "~a.f1.yuv" (namestring f))))
+                            (let ((refp (probe-file (format nil "~a.filt.yuv" (namestring f))))
                                   (pic (%hevc-first-picture f (make-hash-table)
                                                             (make-hash-table))))
                               (cond

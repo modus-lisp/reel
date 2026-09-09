@@ -499,7 +499,35 @@
           (let ((v (aref pred (+ (* y n) x))))
             (declare (type fixnum v))
             (when residual-p (incf v (aref coeffs (+ (* y n) x))))
-            (setf (aref plane (+ row x)) (max 0 (min 255 v)))))))))
+            (setf (aref plane (+ row x)) (max 0 (min 255 v)))))))
+    (when (zerop c-idx) (%mark-for-filters c x0 y0 n))))
+
+(defun %mark-for-filters (c x0 y0 n)
+  "Record what the loop filters will want to know about this luma transform block.
+
+   A boundary strength of 2 means `an intra block is on at least one side', which in an all-intra
+   picture is every transform block edge that falls on the eight-sample grid.  The inter cases —
+   strength 1 where coefficients or motion differ, 0 where nothing does — arrive with inter
+   prediction; until then setting 2 on a transform edge is not a simplification, it is the answer.
+
+   The PICTURE boundary is deliberately not marked.  There is nothing on the other side of it, and
+   a filter that reads there reads the row above."
+  (declare (type ctx c) (type fixnum x0 y0 n) (optimize (speed 3) (safety 1)))
+  (let ((pic (cx-pic c)))
+    (when (and (plusp x0) (zerop (logand x0 7)))
+      (loop for y of-type fixnum from y0 below (+ y0 n) by 4
+            do (setf (aref (pic-bs-v pic) (+ (* (ash y -2) (pic-bs-vw pic)) (ash x0 -3))) 2)))
+    (when (and (plusp y0) (zerop (logand y0 7)))
+      (loop for x of-type fixnum from x0 below (+ x0 n) by 4
+            do (setf (aref (pic-bs-h pic) (+ (* (ash y0 -3) (pic-bs-hw pic)) (ash x -2))) 2)))
+    ;; the quantiser, per eight-by-eight block, and whether this block may be filtered at all
+    (let ((w (pic-blk-w pic))
+          (nofilt (if (cx-cu-transquant-bypass c) 1 0)))
+      (loop for y of-type fixnum from (logandc2 y0 7) below (+ y0 n) by 8
+            do (loop for x of-type fixnum from (logandc2 x0 7) below (+ x0 n) by 8
+                     do (let ((i (+ (* (ash y -3) w) (ash x -3))))
+                          (setf (aref (pic-blk-qp pic) i) (max 0 (min 255 (cx-qp c)))
+                                (aref (pic-blk-nofilt pic) i) nofilt)))))))
 
 ;;; ---- the transform tree ------------------------------------------------------------------------
 
@@ -744,32 +772,66 @@
         (setf merge-left (= 1 (%bin c +ctx-sao-merge-flag+))))
       (when (and (plusp ry) (not merge-left) (>= (- addr wide) first-addr))
         (setf merge-up (= 1 (%bin c +ctx-sao-merge-flag+))))
-      (unless (or merge-left merge-up)
-        (dotimes (comp 3)
-          (when (if (zerop comp) (sh-sao-luma sh) (sh-sao-chroma sh))
-            (let ((type (if (< comp 2)
-                            (let ((b (%bin c +ctx-sao-type-idx+)))
-                              (if (zerop b) 0 (if (= 1 (%bypass c)) 2 1)))
-                            ;; the two chroma components share one type, sent with Cb
-                            (cx-sao-type-cr c))))
-              (when (= comp 1) (setf (cx-sao-type-cr c) type))
-              (unless (zerop type)
-                (let ((abs (make-array 4 :element-type 'fixnum)))
-                  (declare (dynamic-extent abs))
-                  ;; sao_offset_abs: truncated Rice, cMax = (1 << (min(bitDepth,10) - 5)) - 1
-                  (dotimes (i 4)
-                    (let ((v 0))
-                      (loop while (and (< v 7) (= 1 (%bypass c))) do (incf v))
-                      (setf (aref abs i) v)))
-                  (if (= type 1)
-                      (progn
-                        ;; band offset: a sign for each magnitude that is not zero, then where the
-                        ;; four bands sit
-                        (dotimes (i 4) (when (plusp (aref abs i)) (%bypass c)))
-                        (dotimes (i 5) (%bypass c)))         ; sao_band_position
-                      ;; edge offset: the signs are implied by which direction is being tested
-                      (when (< comp 2) (dotimes (i 2) (%bypass c)))))))))))  ; sao_eo_class
+      (let ((pic (cx-pic c)))
+        (cond
+          ;; merging copies the neighbour's whole table, which is most of why SAO is cheap
+          (merge-left (%sao-copy pic addr (1- addr)))
+          (merge-up (%sao-copy pic addr (- addr wide)))
+          (t
+           (dotimes (comp 3)
+             (when (if (zerop comp) (sh-sao-luma sh) (sh-sao-chroma sh))
+               (let ((type (if (< comp 2)
+                               (let ((b (%bin c +ctx-sao-type-idx+)))
+                                 (if (zerop b) 0 (if (= 1 (%bypass c)) 2 1)))
+                               ;; the two chroma components share one type, sent with Cb
+                               (cx-sao-type-cr c))))
+                 (when (= comp 1) (setf (cx-sao-type-cr c) type))
+                 (setf (aref (pic-sao-type pic) (+ (* 3 addr) comp)) type)
+                 (unless (zerop type)
+                   (let ((abs (make-array 4 :element-type 'fixnum)))
+                     (declare (dynamic-extent abs))
+                     ;; sao_offset_abs: truncated Rice, cMax = (1 << (min(bitDepth,10) - 5)) - 1
+                     (dotimes (i 4)
+                       (let ((v 0))
+                         (loop while (and (< v 7) (= 1 (%bypass c))) do (incf v))
+                         (setf (aref abs i) v)))
+                     (if (= type 1)
+                         (progn
+                           ;; band offset: a sign for each magnitude that is not zero, then which
+                           ;; four adjacent intensity bands they apply to
+                           (dotimes (i 4)
+                             (when (and (plusp (aref abs i)) (= 1 (%bypass c)))
+                               (setf (aref abs i) (- (aref abs i)))))
+                           (setf (aref (pic-sao-param pic) (+ (* 3 addr) comp))
+                                 (let ((v 0)) (dotimes (i 5 v) (setf v (logior (ash v 1)
+                                                                               (%bypass c)))))))
+                         ;; edge offset: the signs are implied by the direction being tested —
+                         ;; the first two offsets are positive and the last two negative, because
+                         ;; the four cases they cover are a valley, a step up, a step down and a peak
+                         (progn
+                           (setf (aref abs 2) (- (aref abs 2))
+                                 (aref abs 3) (- (aref abs 3)))
+                           (when (< comp 2)
+                             (setf (aref (pic-sao-param pic) (+ (* 3 addr) comp))
+                                   (logior (ash (%bypass c) 1) (%bypass c))))
+                           (when (= comp 2)
+                             (setf (aref (pic-sao-param pic) (+ (* 3 addr) 2))
+                                   (aref (pic-sao-param pic) (+ (* 3 addr) 1))))))
+                     (dotimes (i 4)
+                       (setf (aref (pic-sao-off pic) (+ (* 12 addr) (* 4 comp) i))
+                             (aref abs i)))))))))))) 
     nil))
+
+(defun %sao-copy (pic to from)
+  "sao_merge: this coding tree block uses its neighbour's table verbatim."
+  (dotimes (comp 3)
+    (setf (aref (pic-sao-type pic) (+ (* 3 to) comp))
+          (aref (pic-sao-type pic) (+ (* 3 from) comp))
+          (aref (pic-sao-param pic) (+ (* 3 to) comp))
+          (aref (pic-sao-param pic) (+ (* 3 from) comp)))
+    (dotimes (i 4)
+      (setf (aref (pic-sao-off pic) (+ (* 12 to) (* 4 comp) i))
+            (aref (pic-sao-off pic) (+ (* 12 from) (* 4 comp) i))))))
 
 (defun decode-slice-data (sps pps sh br &optional pic)
   "Walk one independent slice segment's coding tree units.
@@ -793,7 +855,15 @@
           (cx-qg-x c) 0 (cx-qg-y c) 0)
     (loop for addr of-type fixnum from (sh-segment-address sh) below total do
       (let ((rx (mod addr wide)) (ry (floor addr wide)))
-        (setf (aref (cx-ctb-slice c) addr) (cx-slice-addr c))
+        (setf (aref (cx-ctb-slice c) addr) (cx-slice-addr c)
+              (aref (pic-ctb-slice pic) addr) (cx-slice-addr c)
+              (aref (pic-ctb-across pic) addr) (if (sh-loop-filter-across-slices sh) 1 0)
+              ;; the two offsets are per slice and signed, packed with the disable flag so the
+              ;; filter can read one number per coding tree block
+              (aref (pic-ctb-dbf pic) addr)
+              (logior (if (sh-deblocking-disabled sh) 1 0)
+                      (ash (+ 32 (sh-beta-offset sh)) 8)
+                      (ash (+ 32 (sh-tc-offset sh)) 16)))
         (setf (cx-qp-delta-coded c) nil)
         (%sao c addr rx ry)
         (%coding-quadtree c (ash rx log2) (ash ry log2) log2 0)

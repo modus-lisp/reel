@@ -87,13 +87,11 @@ for f in "$CONF"/hevc/*.bit; do
     | head -1 | tr ',' 'x' > "$f.dims"
 done
 
-# HEVC reconstruction references: the FIRST picture of each stream, decoded with the loop filters
-# off, because deblocking and SAO are not implemented yet and comparing against a filtered picture
-# would measure their absence rather than the reconstruction.
+# HEVC reconstruction references: the FIRST picture of each stream, filters and all.
 for f in "$CONF"/hevc/*.bit; do
   [ -f "$f" ] || continue
-  ffmpeg -v error -y -skip_loop_filter all -i "$f" -frames:v 1 -fps_mode passthrough \
-    -f rawvideo -pix_fmt yuv420p "$f.f1.yuv" 2>/dev/null || true
+  ffmpeg -v error -y -i "$f" -frames:v 1 -fps_mode passthrough \
+    -f rawvideo -pix_fmt yuv420p "$f.filt.yuv" 2>/dev/null || true
 done
 
 # TWO ORACLE CORRECTIONS, both verified by decoding the stream and comparing where the reference
@@ -103,17 +101,17 @@ done
 # where the sequence parameter set, and ffprobe's own report of the stream, both say 412, with the
 # picture sitting two samples in.  This is the same defect as H.264's CVFC1 below.
 if [ -f "$CONF/hevc/CONFWIN_A_Sony_1.bit" ]; then
-  ffmpeg -v error -y -skip_loop_filter all -i "$CONF/hevc/CONFWIN_A_Sony_1.bit" -frames:v 1 \
+  ffmpeg -v error -y -i "$CONF/hevc/CONFWIN_A_Sony_1.bit" -frames:v 1 \
     -vf "crop=412:236:2:0" -fps_mode passthrough -f rawvideo -pix_fmt yuv420p \
-    "$CONF/hevc/CONFWIN_A_Sony_1.bit.f1.yuv" 2>/dev/null || true
+    "$CONF/hevc/CONFWIN_A_Sony_1.bit.filt.yuv" 2>/dev/null || true
 fi
 #
 # POC_A is a picture-order-count test, so its first DECODED picture is not its first DISPLAYED one:
 # ffmpeg outputs in display order and the intra picture comes out second.  Keep that frame.
 if [ -f "$CONF/hevc/POC_A_Bossen_3.bit" ]; then
-  ffmpeg -v error -y -skip_loop_filter all -i "$CONF/hevc/POC_A_Bossen_3.bit" -frames:v 2 \
+  ffmpeg -v error -y -i "$CONF/hevc/POC_A_Bossen_3.bit" -frames:v 2 \
     -fps_mode passthrough -f rawvideo -pix_fmt yuv420p "$CONF/hevc/POC_A.tmp" 2>/dev/null \
-    && tail -c 149760 "$CONF/hevc/POC_A.tmp" > "$CONF/hevc/POC_A_Bossen_3.bit.f1.yuv" \
+    && tail -c 149760 "$CONF/hevc/POC_A.tmp" > "$CONF/hevc/POC_A_Bossen_3.bit.filt.yuv" \
     && rm -f "$CONF/hevc/POC_A.tmp"
 fi
 

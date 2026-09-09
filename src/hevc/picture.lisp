@@ -20,7 +20,37 @@
   (u (make-array 0 :element-type '(unsigned-byte 8)) :type samples)
   (v (make-array 0 :element-type '(unsigned-byte 8)) :type samples)
   (ystride 0 :type fixnum) (cstride 0 :type fixnum)
-  (poc 0 :type fixnum))
+  (poc 0 :type fixnum)
+  ;; ---- what the loop filters need, recorded as the picture is decoded
+  ;;
+  ;; They run over the WHOLE PICTURE after every slice of it is decoded, not per block as it goes,
+  ;; because deblocking a vertical edge needs samples the block to its right has not written yet
+  ;; and because both filters cross slice boundaries when the slice header says they may.  So the
+  ;; per-block facts they consult have to outlive the block.
+  ;;
+  ;; The boundary strengths are per FOUR SAMPLES along an edge, on the eight-sample grid: BS-V
+  ;; indexes the vertical edge at luma x = 8i covering rows 4j, BS-H the horizontal edge at y = 8j
+  ;; covering columns 4i.
+  (bs-v (make-array 0 :element-type '(unsigned-byte 8)) :type samples)
+  (bs-h (make-array 0 :element-type '(unsigned-byte 8)) :type samples)
+  (bs-vw 0 :type fixnum) (bs-hw 0 :type fixnum)
+  ;; per eight-by-eight luma block: the quantiser it was reconstructed at, and whether it is
+  ;; exempt from filtering at all (PCM with the filter disabled, or a transquant bypass block)
+  (blk-qp (make-array 0 :element-type '(unsigned-byte 8)) :type samples)
+  (blk-nofilt (make-array 0 :element-type 'bit) :type simple-bit-vector)
+  (blk-w 0 :type fixnum)
+  ;; per coding tree block: the slice that coded it, its deblocking controls, and its SAO table
+  (ctb-slice (make-array 0 :element-type '(signed-byte 32))
+   :type (simple-array (signed-byte 32) (*)))
+  (ctb-dbf (make-array 0 :element-type '(signed-byte 32))
+   :type (simple-array (signed-byte 32) (*)))   ; disabled | beta<<8 | tc<<16, packed
+  (ctb-across (make-array 0 :element-type 'bit) :type simple-bit-vector)
+  ;; SAO: three components per coding tree block, each a type, four offsets and one parameter
+  (sao-type (make-array 0 :element-type '(unsigned-byte 8)) :type samples)
+  (sao-off (make-array 0 :element-type '(signed-byte 32))
+   :type (simple-array (signed-byte 32) (*)))
+  (sao-param (make-array 0 :element-type '(unsigned-byte 8)) :type samples)
+  (ctbs-wide 0 :type fixnum) (ctbs-high 0 :type fixnum) (ctb-log2 0 :type fixnum))
 
 (defun make-picture-for (sps)
   (let* ((w (sps-width sps)) (h (sps-height sps))
@@ -33,7 +63,27 @@
      :y (make-array (* w h) :element-type '(unsigned-byte 8) :initial-element 128)
      :u (make-array (* cw ch) :element-type '(unsigned-byte 8) :initial-element 128)
      :v (make-array (* cw ch) :element-type '(unsigned-byte 8) :initial-element 128)
-     :ystride w :cstride cw)))
+     :ystride w :cstride cw
+     :bs-v (make-array (* (ash w -3) (ash h -2)) :element-type '(unsigned-byte 8)
+                                                 :initial-element 0)
+     :bs-h (make-array (* (ash w -2) (ash h -3)) :element-type '(unsigned-byte 8)
+                                                 :initial-element 0)
+     :bs-vw (ash w -3) :bs-hw (ash w -2)
+     :blk-qp (make-array (* (ash w -3) (ash h -3)) :element-type '(unsigned-byte 8)
+                                                   :initial-element 26)
+     :blk-nofilt (make-array (* (ash w -3) (ash h -3)) :element-type 'bit :initial-element 0)
+     :blk-w (ash w -3)
+     :ctb-slice (make-array (sps-ctbs sps) :element-type '(signed-byte 32) :initial-element -1)
+     :ctb-dbf (make-array (sps-ctbs sps) :element-type '(signed-byte 32) :initial-element 0)
+     :ctb-across (make-array (sps-ctbs sps) :element-type 'bit :initial-element 0)
+     :sao-type (make-array (* 3 (sps-ctbs sps)) :element-type '(unsigned-byte 8)
+                                                :initial-element 0)
+     :sao-off (make-array (* 12 (sps-ctbs sps)) :element-type '(signed-byte 32)
+                                                :initial-element 0)
+     :sao-param (make-array (* 3 (sps-ctbs sps)) :element-type '(unsigned-byte 8)
+                                                 :initial-element 0)
+     :ctbs-wide (sps-ctbs-wide sps) :ctbs-high (sps-ctbs-high sps)
+     :ctb-log2 (sps-ctb-log2 sps))))
 
 (declaim (inline pic-plane pic-stride))
 (defun pic-plane (pic c-idx)

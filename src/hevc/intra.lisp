@@ -69,23 +69,37 @@
                          (if (logtest m y) (* 2 m m) 0)))))
           (setf (aref z (+ (* y w) x)) (+ (ash ctb (* 2 depth)) p)))))))
 
-(defun %available-p (c xc yc xn yn)
+(defun %available-p (c xc yc xn yn &optional (for-intra t))
   "Is the luma sample at (XN,YN) available to a block whose top-left luma sample is (XC,YC)?
 
-   Inside the picture, decoded before us in z-scan order, and in the same slice.  Under
-   constrained_intra_pred an inter-coded neighbour is unavailable too, which is the same error
-   resilience argument H.264 makes and the same trap: it must not be applied anywhere but here."
+   Inside the picture, in the same slice, and decoded before us — and that last test has a shape
+   worth stating.  If the neighbour is in an EARLIER coding tree block, in either direction, it is
+   available and there is nothing to compare: whole coding tree blocks are decoded in order, so one
+   that is not this one is either finished or not started, and which it is has already been settled
+   by the slice test.  Only WITHIN one block does z-scan order have to be worked out, because there
+   the quadtree visits quadrants rather than rows.
+
+   Comparing picture-wide addresses instead gets the below-left case backwards: that neighbour sits
+   in a coding tree block with a higher address but an earlier column, and the two tests disagree.
+
+   FOR-INTRA carries constrained_intra_pred, which narrows availability to intra neighbours only.
+   It is a rule about PREDICTING SAMPLES and must not be applied when deriving motion vectors —
+   the candidate lists would then differ from the encoder's by an entry."
   (declare (type ctx c) (type fixnum xc yc xn yn))
   (let ((sps (cx-sps c)))
     (and (>= xn 0) (>= yn 0) (< xn (sps-width sps)) (< yn (sps-height sps))
-         (let* ((s (sps-min-tb-log2 sps))
-                (zw (cx-z-width c))
-                (za (aref (cx-zscan c) (+ (* (ash yn (- s)) zw) (ash xn (- s)))))
-                (zc (aref (cx-zscan c) (+ (* (ash yc (- s)) zw) (ash xc (- s))))))
-           (and (<= za zc)
-                (%gc c xn yn)                   ; and in this slice segment
-                (or (not (pps-constrained-intra (cx-pps c)))
-                    (%cu-intra-p c xn yn)))))))
+         (%gc c xn yn)                          ; inside this slice segment, and so decoded
+         (let ((ctb (sps-ctb-log2 sps)))
+           (or (< (ash yn (- ctb)) (ash yc (- ctb)))
+               (< (ash xn (- ctb)) (ash xc (- ctb)))
+               (let* ((s (sps-min-tb-log2 sps))
+                      (zw (cx-z-width c))
+                      (za (aref (cx-zscan c) (+ (* (ash yn (- s)) zw) (ash xn (- s)))))
+                      (zc (aref (cx-zscan c) (+ (* (ash yc (- s)) zw) (ash xc (- s))))))
+                 (<= za zc))))
+         (or (not for-intra)
+             (not (pps-constrained-intra (cx-pps c)))
+             (%cu-intra-p c xn yn)))))
 
 ;;; ---- the reference samples ----------------------------------------------------------------------
 

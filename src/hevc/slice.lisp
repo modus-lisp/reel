@@ -799,6 +799,12 @@
           (cx-part-mode c) 0
           (cx-intra-split c) nil)
     (incf (cx-n-cu c))
+    ;; cu_transquant_bypass_flag comes BEFORE cu_skip_flag (7.3.8.5).  Two single-bin flags on
+    ;; different contexts: swapping them reads the same number of bits, so a stream that never
+    ;; enables the bypass hides the mistake completely, and one that does adapts both contexts
+    ;; wrongly from its first coding unit onward.
+    (when (pps-transquant-bypass pps)
+      (setf (cx-cu-transquant-bypass c) (= 1 (%bin c +ctx-cu-transquant-bypass-flag+))))
     ;; ---- a SKIPPED unit: one merged prediction, no residual, nothing else to read
     (when (and (not (sh-i-slice-p (cx-sh c))) (= 1 (%cu-skip-flag c x0 y0)))
       (setf (cx-cu-intra c) nil)
@@ -810,8 +816,6 @@
       (%prediction-units c x0 y0 size 0 t)
       (%mark-inter-blocks c x0 y0 size nil)
       (return-from %coding-unit 0))
-    (when (pps-transquant-bypass pps)
-      (setf (cx-cu-transquant-bypass c) (= 1 (%bin c +ctx-cu-transquant-bypass-flag+))))
     ;; pred_mode_flag: 1 is MODE_INTRA, 0 is MODE_INTER.  Reading it the other way round is not a
     ;; parse error anywhere — both branches are valid syntax — so the slice decodes to the end of
     ;; something plausible and only the picture is wrong.

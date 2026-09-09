@@ -80,7 +80,9 @@
    Available means inside the picture, decoded before us in z-scan order, in the same slice, and
    NOT intra — an intra neighbour has no motion to lend."
   (declare (type ctx c) (type fixnum x y))
-  (and (%available-p c (cx-cu-x c) (cx-cu-y c) x y)
+  ;; NOT for intra: constrained_intra_pred narrows which neighbours may lend SAMPLES, and says
+  ;; nothing about which may lend motion
+  (and (%available-p c (cx-cu-x c) (cx-cu-y c) x y nil)
        (zerop (aref (pic-intra (cx-pic c)) (pic-mv-index (cx-pic c) x y)))))
 
 (defun %take-neighbour (c cands i x y)

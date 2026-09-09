@@ -51,6 +51,10 @@ for f in 1.0-test_small.ogg 1.0.1-test_small.ogg 6.ogg; do get audio vorbis "$f"
 echo "the reference decodes"
 for f in "$CONF"/vp8/*.ivf "$CONF"/vp9/*.webm "$CONF"/h264/*.264 "$CONF"/h264/*.jsv; do
   [ -f "$f" ] || continue
-  ffmpeg -v error -y -i "$f" -f rawvideo -pix_fmt yuv420p "$f.ref.yuv" 2>/dev/null || true
+  # -fps_mode passthrough, AND AFTER -i, or ffmpeg pads the output to a constant frame rate by
+  # repeating pictures and the reference no longer matches the stream picture for picture.  Before
+  # -i it is silently accepted and does nothing.  This cost a day the first time.
+  ffmpeg -v error -y -i "$f" -fps_mode passthrough -f rawvideo -pix_fmt yuv420p "$f.ref.yuv" \
+    2>/dev/null || true
 done
 echo "done: $(du -sh "$CONF" | cut -f1) in $CONF"

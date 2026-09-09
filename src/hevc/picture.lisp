@@ -65,7 +65,10 @@
   (reference-p nil)
   (output-done nil)                     ; has this picture been handed out yet
   ;; true where a 4x4 block was coded intra, which the candidate derivations test constantly
-  (intra (make-array 0 :element-type 'bit) :type simple-bit-vector))
+  (intra (make-array 0 :element-type 'bit) :type simple-bit-vector)
+  ;; and true where its transform block carried any non-zero coefficient, which is one of the
+  ;; three things the deblocking filter's boundary strength is derived from
+  (cbf (make-array 0 :element-type 'bit) :type simple-bit-vector))
 
 (defun make-picture-for (sps)
   (let* ((w (sps-width sps)) (h (sps-height sps))
@@ -106,7 +109,8 @@
      :ref-poc (make-array (* 2 (ash w -2) (ash h -2)) :element-type '(signed-byte 32)
                                                       :initial-element 0)
      :mv-w (ash w -2) :mv-h (ash h -2)
-     :intra (make-array (* (ash w -2) (ash h -2)) :element-type 'bit :initial-element 0))))
+     :intra (make-array (* (ash w -2) (ash h -2)) :element-type 'bit :initial-element 0)
+     :cbf (make-array (* (ash w -2) (ash h -2)) :element-type 'bit :initial-element 0))))
 
 (declaim (inline pic-mv-index))
 (defun pic-mv-index (pic x y)

@@ -594,7 +594,13 @@
             (declare (type fixnum v))
             (when residual-p (incf v (aref coeffs (+ (* y n) x))))
             (setf (aref plane (+ row x)) (max 0 (min 255 v)))))))
-    (when (zerop c-idx) (%mark-for-filters c x0 y0 n))))
+    (when (zerop c-idx)
+      (when residual-p
+        (let ((p (cx-pic c)))
+          (loop for y of-type fixnum from y0 below (+ y0 n) by 4
+                do (loop for x of-type fixnum from x0 below (+ x0 n) by 4
+                         do (setf (aref (pic-cbf p) (pic-mv-index p x y)) 1)))))
+      (%mark-for-filters c x0 y0 n))))
 
 (defun %mark-inter-blocks (c x0 y0 size intra)
   "Record over a coding unit's 8x8 blocks what the loop filter reads: the quantiser, and whether
@@ -609,17 +615,15 @@
                    do (let ((i (+ (* (ash y -3) w) (ash x -3))))
                         (setf (aref (pic-blk-qp pic) i) (max 0 (min 255 (cx-qp c)))
                               (aref (pic-blk-nofilt pic) i) nofilt))))
-    ;; the unit's own outer edges are prediction unit edges, and so are deblocked
+    ;; the unit's own outer edges are prediction unit edges
     (when (and (plusp x0) (zerop (logand x0 7)))
       (loop for y of-type fixnum from y0 below (+ y0 size) by 4
-            do (setf (aref (pic-bs-v pic) (+ (* (ash y -2) (pic-bs-vw pic)) (ash x0 -3)))
-                     (max 1 (aref (pic-bs-v pic)
-                                  (+ (* (ash y -2) (pic-bs-vw pic)) (ash x0 -3)))))))
+            do (let ((i (+ (* (ash y -2) (pic-bs-vw pic)) (ash x0 -3))))
+                 (setf (aref (pic-bs-v pic) i) (logior 1 (aref (pic-bs-v pic) i))))))
     (when (and (plusp y0) (zerop (logand y0 7)))
       (loop for x of-type fixnum from x0 below (+ x0 size) by 4
-            do (setf (aref (pic-bs-h pic) (+ (* (ash y0 -3) (pic-bs-hw pic)) (ash x -2)))
-                     (max 1 (aref (pic-bs-h pic)
-                                  (+ (* (ash y0 -3) (pic-bs-hw pic)) (ash x -2)))))))))
+            do (let ((i (+ (* (ash y0 -3) (pic-bs-hw pic)) (ash x -2))))
+                 (setf (aref (pic-bs-h pic) i) (logior 1 (aref (pic-bs-h pic) i))))))))
 
 (defun %mark-for-filters (c x0 y0 n)
   "Record what the loop filters will want to know about this luma transform block.
@@ -633,15 +637,18 @@
    a filter that reads there reads the row above."
   (declare (type ctx c) (type fixnum x0 y0 n) (optimize (speed 3) (safety 1)))
   (let ((pic (cx-pic c)))
-    (let ((bs (if (cx-cu-intra c) 2 1)))
-      (when (and (plusp x0) (zerop (logand x0 7)))
-        (loop for y of-type fixnum from y0 below (+ y0 n) by 4
-              do (let ((i (+ (* (ash y -2) (pic-bs-vw pic)) (ash x0 -3))))
-                   (setf (aref (pic-bs-v pic) i) (max bs (aref (pic-bs-v pic) i))))))
-      (when (and (plusp y0) (zerop (logand y0 7)))
-        (loop for x of-type fixnum from x0 below (+ x0 n) by 4
-              do (let ((i (+ (* (ash y0 -3) (pic-bs-hw pic)) (ash x -2))))
-                   (setf (aref (pic-bs-h pic) i) (max bs (aref (pic-bs-h pic) i)))))))
+    ;; bit 1 marks a TRANSFORM block edge, which is the only kind at which the coefficient test
+    ;; applies; bit 0 marks a prediction unit edge.  The strength itself is derived at filter time,
+    ;; because two of the three things it depends on — the motion either side, and whether either
+    ;; side carried coefficients — are not known until the whole picture is decoded.
+    (when (and (plusp x0) (zerop (logand x0 7)))
+      (loop for y of-type fixnum from y0 below (+ y0 n) by 4
+            do (let ((i (+ (* (ash y -2) (pic-bs-vw pic)) (ash x0 -3))))
+                 (setf (aref (pic-bs-v pic) i) (logior 2 (aref (pic-bs-v pic) i))))))
+    (when (and (plusp y0) (zerop (logand y0 7)))
+      (loop for x of-type fixnum from x0 below (+ x0 n) by 4
+            do (let ((i (+ (* (ash y0 -3) (pic-bs-hw pic)) (ash x -2))))
+                 (setf (aref (pic-bs-h pic) i) (logior 2 (aref (pic-bs-h pic) i))))))
     ;; the quantiser, per eight-by-eight block, and whether this block may be filtered at all
     (let ((w (pic-blk-w pic))
           (nofilt (if (cx-cu-transquant-bypass c) 1 0)))

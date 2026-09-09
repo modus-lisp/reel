@@ -157,6 +157,70 @@
           (when allow-p (setf (s line -1) (%clip8 (+ p0 delta))))
           (when allow-q (setf (s line 0) (%clip8 (- q0 delta)))))))))
 
+(defun %boundary-strength (pic xp yp xq yq kind)
+  "bS for the four samples either side of an edge (8.7.2.4).
+
+   Three tiers, and only the first is about the pictures themselves.  An INTRA block on either side
+   is 2 — the strongest filter — because intra content has no motion to compare and its block
+   structure is the artefact the filter exists to remove.  Below that, 1 is EARNED: either a
+   transform block edge where one side carried coefficients, or a genuine discontinuity in motion.
+   Everything else is 0 and is left alone, because filtering two blocks that came from the same
+   place with the same vector only blurs something that was never broken.
+
+   KIND is the edge's own nature: bit 1 a transform block edge, bit 0 a prediction unit edge.  The
+   coefficient test applies only at a transform edge, which is why the two are tracked apart."
+  (declare (type picture pic) (type fixnum xp yp xq yq kind))
+  (let ((ip (pic-mv-index pic xp yp))
+        (iq (pic-mv-index pic xq yq)))
+    (cond
+      ((or (plusp (aref (pic-intra pic) ip)) (plusp (aref (pic-intra pic) iq))) 2)
+      ((and (logtest kind 2)
+            (or (plusp (aref (pic-cbf pic) ip)) (plusp (aref (pic-cbf pic) iq))))
+       1)
+      (t
+       ;; the motion test: same pictures, same count of them, and no component differing by a whole
+       ;; sample.  A quarter-sample vector is four units, so the threshold of 4 IS one sample.
+       (let ((np 0) (nq 0))
+         (declare (type fixnum np nq))
+         (dotimes (lx 2)
+           (when (>= (aref (pic-ref-idx pic) (+ (* 2 ip) lx)) 0) (incf np))
+           (when (>= (aref (pic-ref-idx pic) (+ (* 2 iq) lx)) 0) (incf nq)))
+         (cond
+           ((/= np nq) 1)
+           ((zerop np) 0)
+           ((= np 1)
+            (let ((lp (if (>= (aref (pic-ref-idx pic) (* 2 ip)) 0) 0 1))
+                  (lq (if (>= (aref (pic-ref-idx pic) (* 2 iq)) 0) 0 1)))
+              (multiple-value-bind (px py pr pp) (pic-motion pic xp yp lp)
+                (declare (ignore pr))
+                (multiple-value-bind (qx qy qr qp) (pic-motion pic xq yq lq)
+                  (declare (ignore qr))
+                  (if (or (/= pp qp) (>= (abs (- px qx)) 4) (>= (abs (- py qy)) 4)) 1 0)))))
+           (t
+            ;; both bi-predicted: the two references must be the same PAIR, and then every way of
+            ;; matching them up has to agree to within a sample for the edge to be left alone
+            (multiple-value-bind (p0x p0y r0 p0p) (pic-motion pic xp yp 0)
+              (declare (ignore r0))
+              (multiple-value-bind (p1x p1y r1 p1p) (pic-motion pic xp yp 1)
+                (declare (ignore r1))
+                (multiple-value-bind (q0x q0y r2 q0p) (pic-motion pic xq yq 0)
+                  (declare (ignore r2))
+                  (multiple-value-bind (q1x q1y r3 q1p) (pic-motion pic xq yq 1)
+                    (declare (ignore r3))
+                    (flet ((near (ax ay bx by)
+                             (and (< (abs (- ax bx)) 4) (< (abs (- ay by)) 4))))
+                      (cond
+                        ((and (= p0p q0p) (= p1p q1p) (/= p0p p1p))
+                         (if (and (near p0x p0y q0x q0y) (near p1x p1y q1x q1y)) 0 1))
+                        ((and (= p0p q1p) (= p1p q0p) (/= p0p p1p))
+                         (if (and (near p0x p0y q1x q1y) (near p1x p1y q0x q0y)) 0 1))
+                        ((and (= p0p p1p) (= p0p q0p) (= p0p q1p))
+                         ;; the same picture twice: either pairing may justify leaving it alone
+                         (if (or (and (near p0x p0y q0x q0y) (near p1x p1y q1x q1y))
+                                 (and (near p0x p0y q1x q1y) (near p1x p1y q0x q0y)))
+                             0 1))
+                        (t 1)))))))))))))) 
+
 (defun %ctb-of (pic x y)
   (+ (* (ash y (- (pic-ctb-log2 pic))) (pic-ctbs-wide pic)) (ash x (- (pic-ctb-log2 pic)))))
 
@@ -197,7 +261,8 @@
       ;; ---- vertical edges, left to right
       (loop for x of-type fixnum from 8 below w by 8 do
         (loop for y of-type fixnum from 0 below h by 4 do
-          (let ((bs (aref (pic-bs-v pic) (+ (* (ash y -2) (pic-bs-vw pic)) (ash x -3)))))
+          (let* ((kind (aref (pic-bs-v pic) (+ (* (ash y -2) (pic-bs-vw pic)) (ash x -3))))
+                 (bs (if (plusp kind) (%boundary-strength pic (1- x) y x y kind) 0)))
             (multiple-value-bind (ok ap aq) (%edge-filterable-p pic (1- x) y x y)
              (when (and (plusp bs) ok)
               (multiple-value-bind (bo to) (offs x y)
@@ -217,7 +282,8 @@
       ;; ---- horizontal edges, top to bottom
       (loop for y of-type fixnum from 8 below h by 8 do
         (loop for x of-type fixnum from 0 below w by 4 do
-          (let ((bs (aref (pic-bs-h pic) (+ (* (ash y -3) (pic-bs-hw pic)) (ash x -2)))))
+          (let* ((kind (aref (pic-bs-h pic) (+ (* (ash y -3) (pic-bs-hw pic)) (ash x -2))))
+                 (bs (if (plusp kind) (%boundary-strength pic x (1- y) x y kind) 0)))
             (multiple-value-bind (ok ap aq) (%edge-filterable-p pic x (1- y) x y)
              (when (and (plusp bs) ok)
               (multiple-value-bind (bo to) (offs x y)

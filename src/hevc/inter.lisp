@@ -158,6 +158,7 @@
                               (aref mv (+ (* 4 lx) 3))
                               (if (< ref n) (pic-poc (aref list ref)) 0)))))))))))
     (%store-motion c x0 y0 w h mv)
+    (%mark-pu-edges c x0 y0 w h)
     (%motion-compensate c x0 y0 w h mv)))
 
 (defun %prediction-units (c x0 y0 size part-mode skip)

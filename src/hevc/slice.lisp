@@ -615,13 +615,23 @@
                    do (let ((i (+ (* (ash y -3) w) (ash x -3))))
                         (setf (aref (pic-blk-qp pic) i) (max 0 (min 255 (cx-qp c)))
                               (aref (pic-blk-nofilt pic) i) nofilt))))
-    ;; the unit's own outer edges are prediction unit edges
+    ))
+
+(defun %mark-pu-edges (c x0 y0 w h)
+  "Mark one prediction unit's left and top edges as prediction unit boundaries.
+
+   Called per UNIT, not per coding unit, and that is the point: the boundary BETWEEN the two halves
+   of a split is as much a prediction edge as the outside of the pair, and it is exactly where two
+   different vectors meet — which is the discontinuity the filter exists for.  Marking only the
+   coding unit's outline leaves every internal split edge unfiltered."
+  (declare (type ctx c) (type fixnum x0 y0 w h))
+  (let ((pic (cx-pic c)))
     (when (and (plusp x0) (zerop (logand x0 7)))
-      (loop for y of-type fixnum from y0 below (+ y0 size) by 4
+      (loop for y of-type fixnum from y0 below (+ y0 h) by 4
             do (let ((i (+ (* (ash y -2) (pic-bs-vw pic)) (ash x0 -3))))
                  (setf (aref (pic-bs-v pic) i) (logior 1 (aref (pic-bs-v pic) i))))))
     (when (and (plusp y0) (zerop (logand y0 7)))
-      (loop for x of-type fixnum from x0 below (+ x0 size) by 4
+      (loop for x of-type fixnum from x0 below (+ x0 w) by 4
             do (let ((i (+ (* (ash y0 -3) (pic-bs-hw pic)) (ash x -2))))
                  (setf (aref (pic-bs-h pic) i) (logior 1 (aref (pic-bs-h pic) i))))))))
 

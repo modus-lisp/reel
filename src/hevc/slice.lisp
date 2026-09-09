@@ -617,23 +617,28 @@
                               (aref (pic-blk-nofilt pic) i) nofilt))))
     ))
 
-(defun %mark-pu-edges (c x0 y0 w h)
-  "Mark one prediction unit's left and top edges as prediction unit boundaries.
+(defun %mark-edges (c x0 y0 w h)
+  "Mark this block's left and top edges as ones the deblocking filter should consider.
 
-   Called per UNIT, not per coding unit, and that is the point: the boundary BETWEEN the two halves
-   of a split is as much a prediction edge as the outside of the pair, and it is exactly where two
-   different vectors meet — which is the discontinuity the filter exists for.  Marking only the
-   coding unit's outline leaves every internal split edge unfiltered."
+   WHICH BLOCKS DO THE MARKING is the whole content of this.  Every transform block marks its own
+   edges — and a coding unit with no transform tree at all, because it was skipped or said it had
+   no residual, marks its outline instead.  Nothing else does: the boundary between two prediction
+   units INSIDE a transform block is not an edge the filter visits, which is initially surprising
+   and is what the standard's transform-block-edge condition amounts to once the encoder's
+   constraint that a transform may not straddle differently-moving predictions is taken into
+   account.
+
+   Marking is separate from STRENGTH because two of the three things strength depends on — the
+   motion either side, and whether either side carried coefficients — are not settled until the
+   whole picture is decoded."
   (declare (type ctx c) (type fixnum x0 y0 w h))
   (let ((pic (cx-pic c)))
     (when (and (plusp x0) (zerop (logand x0 7)))
       (loop for y of-type fixnum from y0 below (+ y0 h) by 4
-            do (let ((i (+ (* (ash y -2) (pic-bs-vw pic)) (ash x0 -3))))
-                 (setf (aref (pic-bs-v pic) i) (logior 1 (aref (pic-bs-v pic) i))))))
+            do (setf (aref (pic-bs-v pic) (+ (* (ash y -2) (pic-bs-vw pic)) (ash x0 -3))) 1)))
     (when (and (plusp y0) (zerop (logand y0 7)))
       (loop for x of-type fixnum from x0 below (+ x0 w) by 4
-            do (let ((i (+ (* (ash y0 -3) (pic-bs-hw pic)) (ash x -2))))
-                 (setf (aref (pic-bs-h pic) i) (logior 1 (aref (pic-bs-h pic) i))))))))
+            do (setf (aref (pic-bs-h pic) (+ (* (ash y0 -3) (pic-bs-hw pic)) (ash x -2))) 1)))))
 
 (defun %mark-for-filters (c x0 y0 n)
   "Record what the loop filters will want to know about this luma transform block.
@@ -647,18 +652,7 @@
    a filter that reads there reads the row above."
   (declare (type ctx c) (type fixnum x0 y0 n) (optimize (speed 3) (safety 1)))
   (let ((pic (cx-pic c)))
-    ;; bit 1 marks a TRANSFORM block edge, which is the only kind at which the coefficient test
-    ;; applies; bit 0 marks a prediction unit edge.  The strength itself is derived at filter time,
-    ;; because two of the three things it depends on — the motion either side, and whether either
-    ;; side carried coefficients — are not known until the whole picture is decoded.
-    (when (and (plusp x0) (zerop (logand x0 7)))
-      (loop for y of-type fixnum from y0 below (+ y0 n) by 4
-            do (let ((i (+ (* (ash y -2) (pic-bs-vw pic)) (ash x0 -3))))
-                 (setf (aref (pic-bs-v pic) i) (logior 2 (aref (pic-bs-v pic) i))))))
-    (when (and (plusp y0) (zerop (logand y0 7)))
-      (loop for x of-type fixnum from x0 below (+ x0 n) by 4
-            do (let ((i (+ (* (ash y0 -3) (pic-bs-hw pic)) (ash x -2))))
-                 (setf (aref (pic-bs-h pic) i) (logior 2 (aref (pic-bs-h pic) i))))))
+    (%mark-edges c x0 y0 n n)
     ;; the quantiser, per eight-by-eight block, and whether this block may be filtered at all
     (let ((w (pic-blk-w pic))
           (nofilt (if (cx-cu-transquant-bypass c) 1 0)))
@@ -832,6 +826,7 @@
       (%derive-qp c)
       (%prediction-units c x0 y0 size 0 t)
       (%mark-inter-blocks c x0 y0 size nil)
+      (%mark-edges c x0 y0 size size)
       (return-from %coding-unit 0))
     ;; pred_mode_flag: 1 is MODE_INTRA, 0 is MODE_INTER.  Reading it the other way round is not a
     ;; parse error anywhere — both branches are valid syntax — so the slice decodes to the end of
@@ -849,9 +844,11 @@
       (let ((root-cbf (if (and (= (cx-part-mode c) 0) (cx-merge-2nx2n c))
                           1
                           (%bin c +ctx-no-residual-data-flag+))))
-        (when (plusp root-cbf)
-          (setf (cx-max-trafo-depth c) (sps-max-transform-depth-inter sps))
-          (%transform-tree c x0 y0 x0 y0 log2-size 0 0 1 1)))
+        (if (plusp root-cbf)
+            (progn (setf (cx-max-trafo-depth c) (sps-max-transform-depth-inter sps))
+                   (%transform-tree c x0 y0 x0 y0 log2-size 0 0 1 1))
+            ;; no transform tree at all, so the unit's own outline is the edge
+            (%mark-edges c x0 y0 size size)))
       (return-from %coding-unit 0))
     ;; record MODE_INTRA over the whole coding unit before the modes are derived, because a later
     ;; block in the same unit asks — and again in the picture's motion field, which is where a

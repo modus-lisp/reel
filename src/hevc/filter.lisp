@@ -157,7 +157,7 @@
           (when allow-p (setf (s line -1) (%clip8 (+ p0 delta))))
           (when allow-q (setf (s line 0) (%clip8 (- q0 delta)))))))))
 
-(defun %boundary-strength (pic xp yp xq yq kind)
+(defun %boundary-strength (pic xp yp xq yq)
   "bS for the four samples either side of an edge (8.7.2.4).
 
    Three tiers, and only the first is about the pictures themselves.  An INTRA block on either side
@@ -167,16 +167,14 @@
    Everything else is 0 and is left alone, because filtering two blocks that came from the same
    place with the same vector only blurs something that was never broken.
 
-   KIND is the edge's own nature: bit 1 a transform block edge, bit 0 a prediction unit edge.  The
-   coefficient test applies only at a transform edge, which is why the two are tracked apart."
-  (declare (type picture pic) (type fixnum xp yp xq yq kind))
+   The coefficient test applies at every edge the marking pass recorded, without asking what kind
+   it is — because the marking pass only records transform block edges in the first place."
+  (declare (type picture pic) (type fixnum xp yp xq yq))
   (let ((ip (pic-mv-index pic xp yp))
         (iq (pic-mv-index pic xq yq)))
     (cond
       ((or (plusp (aref (pic-intra pic) ip)) (plusp (aref (pic-intra pic) iq))) 2)
-      ((and (logtest kind 2)
-            (or (plusp (aref (pic-cbf pic) ip)) (plusp (aref (pic-cbf pic) iq))))
-       1)
+      ((or (plusp (aref (pic-cbf pic) ip)) (plusp (aref (pic-cbf pic) iq))) 1)
       (t
        ;; the motion test: same pictures, same count of them, and no component differing by a whole
        ;; sample.  A quarter-sample vector is four units, so the threshold of 4 IS one sample.
@@ -262,7 +260,7 @@
       (loop for x of-type fixnum from 8 below w by 8 do
         (loop for y of-type fixnum from 0 below h by 4 do
           (let* ((kind (aref (pic-bs-v pic) (+ (* (ash y -2) (pic-bs-vw pic)) (ash x -3))))
-                 (bs (if (plusp kind) (%boundary-strength pic (1- x) y x y kind) 0)))
+                 (bs (if (plusp kind) (%boundary-strength pic (1- x) y x y) 0)))
             (multiple-value-bind (ok ap aq) (%edge-filterable-p pic (1- x) y x y)
              (when (and (plusp bs) ok)
               (multiple-value-bind (bo to) (offs x y)
@@ -283,7 +281,7 @@
       (loop for y of-type fixnum from 8 below h by 8 do
         (loop for x of-type fixnum from 0 below w by 4 do
           (let* ((kind (aref (pic-bs-h pic) (+ (* (ash y -3) (pic-bs-hw pic)) (ash x -2))))
-                 (bs (if (plusp kind) (%boundary-strength pic x (1- y) x y kind) 0)))
+                 (bs (if (plusp kind) (%boundary-strength pic x (1- y) x y) 0)))
             (multiple-value-bind (ok ap aq) (%edge-filterable-p pic x (1- y) x y)
              (when (and (plusp bs) ok)
               (multiple-value-bind (bo to) (offs x y)

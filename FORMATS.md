@@ -284,6 +284,23 @@ The other 20 are refused by name, and both are about SAMPLES rather than structu
 mixed bit depths (12), and the range extension tools (8). Everything that decides which pictures
 exist, what they predict from, and what order they are shown in is built.
 
+**Ten-bit is most of the way there and deliberately still refused.** The machinery is in: every
+shift, clamp and neutral value derives its constant from the picture's own depth rather than
+assuming eight, and luma and chroma carry separate depths — which the suite needs, because one
+stream is ten-bit luma with nine-bit chroma, and ffmpeg refuses that outright. Sample planes are
+sixteen bits wide unconditionally, which measured level against byte planes: the arithmetic
+dominates and a block is cache-resident either way, so there is one code path instead of two.
+
+With the gate lifted, most ten-bit streams decode and several are bit-exact — including one over a
+hundred and fourteen thirty-two-square transform blocks. Six are not, five of them wavefront and
+one not, and they share no feature that could be refused instead. Four candidate gates were
+proposed and each died by measurement: quantisation group depth, coding tree block size,
+thirty-two-square transforms, and wavefront alone. Accepting the depth without a gate would mean
+silently wrong pictures for content that cannot be named in advance — and refusing rather than
+decoding wrong is the property that makes the rest of this worth trusting. It is not a good trade.
+The commit that restores the gate records what is already eliminated, so the next attempt starts
+from a bin-level trace rather than a fifth hypothesis.
+
 Five things generalise beyond this codec.
 
 - **Read the reference implementation, not your memory of the standard.** Half a day went into

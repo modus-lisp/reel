@@ -209,16 +209,24 @@
                                  ((minusp r1) 0)
                                  (any-after (if (sh-collocated-from-l0 (cx-sh c)) 1 0))
                                  (t lx))))
-                  (multiple-value-bind (mvx mvy ref poc) (pic-motion col (car at) (cdr at) src)
+                  (multiple-value-bind (mvx mvy ref poc lt) (pic-motion col (car at) (cdr at) src)
                     (when (>= ref 0)
                       (let ((list (if (zerop lx) (cx-list0 c) (cx-list1 c))))
                         (when (< ref-idx (length list))
                           (let* ((target (aref list ref-idx))
+                                 (target-lt (and (pic-long-term target) t))
                                  (tb (- (pic-poc pic) (pic-poc target)))
                                  (td (- (pic-poc col) poc)))
-                            (setf found t)
-                            (%set-cand cands i lx (%scale-mv mvx td tb) (%scale-mv mvy td tb)
-                                       ref-idx (pic-poc target)))))))))
+                            ;; the same rule as the spatial predictors: a collocated vector that
+                            ;; pointed at a long-term reference is no predictor for a short-term
+                            ;; one or the other way round, and between two long-term ones there is
+                            ;; no distance to scale by
+                            (when (eq (and lt t) target-lt)
+                              (setf found t)
+                              (%set-cand cands i lx
+                                         (if target-lt mvx (%scale-mv mvx td tb))
+                                         (if target-lt mvy (%scale-mv mvy td tb))
+                                         ref-idx (pic-poc target))))))))))
               found)))))))
 
 (defun %same-mer (c xn yn x0 y0)
@@ -365,6 +373,7 @@
     (multiple-value-bind (av-left av-up av-up-left av-up-right av-bottom-left)
         (%pu-neighbours c x0 y0 w h)
      (let* ((target (pic-poc (aref list ref-idx)))
+            (target-lt (and (pic-long-term (aref list ref-idx)) t))
             ;; each position with the availability its DIRECTION gets: only the two that can point
             ;; into an undecoded part of this coding tree block are asked about z-scan order
             (a-pos (list (list (1- x0) (+ y0 h)
@@ -385,15 +394,23 @@
              (when (%neighbour-motion c px py)
                (dotimes (l 2)
                  (let ((k (if (zerop l) lx (- 1 lx))))
-                   (multiple-value-bind (mvx mvy ref poc) (pic-motion pic px py k)
+                   (multiple-value-bind (mvx mvy ref poc lt) (pic-motion pic px py k)
                      (when (>= ref 0)
                        (if same
                            (when (= poc target) (return-from probe (values mvx mvy)))
-                           (return-from probe
-                             (if (= poc target)
-                                 (values mvx mvy)
-                                 (values (%scale-mv mvx (- cur poc) (- cur target))
-                                         (%scale-mv mvy (- cur poc) (- cur target)))))))))))
+                           ;; A SHORT-TERM VECTOR AND A LONG-TERM ONE ARE NOT COMPARABLE.  Scaling
+                           ;; is a statement about how far apart two pictures are in time, and a
+                           ;; long-term reference is chosen for what it CONTAINS rather than for
+                           ;; when it was: the distance carries no information about how much the
+                           ;; content moved.  So a neighbour whose reference differs from ours in
+                           ;; this is not a predictor at all, and where both are long-term the
+                           ;; vector is taken exactly as it stands.
+                           (when (eq (and lt t) target-lt)
+                             (return-from probe
+                               (if (or target-lt (= poc target))
+                                   (values mvx mvy)
+                                   (values (%scale-mv mvx (- cur poc) (- cur target))
+                                           (%scale-mv mvy (- cur poc) (- cur target)))))))))))) 
              nil)
            (search-positions (positions same)
              (dolist (at positions nil)

@@ -58,9 +58,15 @@
       (loop for x of-type fixnum from x0 below (+ x0 w) by 4 do
         (setf (aref (pic-intra pic) (pic-mv-index pic x y)) 0)
         (dotimes (lx 2)
-          (set-pic-motion pic x y lx
-                          (aref mv (* 4 lx)) (aref mv (+ (* 4 lx) 1))
-                          (aref mv (+ (* 4 lx) 2)) (aref mv (+ (* 4 lx) 3))))))))
+          (let* ((idx (aref mv (+ (* 4 lx) 2)))
+                 (list (if (zerop lx) (cx-list0 c) (cx-list1 c)))
+                 ;; whether the reference was LONG-TERM travels with the motion, because a later
+                 ;; picture reading this field has no access to the list that gave the index meaning
+                 (lt (and (>= idx 0) (< idx (length list))
+                          (pic-long-term (aref list idx)))))
+            (set-pic-motion pic x y lx
+                            (aref mv (* 4 lx)) (aref mv (+ (* 4 lx) 1))
+                            idx (aref mv (+ (* 4 lx) 3)) lt)))))))
 
 (defun %motion-compensate (c x0 y0 w h mv)
   "Predict one prediction unit's samples from one or two reference pictures."

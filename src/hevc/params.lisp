@@ -517,7 +517,7 @@
   (first-in-pic nil) (dependent nil)
   (segment-address 0)
   (type 2)                              ; 0 B, 1 P, 2 I — note the ORDER, which is not H.264's
-  (pic-output t)
+  (pic-output t) (no-output-prior nil)
   (poc-lsb 0) (strps nil)
   (temporal-mvp nil)
   (sao-luma nil) (sao-chroma nil)
@@ -528,6 +528,8 @@
   ;; ref_pic_lists_modification: a permutation of the list the reference picture set implies, or
   ;; NIL for the identity, which is what almost every picture sends
   (list-entry-l0 nil) (list-entry-l1 nil)
+  ;; the long-term references this picture names, each as (POC-LSB USED MSB-PRESENT MSB-CYCLE)
+  (long-term #() :type simple-vector)
   (qp 26) (cb-qp-offset 0) (cr-qp-offset 0)
   (deblocking-disabled nil) (beta-offset 0) (tc-offset 0)
   (loop-filter-across-slices nil)
@@ -563,8 +565,34 @@
           (setf (sh-strps sh)
                 (aref (sps-strps sps)
                       (if (> n 1) (ub br (integer-length (1- n))) 0)))))
+    ;; LONG-TERM references are named by their order count rather than by their distance, which is
+    ;; the whole difference: a short-term set says "two pictures back", so it stops meaning anything
+    ;; once decoding moves on, while a long-term entry keeps naming the same picture for as long as
+    ;; the encoder wants it.  That is what makes a static background usable a hundred pictures later.
     (when (sps-long-term-present sps)
-      (%err "long-term reference pictures are not supported"))
+      (let* ((nsps (length (sps-long-term-poc sps)))
+             (num-sps (if (plusp nsps) (ue br) 0))
+             (num-pics (ue br))
+             (n (+ num-sps num-pics))
+             (v (make-array n))
+             (prev 0))
+        (dotimes (i n)
+          (let ((lsb 0) (used nil))
+            (if (< i num-sps)
+                (let ((idx (if (> nsps 1) (ub br (integer-length (1- nsps))) 0)))
+                  (unless (< idx nsps)
+                    (%err "a long-term reference names sequence entry ~d of ~d" idx nsps))
+                  (setf lsb (aref (sps-long-term-poc sps) idx)
+                        used (aref (sps-long-term-used sps) idx)))
+                (setf lsb (ub br (sps-log2-max-poc-lsb sps))
+                      used (= 1 (u1 br))))
+            (let* ((msb-present (= 1 (u1 br)))
+                   (cycle (if msb-present (ue br) 0)))
+              ;; the cycles accumulate along the list, and the chain restarts where the entries
+              ;; sent in the slice header begin
+              (setf prev (if (or (zerop i) (= i num-sps)) cycle (+ cycle prev)))
+              (setf (aref v i) (list lsb used msb-present prev)))))
+        (setf (sh-long-term sh) v)))
     (when (sps-temporal-mvp-enabled sps)
       (setf (sh-temporal-mvp sh) (= 1 (u1 br)))))
   (when (sps-sao-enabled sps)
@@ -579,7 +607,8 @@
     ;; the lists the reference picture set implies are in a fixed order — nearest backwards first,
     ;; then nearest forwards — and an encoder that wants a different one says so here.  It costs
     ;; bits and buys a cheaper index for whichever reference this particular slice leans on
-    (let ((total (strps-used-count (sh-strps sh))))
+    (let ((total (+ (strps-used-count (sh-strps sh))
+                    (count-if #'second (sh-long-term sh)))))
       (when (and (pps-lists-modification-present pps) (> total 1))
         (let ((bits (integer-length (1- total))))
           (flet ((entries (n)
@@ -626,7 +655,8 @@
   (let* ((sh (make-slice :nal nal))
          (first-p (= 1 (u1 br))))
     (setf (sh-first-in-pic sh) first-p)
-    (when (nal-irap-p nal) (u1 br))             ; no_output_of_prior_pics_flag
+    (when (nal-irap-p nal)
+      (setf (sh-no-output-prior sh) (= 1 (u1 br))))
     (let* ((pps (or (gethash (ue br) pps-table)
                     (%err "slice refers to a picture parameter set that has not been seen")))
            (sps (or (gethash (pps-sps-id pps) sps-table)

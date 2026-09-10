@@ -262,7 +262,12 @@
                      (reel.hevc:parse-slice-header
                       (reel.hevc:make-bitreader (reel.hevc:nal-rbsp n)) n spss ppss)
                      (incf slices)))))
-              (let ((want (and dims (with-open-file (s dims) (read-line s nil "")))))
+              ;; a fixture of 0x0 means ffprobe could not read the stream at all — EXT_A_ericsson_3
+              ;; overreads its own sequence parameter set as far as ffmpeg is concerned, and ffmpeg
+              ;; emits no frames for it.  There is no oracle for a stream the oracle refuses, so it
+              ;; is not checked rather than counted either way: parsing it proves nothing.
+              (let ((want (let ((w (and dims (with-open-file (s dims) (read-line s nil "")))))
+                            (if (equal w "0x0") nil w))))
                 (cond ((zerop slices)
                        (incf fail)
                        (format t "~&  FAIL ~a: no slice headers~%" (pathname-name f)))

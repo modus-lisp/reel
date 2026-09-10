@@ -23,18 +23,44 @@
         (deblock-picture pic (sh-pps sh) sh)
         (sao-picture pic sh))
       (incf (dec-frames d))
+      ;; A PICTURE MAY BE DECODED AND NOT SHOWN.  pic_output_flag says so, and the reason it exists
+      ;; is that a picture can be worth decoding purely as a reference — an encoder can insert one
+      ;; that nothing displays but everything after predicts from.  Marking it as already handed
+      ;; out is how it stays in the buffer for as long as the reference set wants it while never
+      ;; reaching the output: the alternative, dropping it, loses the pictures that depend on it.
+      (unless (sh-pic-output sh) (setf (pic-output-done pic) t))
+      (setf (pic-needed pic) t)         ; until the next reference picture set says otherwise
       (push pic (dec-dpb d))
       (setf (dec-current d) nil (dec-cur-sh d) nil)
       ;; A picture may be output once every picture that precedes it on SCREEN has been decoded.
       ;; The sequence parameter set says how far decoding order may run ahead of display order, and
       ;; that number is what makes this bounded rather than "wait for the end of the stream".
-      (let* ((reorder (sps-max-num-reorder (sh-sps sh)))
-             (pending (remove-if #'pic-output-done (dec-dpb d))))
-        (loop while (> (length pending) reorder)
+      ;; TWO REASONS TO HAND A PICTURE OUT, and only one of them is about reordering.  The obvious
+      ;; one is that more pictures are waiting than the sequence said could ever be out of order,
+      ;; so the earliest of them can no longer be overtaken.  The other is that THE BUFFER IS FULL:
+      ;; the sequence also states how many pictures a decoder must be able to hold, and a decoder
+      ;; that holds more than that is not the decoder the encoder was writing for.  Bumping only on
+      ;; the first condition keeps pictures the encoder expected to be gone — which is invisible
+      ;; until something discards the buffer, and then they are lost instead of late.
+      (let* ((sps (sh-sps sh))
+             (reorder (sps-max-num-reorder sps))
+             (cap (sps-max-dec-pic-buffering sps)))
+        (loop for pending = (remove-if #'pic-output-done (dec-dpb d))
+              while (and pending
+                         (or (> (length pending) reorder)
+                             ;; STRICTLY greater, because the picture just decoded is already in
+                             ;; the buffer here and the standard asks this question before storing
+                             ;; it.  Counting it bumps one picture too many, which is invisible
+                             ;; until a random access point discards what is left and the extra
+                             ;; one has already escaped.
+                             (> (length (dec-dpb d)) cap)))
               do (let ((next (first (sort (copy-list pending) #'< :key #'pic-poc))))
                    (setf (pic-output-done next) t)
                    (setf (dec-out d) (append (dec-out d) (list next)))
-                   (setf pending (remove next pending)))))
+                   ;; a picture that has been shown and is no longer a reference leaves the buffer
+                   ;; at once, which is what makes room and stops this loop
+                   (unless (pic-needed next)
+                     (setf (dec-dpb d) (remove next (dec-dpb d)))))))
       pic)))
 
 (defun %random-access-gate (d nal poc)
@@ -68,11 +94,12 @@
           ;; a slice segment never inherits across a picture boundary
           (dec-indep-sh d) nil
           (dec-ctx d) nil)
-    (multiple-value-bind (before after) (%apply-rps d sh poc nal)
+    (multiple-value-bind (before after ltcurr) (%apply-rps d sh poc nal)
       ;; the current picture goes in only after the set has been applied, so it cannot keep itself
       (setf (dec-current d) pic
             (dec-before d) before
-            (dec-after d) after))
+            (dec-after d) after
+            (dec-ltcurr d) ltcurr))
     pic))
 
 (defun feed-nal (d nal)
@@ -103,7 +130,7 @@
        ;; use different numbers of references, permute them differently, or name a different
        ;; collocated picture.  Building them once from the first slice's header gives every slice
        ;; after it somebody else's references.
-       (%build-lists d sh (dec-before d) (dec-after d))
+       (%build-lists d sh (dec-before d) (dec-after d) (dec-ltcurr d))
        (setf (dec-ctx d)
              (decode-slice-data (sh-sps sh) (sh-pps sh) sh br (dec-current d)
                                 (dec-list0 d) (dec-list1 d) (%collocated d sh)

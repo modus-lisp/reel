@@ -65,8 +65,15 @@
   (ref-idx (make-array 0 :element-type '(signed-byte 8)) :type (simple-array (signed-byte 8) (*)))
   (ref-poc (make-array 0 :element-type '(signed-byte 32))
    :type (simple-array (signed-byte 32) (*)))
+  ;; and whether what it pointed at was a LONG-TERM reference, which travels with the motion for
+  ;; the same reason the order count does: a later picture reads this field and has no access to
+  ;; the lists that gave it meaning.  Long-term-ness is not a property of the vector but it decides
+  ;; whether the vector may be scaled, so it has to be here.
+  (ref-lt (make-array 0 :element-type 'bit) :type simple-bit-vector)
   (mv-w 0 :type fixnum) (mv-h 0 :type fixnum)
   (reference-p nil)
+  (long-term nil)                       ; kept for random access rather than for the next picture
+  (needed nil)                          ; still named by the reference picture set in force
   (output-done nil)                     ; has this picture been handed out yet
   ;; true where a 4x4 block was coded intra, which the candidate derivations test constantly.
   ;; IT STARTS AS ALL ONES.  A block that has not been decoded yet must look unavailable to the
@@ -119,6 +126,7 @@
                                                       :initial-element -1)
      :ref-poc (make-array (* 2 (ash w -2) (ash h -2)) :element-type '(signed-byte 32)
                                                       :initial-element 0)
+     :ref-lt (make-array (* 2 (ash w -2) (ash h -2)) :element-type 'bit :initial-element 0)
      :mv-w (ash w -2) :mv-h (ash h -2)
      :intra (make-array (* (ash w -2) (ash h -2)) :element-type 'bit :initial-element 1)
      :cbf (make-array (* (ash w -2) (ash h -2)) :element-type 'bit :initial-element 0))))
@@ -130,22 +138,24 @@
   (+ (* (ash y -2) (pic-mv-w pic)) (ash x -2)))
 
 (defun pic-motion (pic x y lx)
-  "(values mvx mvy ref-idx ref-poc) for the 4x4 block at (X,Y) in list LX.
+  "(values mvx mvy ref-idx ref-poc long-term-p) for the 4x4 block at (X,Y) in list LX.
    A REF-IDX of -1 means this block does not predict from that list."
   (declare (type fixnum x y lx))
   (let ((i (pic-mv-index pic x y)))
     (values (aref (pic-mv pic) (+ (* 4 i) (* 2 lx)))
             (aref (pic-mv pic) (+ (* 4 i) (* 2 lx) 1))
             (aref (pic-ref-idx pic) (+ (* 2 i) lx))
-            (aref (pic-ref-poc pic) (+ (* 2 i) lx)))))
+            (aref (pic-ref-poc pic) (+ (* 2 i) lx))
+            (plusp (aref (pic-ref-lt pic) (+ (* 2 i) lx))))))
 
-(defun set-pic-motion (pic x y lx mvx mvy idx poc)
+(defun set-pic-motion (pic x y lx mvx mvy idx poc &optional lt)
   (declare (type fixnum x y lx mvx mvy idx poc))
   (let ((i (pic-mv-index pic x y)))
     (setf (aref (pic-mv pic) (+ (* 4 i) (* 2 lx))) mvx
           (aref (pic-mv pic) (+ (* 4 i) (* 2 lx) 1)) mvy
           (aref (pic-ref-idx pic) (+ (* 2 i) lx)) idx
-          (aref (pic-ref-poc pic) (+ (* 2 i) lx)) poc)))
+          (aref (pic-ref-poc pic) (+ (* 2 i) lx)) poc
+          (aref (pic-ref-lt pic) (+ (* 2 i) lx)) (if lt 1 0))))
 
 (declaim (inline pic-plane pic-stride))
 (defun pic-plane (pic c-idx)

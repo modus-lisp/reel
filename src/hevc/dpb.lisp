@@ -31,6 +31,11 @@
   ;; the decoding context they carry on from.  Both belong to the picture, not to the sequence.
   (indep-sh nil)
   (ctx nil)
+  ;; the reference picture set this picture may predict from, kept because the LISTS built out of
+  ;; it are per SLICE and not per picture: two slices of one picture may name different numbers of
+  ;; references and permute them differently
+  (before #() :type simple-vector)
+  (after #() :type simple-vector)
   (frames 0 :type fixnum))
 
 (defun make-hevc-decoder () (make-decoder))
@@ -119,16 +124,20 @@
     (when (zerop total)
       (setf (dec-list0 d) #() (dec-list1 d) #())
       (return-from %build-lists nil))
-    (flet ((fill-list (n first second)
+    (flet ((fill-list (n first second entries)
+             ;; ENTRIES, when the slice sent one, says which of the implied list each index takes.
+             ;; Without it index i takes the i-th, which is the same thing said the short way.
              (let ((v (make-array n)))
                (dotimes (i n v)
-                 (let ((k (mod i total)))
+                 (let ((k (mod (if entries (aref entries i) i) total)))
                    (setf (aref v i)
                          (if (< k (length first))
                              (aref first k)
                              (aref second (- k (length first))))))))))
-      (setf (dec-list0 d) (fill-list n0 before after))
-      (setf (dec-list1 d) (if (sh-b-slice-p sh) (fill-list n1 after before) #())))))
+      (setf (dec-list0 d) (fill-list n0 before after (sh-list-entry-l0 sh)))
+      (setf (dec-list1 d) (if (sh-b-slice-p sh)
+                              (fill-list n1 after before (sh-list-entry-l1 sh))
+                              #())))))
 
 (defun %output-order (pictures)
   (sort (copy-list pictures) #'< :key #'pic-poc))

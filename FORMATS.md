@@ -17,7 +17,7 @@ as data.
 |---|---|
 | **VP8**, key and inter frames | libvpx, bit-exact on eight clips and on Big Buck Bunny |
 | **H.264 Baseline, Main and High** | 69 of the JVT conformance streams bit-exact, plus ffmpeg's output on a 7672-frame YouTube file and 300 frames of 640x360 High profile, every frame |
-| **HEVC / H.265**, Main profile | 150 of the JCT-VC conformance streams bit-exact, whole streams, 1773 frames |
+| **HEVC / H.265**, Main profile | 152 of the JCT-VC conformance streams bit-exact, whole streams, 1805 frames |
 | **MPEG-1 and MPEG-2 video** | ffmpeg, bit-exact on thirteen fixtures, every frame |
 | **MPEG-4 Part 2** (DivX, XviD) | ffmpeg, bit-exact on eleven fixtures, every frame |
 | **WebM and Matroska** | they are the same demuxer; `.mkv` with H.264 decodes today |
@@ -117,10 +117,10 @@ because nobody knows to disbelieve it.
   here. Multiple slices per picture, I_PCM macroblocks and both remaining `pic_order_cnt_type`s are
   decoded, not refused.
 - HEVC: more than 8 bits per sample, long-term references, the range extension tools, weighted
-  prediction, reference picture list modification, and 4:2:2 and 4:4:4. As with H.264 each is
-  refused on the flag that turns it on, so a Main profile stream using none of them decodes here —
-  which is 150 of the 186 conformance streams. Tiles, wavefront entropy coding, dependent slice
-  segments, PCM coding units, multiple slices per picture, both loop filters, all four asymmetric
+  prediction, and 4:2:2 and 4:4:4. As with H.264 each is refused on the flag that turns it on, so a
+  Main profile stream using none of them decodes here — which is 152 of the 186 conformance
+  streams. Tiles, wavefront entropy coding, dependent slice segments, PCM coding units, reference
+  picture list modification, multiple slices per picture, both loop filters, all four asymmetric
   partitions, temporal motion vector prediction and random access from a clean point rather than
   an IDR are decoded, not refused. The multilayer and 3D extensions are NOT refused: they describe
   other layers, and a stereo stream's base layer is ordinary HEVC that this decodes exactly.
@@ -277,13 +277,13 @@ What remains, which is the honest part:
 
 It was listed here as not worth it — larger than all of H.264 put together, and VP9 cheaper for a
 decoder that wanted one more modern codec. That was a fair estimate of the size and a wrong one of
-the value. It is built: 150 of the 186 JCT-VC conformance streams decode whole and bit-exact,
-sixteen frames each, both loop filters on, 1773 frames in total, with zero wrong.
+the value. It is built: 152 of the 186 JCT-VC conformance streams decode whole and bit-exact,
+sixteen frames each, both loop filters on, 1805 frames in total, with zero wrong.
 
-The other 36 are refused by name, and the list is the honest statement of what is missing: 10-bit
+The other 34 are refused by name, and the list is the honest statement of what is missing: 10-bit
 and mixed bit depths (12), long-term references (11), the range extension tools (8), weighted
-prediction (3), reference picture list modification (2). Tiles, wavefront entropy coding and
-dependent slice segments, which between them were more than half the refusals, are built.
+prediction (3). Tiles, wavefront entropy coding and dependent slice segments, which between them
+were more than half the refusals, are built.
 
 Five things generalise beyond this codec.
 

@@ -139,6 +139,17 @@
 
 (defun strps-count (s) (+ (length (strps-negative s)) (length (strps-positive s))))
 
+(defun strps-used-count (s)
+  "NumPicTotalCurr, near enough: how many of this set's pictures the CURRENT one may predict from.
+
+   The rest are kept only because a later picture wants them.  The number matters because it is
+   what a list modification's entries are indexed against, and so how many bits each of them
+   takes — get it wrong and the slice header ends in the wrong place."
+  (if (null s)
+      0
+      (+ (count-if #'identity (strps-used-neg s))
+         (count-if #'identity (strps-used-pos s)))))
+
 (defun %parse-strps (br idx sets num-sets)
   "st_ref_pic_set (7.3.7), including the inter-set prediction that most streams use.
 
@@ -514,6 +525,9 @@
   (mvd-l1-zero nil) (cabac-init nil)
   (collocated-from-l0 t) (collocated-ref-idx 0)
   (max-merge-cand 5)
+  ;; ref_pic_lists_modification: a permutation of the list the reference picture set implies, or
+  ;; NIL for the identity, which is what almost every picture sends
+  (list-entry-l0 nil) (list-entry-l1 nil)
   (qp 26) (cb-qp-offset 0) (cr-qp-offset 0)
   (deblocking-disabled nil) (beta-offset 0) (tc-offset 0)
   (loop-filter-across-slices nil)
@@ -562,8 +576,19 @@
     (when (= 1 (u1 br))                     ; num_ref_idx_active_override_flag
       (setf (sh-num-ref-idx-l0 sh) (1+ (ue br)))
       (when (sh-b-slice-p sh) (setf (sh-num-ref-idx-l1 sh) (1+ (ue br)))))
-    (when (pps-lists-modification-present pps)
-      (%err "reference picture list modification is not supported"))
+    ;; the lists the reference picture set implies are in a fixed order — nearest backwards first,
+    ;; then nearest forwards — and an encoder that wants a different one says so here.  It costs
+    ;; bits and buys a cheaper index for whichever reference this particular slice leans on
+    (let ((total (strps-used-count (sh-strps sh))))
+      (when (and (pps-lists-modification-present pps) (> total 1))
+        (let ((bits (integer-length (1- total))))
+          (flet ((entries (n)
+                   (let ((v (make-array n)))
+                     (dotimes (i n v) (setf (aref v i) (ub br bits))))))
+            (when (= 1 (u1 br))
+              (setf (sh-list-entry-l0 sh) (entries (sh-num-ref-idx-l0 sh))))
+            (when (and (sh-b-slice-p sh) (= 1 (u1 br)))
+              (setf (sh-list-entry-l1 sh) (entries (sh-num-ref-idx-l1 sh))))))))
     (when (sh-b-slice-p sh) (setf (sh-mvd-l1-zero sh) (= 1 (u1 br))))
     (when (pps-cabac-init-present pps) (setf (sh-cabac-init sh) (= 1 (u1 br))))
     (when (sh-temporal-mvp sh)

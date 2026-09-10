@@ -70,8 +70,9 @@
           (dec-ctx d) nil)
     (multiple-value-bind (before after) (%apply-rps d sh poc nal)
       ;; the current picture goes in only after the set has been applied, so it cannot keep itself
-      (setf (dec-current d) pic)
-      (%build-lists d sh before after))
+      (setf (dec-current d) pic
+            (dec-before d) before
+            (dec-after d) after))
     pic))
 
 (defun feed-nal (d nal)
@@ -97,6 +98,12 @@
        (unless (dec-current d) (%err "a slice arrived before any picture was started"))
        (setf (dec-cur-sh d) sh)
        (unless (sh-dependent sh) (setf (dec-indep-sh d) sh))
+       ;; THE LISTS ARE PER SLICE.  The reference picture SET is the picture's — it says what
+       ;; survives in the buffer — but 8.3.4 runs for each slice, and two slices of one picture may
+       ;; use different numbers of references, permute them differently, or name a different
+       ;; collocated picture.  Building them once from the first slice's header gives every slice
+       ;; after it somebody else's references.
+       (%build-lists d sh (dec-before d) (dec-after d))
        (setf (dec-ctx d)
              (decode-slice-data (sh-sps sh) (sh-pps sh) sh br (dec-current d)
                                 (dec-list0 d) (dec-list1 d) (%collocated d sh)

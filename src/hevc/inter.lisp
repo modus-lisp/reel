@@ -68,6 +68,21 @@
                             (aref mv (* 4 lx)) (aref mv (+ (* 4 lx) 1))
                             idx (aref mv (+ (* 4 lx) 3)) lt)))))))
 
+(defun %weight (c lx idx comp)
+  "(values weight offset denom) for list LX's reference IDX and component COMP, NIL when the slice
+   sent no weight table.  The weights are per reference INDEX, not per picture: an encoder wanting
+   two weights for one picture puts it in the list twice, which is why a list may name the same
+   picture more than once."
+  (declare (type ctx c) (type fixnum lx idx comp))
+  (let* ((sh (cx-sh c))
+         (tbl (if (zerop lx) (sh-wp-l0 sh) (sh-wp-l1 sh))))
+    (when (and tbl (>= idx 0) (< idx (length tbl)))
+      (let ((e (aref tbl idx)))
+        (case comp
+          (0 (values (first e) (second e) (sh-wp-luma-denom sh)))
+          (1 (values (third e) (fourth e) (sh-wp-chroma-denom sh)))
+          (t (values (fifth e) (sixth e) (sh-wp-chroma-denom sh))))))))
+
 (defun %motion-compensate (c x0 y0 w h mv)
   "Predict one prediction unit's samples from one or two reference pictures."
   (declare (type ctx c) (type fixnum x0 y0 w h))
@@ -88,12 +103,15 @@
         (bi
          (let ((a (cx-p0 c)) (b (cx-p1 c)))
            (one 0 a) (one 1 b)
-           (%write-bi (pic-y pic) (pic-ystride pic) x0 y0 w h a b)
+           (multiple-value-bind (w0 o0 dn) (%weight c 0 r0 0)
+             (multiple-value-bind (w1 o1) (%weight c 1 r1 0)
+               (%write-bi (pic-y pic) (pic-ystride pic) x0 y0 w h a b w0 o0 w1 o1 dn)))
            (%mc-chroma-pair c x0 y0 w h mv t)))
         (t
          (let ((lx (if (>= r0 0) 0 1)) (a (cx-p0 c)))
            (when (one lx a)
-             (%write-uni (pic-y pic) (pic-ystride pic) x0 y0 w h a)
+             (multiple-value-bind (wt off dn) (%weight c lx (aref mv (+ (* 4 lx) 2)) 0)
+               (%write-uni (pic-y pic) (pic-ystride pic) x0 y0 w h a wt off dn))
              (%mc-chroma-pair c x0 y0 w h mv nil))))))))
 
 (defun %mc-chroma-pair (c x0 y0 w h mv bi)
@@ -121,10 +139,14 @@
           (if bi
               (let ((a (cx-p0 c)) (b (cx-p1 c)))
                 (one 0 a) (one 1 b)
-                (%write-bi dst (pic-cstride pic) cx0 cy0 cw ch a b))
+                (multiple-value-bind (w0 o0 dn) (%weight c 0 (aref mv 2) (1+ plane))
+                  (multiple-value-bind (w1 o1) (%weight c 1 (aref mv 6) (1+ plane))
+                    (%write-bi dst (pic-cstride pic) cx0 cy0 cw ch a b w0 o0 w1 o1 dn))))
               (let ((lx (if (>= (aref mv 2) 0) 0 1)) (a (cx-p0 c)))
                 (when (one lx a)
-                  (%write-uni dst (pic-cstride pic) cx0 cy0 cw ch a)))))))))
+                  (multiple-value-bind (wt off dn)
+                      (%weight c lx (aref mv (+ (* 4 lx) 2)) (1+ plane))
+                    (%write-uni dst (pic-cstride pic) cx0 cy0 cw ch a wt off dn))))))))))
 
 (defun %prediction-unit (c x0 y0 w h part-idx skip)
   "One prediction unit (7.3.8.6): read its motion, store it, and predict from it."

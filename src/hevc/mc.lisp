@@ -155,26 +155,60 @@
                  (setf (aref dst (+ (* y w) x)) (ash s -6)))))))))
     dst))
 
-(defun %write-uni (plane stride x0 y0 w h src)
-  "One prediction, rounded from 14 bits back to eight (8.5.3.3.4.2)."
+(defun %write-uni (plane stride x0 y0 w h src &optional wt off denom)
+  "One prediction, rounded from 14 bits back to eight (8.5.3.3.4.2).
+
+   WT, OFF and DENOM give the EXPLICIT WEIGHT when the slice sent one: multiply, round at the
+   stated shift, then add the offset.  Without them this is the default process, which is the same
+   arithmetic with a weight of one and an offset of zero — written separately because it is what
+   almost every block does and the multiply is not free."
   (declare (type (simple-array (unsigned-byte 8) (*)) plane)
            (type (simple-array (signed-byte 32) (*)) src)
            (type fixnum stride x0 y0 w h)
            (optimize (speed 3) (safety 1)))
-  (dotimes (y h)
-    (dotimes (x w)
-      (setf (aref plane (+ (* (+ y0 y) stride) x0 x))
-            (%clamp (ash (+ (aref src (+ (* y w) x)) 32) -6) 0 255)))))
+  (if (null wt)
+      (dotimes (y h)
+        (dotimes (x w)
+          (setf (aref plane (+ (* (+ y0 y) stride) x0 x))
+                (%clamp (ash (+ (aref src (+ (* y w) x)) 32) -6) 0 255))))
+      (let* ((log2wd (+ (the fixnum denom) 6))
+             (round (if (plusp log2wd) (ash 1 (1- log2wd)) 0)))
+        (declare (type fixnum log2wd round))
+        (dotimes (y h)
+          (dotimes (x w)
+            (let ((v (aref src (+ (* y w) x))))
+              (declare (type fixnum v))
+              (setf (aref plane (+ (* (+ y0 y) stride) x0 x))
+                    (%clamp (+ (if (plusp log2wd)
+                                   (ash (+ (* v (the fixnum wt)) round) (- log2wd))
+                                   (* v (the fixnum wt)))
+                               (the fixnum off))
+                            0 255))))))))
 
-(defun %write-bi (plane stride x0 y0 w h a b)
+(defun %write-bi (plane stride x0 y0 w h a b &optional w0 o0 w1 o1 denom)
   "Two predictions averaged, then rounded once.  Rounding each to eight bits first and averaging
    after is the obvious implementation and it is a different picture — the whole point of carrying
-   14 bits out of the filters is that this addition happens before the loss."
+   14 bits out of the filters is that this addition happens before the loss.
+
+   With explicit weights the two are scaled independently and the offsets are folded in at the
+   shared shift, so the single rounding still happens once and at the end."
   (declare (type (simple-array (unsigned-byte 8) (*)) plane)
            (type (simple-array (signed-byte 32) (*)) a b)
            (type fixnum stride x0 y0 w h)
            (optimize (speed 3) (safety 1)))
-  (dotimes (y h)
-    (dotimes (x w)
-      (setf (aref plane (+ (* (+ y0 y) stride) x0 x))
-            (%clamp (ash (+ (aref a (+ (* y w) x)) (aref b (+ (* y w) x)) 64) -7) 0 255)))))
+  (if (null w0)
+      (dotimes (y h)
+        (dotimes (x w)
+          (setf (aref plane (+ (* (+ y0 y) stride) x0 x))
+                (%clamp (ash (+ (aref a (+ (* y w) x)) (aref b (+ (* y w) x)) 64) -7) 0 255))))
+      (let* ((log2wd (+ (the fixnum denom) 6))
+             (bias (ash (+ (the fixnum o0) (the fixnum o1) 1) log2wd)))
+        (declare (type fixnum log2wd bias))
+        (dotimes (y h)
+          (dotimes (x w)
+            (setf (aref plane (+ (* (+ y0 y) stride) x0 x))
+                  (%clamp (ash (+ (* (aref a (+ (* y w) x)) (the fixnum w0))
+                                  (* (aref b (+ (* y w) x)) (the fixnum w1))
+                                  bias)
+                               (- (1+ log2wd)))
+                          0 255)))))))

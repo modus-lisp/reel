@@ -530,6 +530,10 @@
   (list-entry-l0 nil) (list-entry-l1 nil)
   ;; the long-term references this picture names, each as (POC-LSB USED MSB-PRESENT MSB-CYCLE)
   (long-term #() :type simple-vector)
+  ;; the explicit weights, when the picture parameter set turns them on: a shift, and per reference
+  ;; index a (LUMA-W LUMA-O CB-W CB-O CR-W CR-O)
+  (wp-luma-denom 0) (wp-chroma-denom 0)
+  (wp-l0 nil) (wp-l1 nil)
   (qp 26) (cb-qp-offset 0) (cr-qp-offset 0)
   (deblocking-disabled nil) (beta-offset 0) (tc-offset 0)
   (loop-filter-across-slices nil)
@@ -538,6 +542,46 @@
 (defun sh-i-slice-p (sh) (= 2 (sh-type sh)))
 (defun sh-p-slice-p (sh) (= 1 (sh-type sh)))
 (defun sh-b-slice-p (sh) (= 0 (sh-type sh)))
+
+(defun %parse-pred-weights (br sh sps)
+  "pred_weight_table (7.3.6.3): a multiplier and an offset per reference index.
+
+   It exists for FADES.  Ordinary motion compensation copies samples and adds a residual, so a
+   picture uniformly darker than its reference costs a residual over every block; a weight and an
+   offset say the same thing in a few bits per reference.  The cost is that the weights are per
+   reference INDEX rather than per block, so an encoder that wants two weights for one picture has
+   to put it in the list twice — which is legal, and is why a list may name the same picture more
+   than once.
+
+   The flags for all the references come before any of the values, which is the same shape the
+   coefficient syntax uses and for the same reason: a run of like bins together."
+  (let* ((chroma-p (plusp (sps-chroma-format sps)))
+         (ld (ue br))
+         (cd (if chroma-p (+ ld (se br)) 0)))
+    (setf (sh-wp-luma-denom sh) ld (sh-wp-chroma-denom sh) cd)
+    (flet ((one-list (n)
+             (let ((lflags (make-array n)) (cflags (make-array n :initial-element nil))
+                   (v (make-array n)))
+               (dotimes (i n) (setf (aref lflags i) (= 1 (u1 br))))
+               (when chroma-p (dotimes (i n) (setf (aref cflags i) (= 1 (u1 br)))))
+               (dotimes (i n)
+                 (let ((lw (ash 1 ld)) (lo 0) (cbw (ash 1 cd)) (cbo 0) (crw (ash 1 cd)) (cro 0))
+                   (when (aref lflags i)
+                     (setf lw (+ (ash 1 ld) (se br)) lo (se br)))
+                   (when (aref cflags i)
+                     ;; the chroma offset is sent RELATIVE to what the weight already does to the
+                     ;; neutral value, so the neutral point survives a weight that is not one
+                     (let* ((dw (se br)) (dof (se br)))
+                       (setf cbw (+ (ash 1 cd) dw))
+                       (setf cbo (%clip3 -128 127 (+ (- dof (ash (* 128 cbw) (- cd))) 128))))
+                     (let* ((dw (se br)) (dof (se br)))
+                       (setf crw (+ (ash 1 cd) dw))
+                       (setf cro (%clip3 -128 127 (+ (- dof (ash (* 128 crw) (- cd))) 128)))))
+                   (setf (aref v i) (list lw lo cbw cbo crw cro))))
+               v)))
+      (setf (sh-wp-l0 sh) (one-list (sh-num-ref-idx-l0 sh)))
+      (when (sh-b-slice-p sh)
+        (setf (sh-wp-l1 sh) (one-list (sh-num-ref-idx-l1 sh)))))))
 
 (defun %independent-slice-header (br sh nal pps sps)
   "The part of a slice segment header that only an INDEPENDENT segment carries.
@@ -627,7 +671,7 @@
         (setf (sh-collocated-ref-idx sh) (ue br))))
     (when (or (and (pps-weighted-pred pps) (sh-p-slice-p sh))
               (and (pps-weighted-bipred pps) (sh-b-slice-p sh)))
-      (%err "weighted prediction is not supported"))
+      (%parse-pred-weights br sh sps))
     (setf (sh-max-merge-cand sh) (- 5 (ue br))))
   (setf (sh-qp sh) (+ (pps-init-qp pps) (se br)))
   (when (pps-slice-chroma-qp-offsets pps)

@@ -17,7 +17,7 @@ as data.
 |---|---|
 | **VP8**, key and inter frames | libvpx, bit-exact on eight clips and on Big Buck Bunny |
 | **H.264 Baseline, Main and High** | 69 of the JVT conformance streams bit-exact, plus ffmpeg's output on a 7672-frame YouTube file and 300 frames of 640x360 High profile, every frame |
-| **HEVC / H.265**, Main profile | 163 of the JCT-VC conformance streams bit-exact, whole streams, 1952 frames |
+| **HEVC / H.265**, Main profile | 166 of the JCT-VC conformance streams bit-exact, whole streams, 2000 frames |
 | **MPEG-1 and MPEG-2 video** | ffmpeg, bit-exact on thirteen fixtures, every frame |
 | **MPEG-4 Part 2** (DivX, XviD) | ffmpeg, bit-exact on eleven fixtures, every frame |
 | **WebM and Matroska** | they are the same demuxer; `.mkv` with H.264 decodes today |
@@ -116,13 +116,13 @@ because nobody knows to disbelieve it.
   on rather than on the profile that permits it, so a High profile stream using none of them decodes
   here. Multiple slices per picture, I_PCM macroblocks and both remaining `pic_order_cnt_type`s are
   decoded, not refused.
-- HEVC: more than 8 bits per sample, the range extension tools, weighted prediction, and 4:2:2 and
-  4:4:4. As with H.264 each is refused on the flag that turns it on, so a Main profile stream using
-  none of them decodes here — which is 163 of the 186 conformance streams. Tiles, wavefront entropy
-  coding, dependent slice segments, PCM coding units, long-term references, reference picture list
-  modification, multiple slices per picture, both loop filters, all four asymmetric partitions,
-  temporal motion vector prediction and random access from a clean point rather than an IDR are
-  decoded, not refused. The multilayer and 3D extensions are NOT refused: they describe
+- HEVC: more than 8 bits per sample, the range extension tools, and 4:2:2 and 4:4:4. As with H.264
+  each is refused on the flag that turns it on, so a Main profile stream using none of them decodes
+  here — which is 166 of the 186 conformance streams. Everything else in Main is built: tiles,
+  wavefront entropy coding, dependent slice segments, PCM coding units, long-term references,
+  reference picture list modification, weighted prediction, multiple slices per picture, both loop
+  filters, all four asymmetric partitions, temporal motion vector prediction, and random access
+  from a clean point rather than an IDR. The multilayer and 3D extensions are NOT refused: they describe
   other layers, and a stereo stream's base layer is ordinary HEVC that this decodes exactly.
 - MPEG-2: field pictures, dual-prime motion vectors, and anything but 4:2:0.
 - MPEG-4 Part 2: sprites and global motion, interlaced objects, data partitioning, scalability, and
@@ -277,13 +277,12 @@ What remains, which is the honest part:
 
 It was listed here as not worth it — larger than all of H.264 put together, and VP9 cheaper for a
 decoder that wanted one more modern codec. That was a fair estimate of the size and a wrong one of
-the value. It is built: 163 of the 186 JCT-VC conformance streams decode whole and bit-exact,
-sixteen frames each, both loop filters on, 1952 frames in total, with zero wrong.
+the value. It is built: 166 of the 186 JCT-VC conformance streams decode whole and bit-exact,
+sixteen frames each, both loop filters on, 2000 frames in total, with zero wrong.
 
-The other 23 are refused by name, and the list is the honest statement of what is missing: 10-bit
-and mixed bit depths (12), the range extension tools (8), weighted prediction (3). Everything that
-is about WHICH pictures exist and in what order — tiles, wavefront, dependent slices, long-term
-references, list modification, the output flags and the buffer's own bumping — is built.
+The other 20 are refused by name, and both are about SAMPLES rather than structure: 10-bit and
+mixed bit depths (12), and the range extension tools (8). Everything that decides which pictures
+exist, what they predict from, and what order they are shown in is built.
 
 Five things generalise beyond this codec.
 

@@ -17,6 +17,7 @@ as data.
 |---|---|
 | **VP8**, key and inter frames | libvpx, bit-exact on eight clips and on Big Buck Bunny |
 | **H.264 Baseline, Main and High** | 69 of the JVT conformance streams bit-exact, plus ffmpeg's output on a 7672-frame YouTube file and 300 frames of 640x360 High profile, every frame |
+| **HEVC / H.265**, Main profile | 107 of the JCT-VC conformance streams bit-exact, whole streams, 1306 frames |
 | **MPEG-1 and MPEG-2 video** | ffmpeg, bit-exact on thirteen fixtures, every frame |
 | **MPEG-4 Part 2** (DivX, XviD) | ffmpeg, bit-exact on eleven fixtures, every frame |
 | **WebM and Matroska** | they are the same demuxer; `.mkv` with H.264 decodes today |
@@ -115,6 +116,13 @@ because nobody knows to disbelieve it.
   on rather than on the profile that permits it, so a High profile stream using none of them decodes
   here. Multiple slices per picture, I_PCM macroblocks and both remaining `pic_order_cnt_type`s are
   decoded, not refused.
+- HEVC: tiles and wavefront entropy coding, PCM coding units, long-term references, more than 8
+  bits per sample, 4:2:2 and 4:4:4, dependent slice segments, weighted prediction, and reference
+  picture list modification. As with H.264 each is refused on the flag that turns it on, so a Main
+  profile stream using none of them decodes here — which is 107 of the 186 conformance streams.
+  Multiple slices per picture, both loop filters, all four asymmetric partitions, temporal motion
+  vector prediction and random access from a clean point rather than an IDR are decoded, not
+  refused.
 - MPEG-2: field pictures, dual-prime motion vectors, and anything but 4:2:0.
 - MPEG-4 Part 2: sprites and global motion, interlaced objects, data partitioning, scalability, and
   arbitrary shapes. Also Microsoft's pre-standard MPEG-4 variants (DIV3, MP42), which share a name
@@ -264,11 +272,43 @@ What remains, which is the honest part:
   derivation, a second deblocking geometry, and field-paired reference handling throughout.
 - Long-term references and slice groups (FMO) account for the rest. Both are refused by name.
 
+## HEVC, and what building it taught
+
+It was listed here as not worth it — larger than all of H.264 put together, and VP9 cheaper for a
+decoder that wanted one more modern codec. That was a fair estimate of the size and a wrong one of
+the value. It is built: 107 of the 186 JCT-VC conformance streams decode whole and bit-exact,
+sixteen frames each, both loop filters on, 1306 frames in total, with zero wrong.
+
+The other 79 are refused by name, and the list is the honest statement of what is missing: tiles
+and wavefront entropy coding (31), PCM coding units (11), long-term references (11), 10-bit and
+mixed bit depths (12), 4:4:4 and 4:2:2 (7), dependent slice segments (3), weighted prediction (2),
+reference picture list modification (2).
+
+Four things generalise beyond this codec.
+
+- **Read the reference implementation, not your memory of the standard.** Half a day went into
+  rewriting AMVP from memory, which made the stream it was meant to fix measurably worse. Every
+  fix after the decision to read ffmpeg's `hevc_mvs.c`, `hevc_cabac.c` and `hevc_filter.c` landed
+  the same day it was looked for. The bugs were not arithmetic; they were structural, and a
+  structure recalled wrongly reads as plausible.
+- **A skipped block is an oracle.** A block coded as SKIP carries no residual, so the reference
+  decoder's samples for it are a pure motion compensation of a picture already reproduced exactly.
+  Searching the vector space for the one that regenerates those samples recovers the vector the
+  reference used — no instrumentation of it required, and no guessing about which of the two
+  decoders is wrong.
+- **The initialisation of state you never read is state.** The motion field's per-block "is this
+  intra" flag has to start as ALL ONES, because a neighbour in a coding tree block not yet decoded
+  must look unavailable, and unavailable is spelled intra. Starting it at zero is the same answer
+  for the merge list and the opposite one for AMVP's isScaledFlag. That single bit was worth 45
+  streams.
+- **An ordering bug and a reconstruction bug are indistinguishable from the totals.** POC_A had
+  every one of its five pictures decoding bit-exactly with exactly one in the wrong place, and
+  presented as 86 per cent of three frames wrong. Cross-comparing every picture against every
+  reference frame — rather than comparing frame k to frame k — is what said so in one measurement.
+  The cause was that a sub-layer non-reference picture must not update the order count predictors.
+
 ## Not worth it, and why
 
-- **HEVC / H.265.** Larger than all of H.264 put together: coding tree units with quadtrees, 35
-  intra directions, a different CABAC context set, transform unit trees, sample adaptive offset. If
-  another modern codec is wanted, VP9 costs less and appears more often.
 - **Flash-era video** (Sorenson Spark, VP6 in FLV), **RealVideo**, **Windows Media and VC-1**,
   **MJPEG**. Real content exists in all of them, but each is a separate codec for a shrinking
   audience. Curiosities rather than plans.

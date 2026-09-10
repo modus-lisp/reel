@@ -75,11 +75,13 @@
         (return nil)))))
 
 (defun %ctb-avail (c cx cy)
-  "Is the coding tree block at (CX,CY) decoded and in this slice segment?"
+  "Is the coding tree block at (CX,CY) decoded, and in this slice segment AND this tile?"
   (declare (type fixnum cx cy))
   (let ((wide (sps-ctbs-wide (cx-sps c))) (high (sps-ctbs-high (cx-sps c))))
     (and (>= cx 0) (>= cy 0) (< cx wide) (< cy high)
-         (= (aref (cx-ctb-slice c) (+ (* cy wide) cx)) (cx-slice-addr c)))))
+         (let ((a (+ (* cy wide) cx)))
+           (and (= (aref (cx-ctb-slice c) a) (cx-slice-addr c))
+                (= (aref (cx-tile-id c) a) (cx-cur-tile c)))))))
 
 (defun %pu-neighbours (c x0 y0 w h)
   "(values left up up-left up-right bottom-left) for a prediction unit.

@@ -45,6 +45,10 @@
   (ctb-dbf (make-array 0 :element-type '(signed-byte 32))
    :type (simple-array (signed-byte 32) (*)))   ; disabled | beta<<8 | tc<<16, packed
   (ctb-across (make-array 0 :element-type 'bit) :type simple-bit-vector)
+  ;; and the same pair for TILES, which bound the filter on their own terms
+  (ctb-tile (make-array 0 :element-type '(signed-byte 32))
+   :type (simple-array (signed-byte 32) (*)))
+  (ctb-across-tiles (make-array 0 :element-type 'bit) :type simple-bit-vector)
   ;; SAO: three components per coding tree block, each a type, four offsets and one parameter
   (sao-type (make-array 0 :element-type '(unsigned-byte 8)) :type samples)
   (sao-off (make-array 0 :element-type '(signed-byte 32))
@@ -99,6 +103,8 @@
      :ctb-slice (make-array (sps-ctbs sps) :element-type '(signed-byte 32) :initial-element -1)
      :ctb-dbf (make-array (sps-ctbs sps) :element-type '(signed-byte 32) :initial-element 0)
      :ctb-across (make-array (sps-ctbs sps) :element-type 'bit :initial-element 0)
+     :ctb-tile (make-array (sps-ctbs sps) :element-type '(signed-byte 32) :initial-element 0)
+     :ctb-across-tiles (make-array (sps-ctbs sps) :element-type 'bit :initial-element 1)
      :sao-type (make-array (* 3 (sps-ctbs sps)) :element-type '(unsigned-byte 8)
                                                 :initial-element 0)
      :sao-off (make-array (* 12 (sps-ctbs sps)) :element-type '(signed-byte 32)

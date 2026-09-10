@@ -225,6 +225,24 @@
 (defun %ctb-of (pic x y)
   (+ (* (ash y (- (pic-ctb-log2 pic))) (pic-ctbs-wide pic)) (ash x (- (pic-ctb-log2 pic)))))
 
+(defun %sao-can-read (pic x y nx ny)
+  "May the sample at (X,Y) read its neighbour at (NX,NY)?  Luma coordinates, both.
+
+   Edge offset compares each sample against two neighbours, and a neighbour across a slice or tile
+   boundary the filter may not cross is not there to be compared against.  The standard leaves such
+   a sample ALONE rather than substituting something for the neighbour — so the test is asked of
+   both neighbours and either one failing means no offset at all.
+
+   Only samples within one of a coding tree block's border can fail this, which is why getting it
+   wrong shows up as a single row or column of wrong samples along a boundary and nothing else."
+  (declare (type picture pic) (type fixnum x y nx ny))
+  (let ((c1 (%ctb-of pic x y)) (c2 (%ctb-of pic nx ny)))
+    (or (= c1 c2)
+        (and (or (= (aref (pic-ctb-slice pic) c1) (aref (pic-ctb-slice pic) c2))
+                 (plusp (aref (pic-ctb-across pic) c1)))
+             (or (= (aref (pic-ctb-tile pic) c1) (aref (pic-ctb-tile pic) c2))
+                 (plusp (aref (pic-ctb-across-tiles pic) c1)))))))
+
 (defun %edge-filterable-p (pic xp yp xq yq)
   "(values filter-at-all allow-p allow-q) for an edge between these two samples.
 
@@ -240,7 +258,12 @@
          (cp (%ctb-of pic xp yp)) (cq (%ctb-of pic xq yq)))
     (values (and (zerop (logand (aref (pic-ctb-dbf pic) cq) 1))
                  (or (= (aref (pic-ctb-slice pic) cp) (aref (pic-ctb-slice pic) cq))
-                     (plusp (aref (pic-ctb-across pic) cq))))
+                     (plusp (aref (pic-ctb-across pic) cq)))
+                 ;; and the same question for tiles, asked separately because the two flags are
+                 ;; separate: a stream may let the filter cross slices and not tiles, or the
+                 ;; reverse, and the seams it is there to hide are different seams
+                 (or (= (aref (pic-ctb-tile pic) cp) (aref (pic-ctb-tile pic) cq))
+                     (plusp (aref (pic-ctb-across-tiles pic) cq))))
             (zerop (aref (pic-blk-nofilt pic) ip))
             (zerop (aref (pic-blk-nofilt pic) iq)))))
 
@@ -375,6 +398,10 @@
                               (declare (type fixnum ax ay bx by))
                               (when (and (<= 0 ax (1- pw)) (<= 0 ay (1- ph))
                                          (<= 0 bx (1- pw)) (<= 0 by (1- ph))
+                                         (%sao-can-read pic (ash x sub) (ash y sub)
+                                                        (ash ax sub) (ash ay sub))
+                                         (%sao-can-read pic (ash x sub) (ash y sub)
+                                                        (ash bx sub) (ash by sub))
                                          (not (exempt x y)))
                                 (let* ((v (aref ref (+ (* y stride) x)))
                                        (a (aref ref (+ (* ay stride) ax)))

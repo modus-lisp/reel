@@ -43,6 +43,14 @@
   (ctb-slice (make-array 0 :element-type '(signed-byte 32))
    :type (simple-array (signed-byte 32) (*)))
   (slice-addr 0 :type fixnum)
+  ;; and which TILE covers each one, on the same terms: a tile boundary stops prediction exactly
+  ;; as a slice boundary does.  Without tiles this is all zeros and every test against it passes.
+  (tile-id (make-array 0 :element-type '(signed-byte 32))
+   :type (simple-array (signed-byte 32) (*)))
+  (cur-tile 0 :type fixnum)
+  ;; set when the next quantisation group is the first of a tile, and so predicts its quantiser
+  ;; from the slice's rather than from the unit decoded before it — which is in another tile
+  (qp-reset nil)
   ;; the current coding unit, as the syntax elements that outlive one function
   (cu-x 0 :type fixnum) (cu-y 0 :type fixnum)
   (cu-log2 0 :type fixnum)
@@ -87,6 +95,54 @@
   ;; what the syntax walk has produced, for the checks that stand in for reconstruction
   (n-cu 0 :type fixnum) (n-tu 0 :type fixnum) (n-coeff 0 :type fixnum))
 
+(defun %tiling (sps pps)
+  "Where the tile boundaries fall, and the scan order they impose (6.5.1).
+
+   A tile is a rectangle of coding tree blocks decoded independently of every other: no prediction
+   crosses it and its arithmetic coder starts fresh.  That is the same trade a slice makes and
+   without a slice's per-region header — and unlike slices, the rectangles can be chosen to match
+   the number of cores rather than a bit budget.
+
+   THE SCAN ORDER IS THE PART THAT REACHES EVERYWHERE ELSE.  Coding tree blocks are no longer in
+   raster order across the picture: they are in raster order within a tile, and the tiles
+   themselves in raster order.  The slice data walks THAT order; every neighbour is still looked up
+   by its position in the picture.  Two addresses for the same block, and confusing them decodes
+   the picture in pieces that are individually right.
+
+   Returns (values TILE-ID TS->RS RS->TS), cached on the picture parameter set because it depends
+   only on that and the sequence one."
+  (or (pps-tiling pps)
+      (let* ((wide (sps-ctbs-wide sps)) (high (sps-ctbs-high sps)) (total (sps-ctbs sps))
+             (on (pps-tiles-enabled pps))
+             (nc (if on (pps-num-tile-columns pps) 1))
+             (nr (if on (pps-num-tile-rows pps) 1))
+             (colbd (make-array (1+ nc) :initial-element 0))
+             (rowbd (make-array (1+ nr) :initial-element 0))
+             (id (make-array total :element-type '(signed-byte 32) :initial-element 0))
+             (ts->rs (make-array total :element-type '(signed-byte 32) :initial-element 0))
+             (rs->ts (make-array total :element-type '(signed-byte 32) :initial-element 0)))
+        (if (or (not on) (pps-uniform-spacing pps))
+            (progn
+              (dotimes (i nc) (setf (aref colbd (1+ i)) (floor (* (1+ i) wide) nc)))
+              (dotimes (j nr) (setf (aref rowbd (1+ j)) (floor (* (1+ j) high) nr))))
+            (let ((cw (pps-column-widths pps)) (rh (pps-row-heights pps)))
+              (dotimes (i (1- nc)) (setf (aref colbd (1+ i)) (+ (aref colbd i) (aref cw i))))
+              (setf (aref colbd nc) wide)
+              (dotimes (j (1- nr)) (setf (aref rowbd (1+ j)) (+ (aref rowbd j) (aref rh j))))
+              (setf (aref rowbd nr) high)))
+        (let ((ts 0))
+          (declare (type fixnum ts))
+          (dotimes (j nr)
+            (dotimes (i nc)
+              (loop for ry of-type fixnum from (aref rowbd j) below (aref rowbd (1+ j)) do
+                (loop for rx of-type fixnum from (aref colbd i) below (aref colbd (1+ i)) do
+                  (let ((rs (+ (* ry wide) rx)))
+                    (setf (aref id rs) (+ (* j nc) i)
+                          (aref ts->rs ts) rs
+                          (aref rs->ts rs) ts)
+                    (incf ts)))))))
+        (setf (pps-tiling pps) (list id ts->rs rs->ts)))))
+
 (defun %make-ctx (sps pps sh cabac)
   (let* ((mcw (ash (sps-width sps) (- (sps-min-cb-log2 sps))))
          (mch (ash (sps-height sps) (- (sps-min-cb-log2 sps))))
@@ -103,6 +159,7 @@
               :skip (make-array (* mcw mch) :element-type 'bit :initial-element 0)
               :ctb-slice (make-array (sps-ctbs sps) :element-type '(signed-byte 32)
                                                     :initial-element -1)
+              :tile-id (first (%tiling sps pps))
               :zscan (%build-z-scan sps)
               :z-width (ash (sps-width sps) (- (sps-min-tb-log2 sps)))
               :qp-y (make-array (* mcw mch) :element-type '(signed-byte 32)
@@ -118,7 +175,8 @@
     (and (>= x 0) (>= y 0) (< x (sps-width sps)) (< y (sps-height sps))
          (let* ((log2 (sps-ctb-log2 sps))
                 (ctb (+ (* (ash y (- log2)) (sps-ctbs-wide sps)) (ash x (- log2)))))
-           (= (aref (cx-ctb-slice c) ctb) (cx-slice-addr c))))))
+           (and (= (aref (cx-ctb-slice c) ctb) (cx-slice-addr c))
+                (= (aref (cx-tile-id c) ctb) (cx-cur-tile c)))))))
 
 (defun %gd (c x y)
   "The coding quadtree depth recorded at luma position (X,Y)."
@@ -985,7 +1043,13 @@
                (>= log2-size (- (sps-ctb-log2 sps) (pps-diff-cu-qp-delta-depth pps))))
       (setf (cx-qp-delta-coded c) nil
             (cx-cu-qp-delta c) 0
-            (cx-qp-y-prev c) (cx-qp c)
+            ;; qPY_PREV is the quantiser of the last unit of the PREVIOUS quantisation group —
+            ;; except at the start of a slice or a TILE, where there is no previous group this
+            ;; side of the boundary and the slice's own quantiser stands in.  Taking the last
+            ;; unit's anyway is a quiet error: the syntax does not depend on the quantiser, so the
+            ;; whole tile parses to exactly the right byte and every sample in it is scaled wrong.
+            (cx-qp-y-prev c) (if (cx-qp-reset c) (sh-qp (cx-sh c)) (cx-qp c))
+            (cx-qp-reset c) nil
             (cx-qg-x c) x0 (cx-qg-y c) y0))
     (if split
         (let* ((half (ash 1 (1- log2-size)))
@@ -1024,10 +1088,15 @@
         (wide (sps-ctbs-wide (cx-sps c)))
         (first-addr (cx-slice-addr c)))
     (when (or (sh-sao-luma sh) (sh-sao-chroma sh))
-      ;; a neighbour outside this slice segment cannot be merged with, so the flag is not sent
-      (when (and (plusp rx) (> addr first-addr))
+      ;; A neighbour outside this slice segment OR outside this tile cannot be merged with, so the
+      ;; flag is not sent — and a decoder that reads it anyway is reading a bin that is not there.
+      ;; This is the first thing in a coding tree unit, so getting it wrong at a tile's very first
+      ;; block loses the whole tile, and the tile before it looks perfect.
+      (when (and (plusp rx) (> addr first-addr)
+                 (= (aref (cx-tile-id c) (1- addr)) (cx-cur-tile c)))
         (setf merge-left (= 1 (%bin c +ctx-sao-merge-flag+))))
-      (when (and (plusp ry) (not merge-left) (>= (- addr wide) first-addr))
+      (when (and (plusp ry) (not merge-left) (>= (- addr wide) first-addr)
+                 (= (aref (cx-tile-id c) (- addr wide)) (cx-cur-tile c)))
         (setf merge-up (= 1 (%bin c +ctx-sao-merge-flag+))))
       (let ((pic (cx-pic c)))
         (cond
@@ -1097,8 +1166,8 @@
    exists.  The check that matters is that end_of_slice_segment_flag comes up exactly at the last
    coding tree unit of the slice: a syntax error anywhere desynchronises the arithmetic decoder,
    and a desynchronised decoder does not stop in the right place."
-  (when (or (pps-tiles-enabled pps) (pps-entropy-coding-sync pps))
-    (%err "tiles and wavefront entropy coding are not supported"))
+  (when (pps-entropy-coding-sync pps)
+    (%err "wavefront entropy coding is not supported"))
   (when (sh-dependent sh)
     (%err "dependent slice segments are not supported"))
   (when (and (not (sh-i-slice-p sh)) (zerop (length (or list0 #()))))
@@ -1108,30 +1177,56 @@
          (pic (or pic (make-picture-for sps)))
          (wide (sps-ctbs-wide sps))
          (total (sps-ctbs sps))
-         (log2 (sps-ctb-log2 sps)))
-    (setf (cx-slice-addr c) (sh-segment-address sh)
-          (cx-pic c) pic
-          (cx-list0 c) (or list0 #()) (cx-list1 c) (or list1 #())
-          (cx-collocated c) collocated
-          (cx-qg-x c) 0 (cx-qg-y c) 0)
-    (loop for addr of-type fixnum from (sh-segment-address sh) below total do
-      (let ((rx (mod addr wide)) (ry (floor addr wide)))
-        (setf (aref (cx-ctb-slice c) addr) (cx-slice-addr c)
-              (aref (pic-ctb-slice pic) addr) (cx-slice-addr c)
-              (aref (pic-ctb-across pic) addr) (if (sh-loop-filter-across-slices sh) 1 0)
-              ;; the two offsets are per slice and signed, packed with the disable flag so the
-              ;; filter can read one number per coding tree block
-              (aref (pic-ctb-dbf pic) addr)
-              (logior (if (sh-deblocking-disabled sh) 1 0)
-                      (ash (+ 32 (sh-beta-offset sh)) 8)
-                      (ash (+ 32 (sh-tc-offset sh)) 16)))
-        (setf (cx-qp-delta-coded c) nil)
-        (%sao c addr rx ry)
-        (%coding-quadtree c (ash rx log2) (ash ry log2) log2 0)
-        (when (= 1 (decode-terminate cab))
-          ;; T: the slice said it was finished.  A slice segment covers only its own run of coding
-          ;; tree units, so how many that is says nothing about whether the parse was right —
-          ;; whether it STOPPED ON ITS OWN, rather than by running out of picture, is what does.
-          (return-from decode-slice-data
-            (values c (1+ (- addr (sh-segment-address sh))) t)))))
-    (values c (- total (sh-segment-address sh)) nil)))
+         (log2 (sps-ctb-log2 sps))
+         (n 0))
+    (declare (type fixnum n))
+    (destructuring-bind (tile-id ts->rs rs->ts) (%tiling sps pps)
+      (declare (type (simple-array (signed-byte 32) (*)) tile-id ts->rs rs->ts))
+      (setf (cx-slice-addr c) (sh-segment-address sh)
+            (cx-pic c) pic
+            (cx-list0 c) (or list0 #()) (cx-list1 c) (or list1 #())
+            (cx-collocated c) collocated
+            (cx-cur-tile c) (aref tile-id (sh-segment-address sh))
+            (cx-qg-x c) 0 (cx-qg-y c) 0)
+      (loop for ts of-type fixnum from (aref rs->ts (sh-segment-address sh)) below total do
+        (let* ((addr (aref ts->rs ts))
+               (rx (mod addr wide)) (ry (floor addr wide)))
+          (declare (type fixnum addr rx ry))
+          ;; A NEW TILE IS A NEW EVERYTHING.  The previous coding tree unit ended the substream
+          ;; with end_of_subset_one_bit and padding, so this one starts at a byte boundary with a
+          ;; fresh arithmetic decoder, freshly initialised contexts, and the quantiser predictor
+          ;; back at the slice's — the whole point being that a decoder could have started here.
+          (when (and (plusp n) (/= (aref tile-id addr) (cx-cur-tile c)))
+            (setf cab (init-cabac br (sh-qp sh) (sh-type sh) (sh-cabac-init sh))
+                  (cx-cabac c) cab
+                  (cx-cur-tile c) (aref tile-id addr)
+                  (cx-qp-y-prev c) (sh-qp sh)
+                  (cx-qp c) (sh-qp sh)
+                  (cx-qp-reset c) t))
+          (setf (aref (cx-ctb-slice c) addr) (cx-slice-addr c)
+                (aref (pic-ctb-slice pic) addr) (cx-slice-addr c)
+                (aref (pic-ctb-across pic) addr) (if (sh-loop-filter-across-slices sh) 1 0)
+                (aref (pic-ctb-tile pic) addr) (aref tile-id addr)
+                (aref (pic-ctb-across-tiles pic) addr)
+                (if (pps-loop-filter-across-tiles pps) 1 0)
+                ;; the two offsets are per slice and signed, packed with the disable flag so the
+                ;; filter can read one number per coding tree block
+                (aref (pic-ctb-dbf pic) addr)
+                (logior (if (sh-deblocking-disabled sh) 1 0)
+                        (ash (+ 32 (sh-beta-offset sh)) 8)
+                        (ash (+ 32 (sh-tc-offset sh)) 16)))
+          (setf (cx-qp-delta-coded c) nil)
+          (%sao c addr rx ry)
+          (%coding-quadtree c (ash rx log2) (ash ry log2) log2 0)
+          (incf n)
+          (when (= 1 (decode-terminate cab))
+            ;; T: the slice said it was finished.  A slice segment covers only its own run of
+            ;; coding tree units, so how many that is says nothing about whether the parse was
+            ;; right — whether it STOPPED ON ITS OWN, rather than by running out of picture, does.
+            (return-from decode-slice-data (values c n t)))
+          ;; end_of_subset_one_bit, which is a terminate bin that is always 1, sits between two
+          ;; substreams and is read only when one actually ends here
+          (when (and (< (1+ ts) total)
+                     (/= (aref tile-id (aref ts->rs (1+ ts))) (aref tile-id addr)))
+            (decode-terminate cab)))))
+    (values c n nil)))

@@ -353,6 +353,7 @@
   (tiles-enabled nil) (entropy-coding-sync nil)
   (num-tile-columns 1) (num-tile-rows 1) (uniform-spacing t)
   (column-widths nil) (row-heights nil) (loop-filter-across-tiles t)
+  (tiling nil)                          ; the tile map, computed once on first use
   (loop-filter-across-slices nil)
   (deblocking-control-present nil) (deblocking-override-enabled nil)
   (deblocking-disabled nil) (beta-offset 0) (tc-offset 0)

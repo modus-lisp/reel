@@ -251,6 +251,57 @@
 (defun sps-display-height (s)
   (- (sps-height s) (* (sps-sub-height s) (+ (sps-conf-top s) (sps-conf-bottom s)))))
 
+(defun %skip-sub-layer-hrd (br cpb-cnt sub-pic)
+  "sub_layer_hrd_parameters (E.2.3): one entry per coded picture buffer, none of which is read."
+  (dotimes (j cpb-cnt)
+    (ue br) (ue br)                             ; bit_rate_value, cpb_size_value
+    (when sub-pic (ue br) (ue br))              ; cpb_size_du_value, bit_rate_du_value
+    (u1 br)))                                   ; cbr_flag
+
+(defun %skip-hrd (br common-inf max-sub-layers-minus1)
+  "hrd_parameters (E.2.2), consumed and discarded.
+
+   Nothing above this wants an answer from it.  It is parsed only because the SEQUENCE PARAMETER
+   SET EXTENSION FLAGS ARE ON THE OTHER SIDE OF IT, and those say whether the stream uses tools
+   this decoder would otherwise decode wrongly rather than refuse."
+  (let ((nal nil) (vcl nil) (sub-pic nil))
+    (when common-inf
+      (setf nal (= 1 (u1 br)) vcl (= 1 (u1 br)))
+      (when (or nal vcl)
+        (setf sub-pic (= 1 (u1 br)))
+        (when sub-pic (ub br 8) (ub br 5) (u1 br) (ub br 5))
+        (ub br 4) (ub br 4)                     ; bit_rate_scale, cpb_size_scale
+        (when sub-pic (ub br 4))
+        (ub br 5) (ub br 5) (ub br 5)))
+    (dotimes (i (1+ max-sub-layers-minus1))
+      (let ((general (= 1 (u1 br))) (within t) (low-delay nil) (cpb 1))
+        (unless general (setf within (= 1 (u1 br))))
+        (if within
+            (ue br)                             ; elemental_duration_in_tc_minus1
+            (setf low-delay (= 1 (u1 br))))
+        (unless low-delay (setf cpb (1+ (ue br))))
+        (when nal (%skip-sub-layer-hrd br cpb sub-pic))
+        (when vcl (%skip-sub-layer-hrd br cpb sub-pic))))))
+
+(defun %skip-vui (br max-sub-layers-minus1)
+  "vui_parameters (E.2.1), consumed and discarded, for the same reason as the timing above it."
+  (when (= 1 (u1 br))                           ; aspect_ratio_info_present_flag
+    (when (= 255 (ub br 8)) (ub br 16) (ub br 16)))
+  (when (= 1 (u1 br)) (u1 br))                  ; overscan
+  (when (= 1 (u1 br))                           ; video_signal_type_present_flag
+    (ub br 3) (u1 br)
+    (when (= 1 (u1 br)) (ub br 8) (ub br 8) (ub br 8)))
+  (when (= 1 (u1 br)) (ue br) (ue br))          ; chroma_loc_info
+  (u1 br) (u1 br) (u1 br)                       ; neutral chroma, field_seq, frame_field_info
+  (when (= 1 (u1 br)) (ue br) (ue br) (ue br) (ue br))   ; default display window
+  (when (= 1 (u1 br))                           ; vui_timing_info_present_flag
+    (ub br 32) (ub br 32)
+    (when (= 1 (u1 br)) (ue br))                ; poc proportional to timing
+    (when (= 1 (u1 br)) (%skip-hrd br t max-sub-layers-minus1)))
+  (when (= 1 (u1 br))                           ; bitstream_restriction_flag
+    (u1 br) (u1 br) (u1 br)
+    (ue br) (ue br) (ue br) (ue br) (ue br)))
+
 (defun parse-sps (rbsp)
   "One sequence parameter set (7.3.2.2)."
   (let ((br (make-bitreader rbsp))
@@ -315,9 +366,34 @@
         (setf (sps-long-term-poc s) poc (sps-long-term-used s) used)))
     (setf (sps-temporal-mvp-enabled s) (= 1 (u1 br))
           (sps-strong-intra-smoothing s) (= 1 (u1 br)))
-    ;; Nothing past here is read.  The VUI and the extension flags follow, and skipping the VUI
-    ;; correctly means parsing hrd_parameters, which is a long mechanical function with nothing
-    ;; above it that wants an answer.  It goes in when something needs what comes after it.
+    ;; The VUI is skipped rather than read, but it HAS to be skipped exactly, because the extension
+    ;; flags are on the other side of it — and those are the only place a stream says it uses the
+    ;; range extension tools.  Without them a high-throughput stream looks like an ordinary one and
+    ;; decodes to nonsense instead of being refused, which is the failure this decoder exists to
+    ;; not have.
+    (when (= 1 (u1 br))                         ; vui_parameters_present_flag
+      (%skip-vui br (1- (sps-max-sub-layers s))))
+    (when (= 1 (u1 br))                         ; sps_extension_present_flag
+      (let ((range (= 1 (u1 br))))
+        (u1 br)                                 ; sps_multilayer_extension_flag
+        (u1 br)                                 ; sps_3d_extension_flag
+        (let ((scc (= 1 (u1 br))))
+          (ub br 4)                             ; sps_extension_4bits
+          ;; THE MULTILAYER AND 3D EXTENSIONS DESCRIBE OTHER LAYERS, not this one.  A stereo or
+          ;; depth stream's base layer is ordinary HEVC and Annex F says a decoder that wants only
+          ;; that layer discards the rest — which this one does, on the NAL header.  Refusing on
+          ;; their presence turns four streams that decode exactly into four that decode not at
+          ;; all.  The range and screen-content extensions are different: those change how THIS
+          ;; layer is coded, so a stream that uses one and is decoded without it is decoded wrong.
+          (when range
+            (dolist (name '("transform_skip_rotation" "transform_skip_context" "implicit_rdpcm"
+                            "explicit_rdpcm" "extended_precision_processing"
+                            "intra_smoothing_disabled" "high_precision_offsets"
+                            "persistent_rice_adaptation" "cabac_bypass_alignment"))
+              (when (= 1 (u1 br))
+                (%err "~a is a range extension tool this does not implement" name))))
+          (when scc
+            (%err "the screen content coding extension is not supported")))))
     (%check-sps s)
     s))
 

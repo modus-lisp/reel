@@ -45,8 +45,21 @@
    statistics, and this is how one table serves both without being repeated fifty-two times."
   (declare (type fixnum qp slice-type) (optimize (speed 3) (safety 1)))
   (byte-align br)
-  (let* ((c (%make-cabac :br br))
-         (st (cb-state c))
+  (let ((c (%make-cabac :br br)))
+    (init-cabac-state c qp slice-type cabac-init-flag)
+    (setf (cb-range c) 510
+          (cb-offset c) (ub br 9))
+    c))
+
+(defun init-cabac-state (c qp slice-type cabac-init-flag)
+  "Fill the context variables from the initialisation table, LEAVING THE ENGINE ALONE.
+
+   Separate from INIT-CABAC because wavefront entropy coding needs each half without the other: a
+   row restarts the arithmetic decoder at a byte boundary but inherits its contexts from the row
+   above, and a one-block-wide picture has no row above to inherit from and so needs these without
+   restarting anything."
+  (declare (type cabac c) (type fixnum qp slice-type) (optimize (speed 3) (safety 1)))
+  (let* ((st (cb-state c))
          (init (%init-type slice-type cabac-init-flag))
          (q (max 0 (min 51 qp))))
     (declare (type fixnum init q))
@@ -63,9 +76,7 @@
                   (logior (ash (- pre 64) 1) 1)
                   (ash (- 63 pre) 1)))))
     (fill (cb-stat-coeff c) 0)
-    (setf (cb-range c) 510
-          (cb-offset c) (ub br 9))
-    c))
+    (values)))
 
 (defun reinit-cabac-engine (c)
   "Restart the arithmetic decoder mid-slice, at the next byte boundary, KEEPING THE CONTEXTS.
@@ -80,6 +91,25 @@
     (setf (cb-range c) 510
           (cb-offset c) (ub br 9)))
   c)
+
+(defun save-cabac-state (c state stats)
+  "Snapshot the context variables, for wavefront entropy coding to hand along a row.
+
+   The snapshot is taken after the SECOND coding tree block of a row and restored at the start of
+   the row below.  Two blocks is the whole idea: it is enough adaptation to be worth inheriting,
+   and it is a short enough lag that the row below can start as soon as the row above is two blocks
+   in — which is what lets the rows be decoded in parallel, one lagging the next by two."
+  (declare (type cabac c))
+  (replace state (cb-state c))
+  (replace stats (cb-stat-coeff c))
+  (values))
+
+(defun load-cabac-state (c state stats)
+  "Restore a snapshot taken by SAVE-CABAC-STATE."
+  (declare (type cabac c))
+  (replace (cb-state c) state)
+  (replace (cb-stat-coeff c) stats)
+  (values))
 
 (declaim (inline %renorm %read-bit))
 (defun %read-bit (br)

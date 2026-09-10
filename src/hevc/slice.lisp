@@ -51,6 +51,12 @@
   ;; set when the next quantisation group is the first of a tile, and so predicts its quantiser
   ;; from the slice's rather than from the unit decoded before it — which is in another tile
   (qp-reset nil)
+  ;; the wavefront snapshot: the context variables as they stood after the second coding tree block
+  ;; of the row above, which the row below starts from
+  (wpp-state (make-array +cabac-contexts+ :element-type '(unsigned-byte 8))
+   :type (simple-array (unsigned-byte 8) (*)))
+  (wpp-stats (make-array 4 :element-type '(signed-byte 32))
+   :type (simple-array (signed-byte 32) (*)))
   ;; the current coding unit, as the syntax elements that outlive one function
   (cu-x 0 :type fixnum) (cu-y 0 :type fixnum)
   (cu-log2 0 :type fixnum)
@@ -1166,8 +1172,6 @@
    exists.  The check that matters is that end_of_slice_segment_flag comes up exactly at the last
    coding tree unit of the slice: a syntax error anywhere desynchronises the arithmetic decoder,
    and a desynchronised decoder does not stop in the right place."
-  (when (pps-entropy-coding-sync pps)
-    (%err "wavefront entropy coding is not supported"))
   (when (sh-dependent sh)
     (%err "dependent slice segments are not supported"))
   (when (and (not (sh-i-slice-p sh)) (zerop (length (or list0 #()))))
@@ -1178,6 +1182,7 @@
          (wide (sps-ctbs-wide sps))
          (total (sps-ctbs sps))
          (log2 (sps-ctb-log2 sps))
+         (wpp (pps-entropy-coding-sync pps))
          (n 0))
     (declare (type fixnum n))
     (destructuring-bind (tile-id ts->rs rs->ts) (%tiling sps pps)
@@ -1203,6 +1208,19 @@
                   (cx-qp-y-prev c) (sh-qp sh)
                   (cx-qp c) (sh-qp sh)
                   (cx-qp-reset c) t))
+          ;; A WAVEFRONT ROW is a new substream too, but not a new everything.  It restarts the
+          ;; arithmetic decoder at a byte boundary and then INHERITS its context variables from two
+          ;; coding tree blocks into the row above — enough adaptation to be worth having, and a
+          ;; short enough lag that the row below can start once the row above is two blocks in,
+          ;; which is the whole point.  A picture one block wide has no such row and starts fresh.
+          (when (and wpp (plusp n) (zerop (mod ts wide)))
+            (reinit-cabac-engine cab)
+            (if (= wide 1)
+                (init-cabac-state cab (sh-qp sh) (sh-type sh) (sh-cabac-init sh))
+                (load-cabac-state cab (cx-wpp-state c) (cx-wpp-stats c)))
+            (setf (cx-qp-y-prev c) (sh-qp sh)
+                  (cx-qp c) (sh-qp sh)
+                  (cx-qp-reset c) t))
           (setf (aref (cx-ctb-slice c) addr) (cx-slice-addr c)
                 (aref (pic-ctb-slice pic) addr) (cx-slice-addr c)
                 (aref (pic-ctb-across pic) addr) (if (sh-loop-filter-across-slices sh) 1 0)
@@ -1219,6 +1237,8 @@
           (%sao c addr rx ry)
           (%coding-quadtree c (ash rx log2) (ash ry log2) log2 0)
           (incf n)
+          (when (and wpp (= 1 (mod ts wide)))
+            (save-cabac-state cab (cx-wpp-state c) (cx-wpp-stats c)))
           (when (= 1 (decode-terminate cab))
             ;; T: the slice said it was finished.  A slice segment covers only its own run of
             ;; coding tree units, so how many that is says nothing about whether the parse was
@@ -1227,6 +1247,7 @@
           ;; end_of_subset_one_bit, which is a terminate bin that is always 1, sits between two
           ;; substreams and is read only when one actually ends here
           (when (and (< (1+ ts) total)
-                     (/= (aref tile-id (aref ts->rs (1+ ts))) (aref tile-id addr)))
+                     (or (/= (aref tile-id (aref ts->rs (1+ ts))) (aref tile-id addr))
+                         (and wpp (zerop (mod (1+ ts) wide)))))
             (decode-terminate cab)))))
     (values c n nil)))

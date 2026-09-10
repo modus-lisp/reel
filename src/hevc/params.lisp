@@ -422,12 +422,15 @@
   (unless (= 1 (sps-chroma-format s))
     (%err "chroma_format_idc ~d (~a); this decodes 4:2:0" (sps-chroma-format s)
           (case (sps-chroma-format s) (0 "monochrome") (2 "4:2:2") (3 "4:4:4") (t "unknown"))))
-  (unless (<= 8 (sps-bit-depth-luma s) 16)
-    (%err "~d-bit luma, which is outside what a sample can hold here"
-          (sps-bit-depth-luma s)))
-  (unless (<= 8 (sps-bit-depth-chroma s) 16)
-    (%err "~d-bit chroma, which is outside what a sample can hold here"
-          (sps-bit-depth-chroma s)))
+  ;; THE MACHINERY FOR DEEPER SAMPLES IS ALL HERE and every shift below derives its constant from
+  ;; the picture's own depth rather than assuming eight.  It is not turned on because six of the
+  ;; conformance streams still decode wrongly at ten bits and they share no feature that could be
+  ;; refused instead — so accepting the depth would mean silently wrong pictures for content this
+  ;; cannot name in advance, which is the one thing this decoder does not do.  See FORMATS.md for
+  ;; what is verified working and what is not.
+  (unless (and (= 8 (sps-bit-depth-luma s)) (= 8 (sps-bit-depth-chroma s)))
+    (%err "~d-bit luma and ~d-bit chroma; this decodes eight"
+          (sps-bit-depth-luma s) (sps-bit-depth-chroma s)))
   (when (plusp (sps-width s))
     (unless (and (zerop (mod (sps-width s) (ash 1 (sps-min-cb-log2 s))))
                  (zerop (mod (sps-height s) (ash 1 (sps-min-cb-log2 s)))))

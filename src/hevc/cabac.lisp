@@ -67,6 +67,20 @@
           (cb-offset c) (ub br 9))
     c))
 
+(defun reinit-cabac-engine (c)
+  "Restart the arithmetic decoder mid-slice, at the next byte boundary, KEEPING THE CONTEXTS.
+
+   Only PCM needs this.  A PCM block's samples are in the bitstream verbatim, not arithmetic-coded,
+   so the engine has to be stood down for them and stood back up afterwards — but the context
+   variables it was adapting are the slice's, not the block's, and the standard is explicit that
+   they survive.  Resetting them as well decodes the rest of the slice into plausible nonsense."
+  (declare (type cabac c))
+  (let ((br (cb-br c)))
+    (byte-align br)
+    (setf (cb-range c) 510
+          (cb-offset c) (ub br 9)))
+  c)
+
 (declaim (inline %renorm %read-bit))
 (defun %read-bit (br)
   (declare (optimize (speed 3) (safety 0)))

@@ -617,6 +617,54 @@
                               (aref (pic-blk-nofilt pic) i) nofilt))))
     ))
 
+(defun %pcm-sample (c x0 y0 size)
+  "pcm_sample (7.3.8.7): a coding unit sent as samples rather than as a prediction and a residual.
+
+   It exists for content the transform makes BIGGER — noise, and synthetic patterns with no spatial
+   correlation to exploit — and it is the one escape hatch that bounds a coding unit's worst case.
+   Everything about it is an interruption: the arithmetic decoder stands down, the samples are read
+   straight out of the bitstream at whatever depth the sequence parameter set chose, and the engine
+   is stood back up afterwards with its context variables intact, because those belong to the slice
+   and not to this block.
+
+   The samples may be sent at FEWER bits than the picture carries, in which case they are shifted
+   up rather than scaled: a 6-bit PCM sample in an 8-bit picture is a multiple of four."
+  (declare (type ctx c) (type fixnum x0 y0 size))
+  (let* ((sps (cx-sps c))
+         (pic (cx-pic c))
+         (br (cb-br (cx-cabac c)))
+         (dl (sps-pcm-bit-depth-luma sps))
+         (dc (sps-pcm-bit-depth-chroma sps))
+         (cs (ash size -1)))
+    (declare (type fixnum dl dc cs))
+    ;; pcm_alignment_zero_bit: the arithmetic decoder's last bit was the codeword's, and the samples
+    ;; begin at the next byte boundary
+    (byte-align br)
+    (let ((plane (pic-plane pic 0)) (stride (pic-stride pic 0)))
+      (loop for y of-type fixnum from y0 below (+ y0 size)
+            do (loop for x of-type fixnum from x0 below (+ x0 size)
+                     do (setf (aref plane (+ (* y stride) x)) (ash (ub br dl) (- 8 dl))))))
+    (dotimes (k 2)
+      (let ((plane (pic-plane pic (1+ k))) (stride (pic-stride pic (1+ k)))
+            (cx0 (ash x0 -1)) (cy0 (ash y0 -1)))
+        (loop for y of-type fixnum from cy0 below (+ cy0 cs)
+              do (loop for x of-type fixnum from cx0 below (+ cx0 cs)
+                       do (setf (aref plane (+ (* y stride) x)) (ash (ub br dc) (- 8 dc)))))))
+    ;; what the loop filters need to know: the quantiser, and that a block sent exactly must come
+    ;; out exactly if the sequence parameter set says so
+    (let ((w (pic-blk-w pic))
+          ;; EITHER exemption applies: a PCM unit may also have been sent transquant bypass, and
+          ;; both mean the same thing to the filter — these samples are already exactly what the
+          ;; encoder had, so touching them can only move them away from it
+          (nofilt (if (or (sps-pcm-loop-filter-disabled sps) (cx-cu-transquant-bypass c)) 1 0)))
+      (loop for y of-type fixnum from y0 below (+ y0 size) by 8
+            do (loop for x of-type fixnum from x0 below (+ x0 size) by 8
+                     do (let ((i (+ (* (ash y -3) w) (ash x -3))))
+                          (setf (aref (pic-blk-qp pic) i) (max 0 (min 255 (cx-qp c)))
+                                (aref (pic-blk-nofilt pic) i) nofilt)))))
+    (%mark-edges c x0 y0 size size 3)
+    (reinit-cabac-engine (cx-cabac c))))
+
 (defun %mark-edges (c x0 y0 w h kind)
   "Mark this block's left and top edges as ones the deblocking filter should consider.
 
@@ -887,7 +935,12 @@
                (>= log2-size (sps-pcm-min-cb-log2 sps))
                (<= log2-size (sps-pcm-max-cb-log2 sps)))
       (when (= 1 (decode-terminate (cx-cabac c)))
-        (%err "PCM coding units are not supported")))
+        ;; a PCM unit predicts nothing, so its neighbours are told it used DC — the mode a block
+        ;; with no directional information should lend
+        (%set-intra-mode c x0 y0 size 1)
+        (%derive-qp c)
+        (%pcm-sample c x0 y0 size)
+        (return-from %coding-unit 0)))
     (let* ((n (if (= (cx-part-mode c) 3) 2 1))
            (pb (ash size (if (= n 2) -1 0)))
            (prev (make-array 4)) (mpm (make-array 4 :initial-element 0))

@@ -373,8 +373,17 @@
     ;; not have.
     (when (= 1 (u1 br))                         ; vui_parameters_present_flag
       (%skip-vui br (1- (sps-max-sub-layers s))))
-    (when (= 1 (u1 br))                         ; sps_extension_present_flag
-      (let ((range (= 1 (u1 br))))
+    ;; AND THE EXTENSION FLAGS ARE READ ONLY IF THEY FIT.  The first version of this standard put
+    ;; a single sps_extension_flag here followed by arbitrary data to the end of the payload, and
+    ;; the version that added the range extensions redefined those bits as four named flags and a
+    ;; four-bit remainder.  A stream written to test that a decoder SKIPS data it does not
+    ;; understand — which is exactly what EXT_A is for — therefore has bits here that are not the
+    ;; later structure at all.  Reading them anyway runs off the end of the payload, and a parse
+    ;; error is not a refusal: it says the stream is broken when it is this decoder that is old.
+    (when (and (plusp (- (br-end br) (br-bit br)))
+               (= 1 (u1 br)))                   ; sps_extension_present_flag
+      (when (>= (- (br-end br) (br-bit br)) 8)
+       (let ((range (= 1 (u1 br))))
         (u1 br)                                 ; sps_multilayer_extension_flag
         (u1 br)                                 ; sps_3d_extension_flag
         (let ((scc (= 1 (u1 br))))
@@ -385,7 +394,7 @@
           ;; their presence turns four streams that decode exactly into four that decode not at
           ;; all.  The range and screen-content extensions are different: those change how THIS
           ;; layer is coded, so a stream that uses one and is decoded without it is decoded wrong.
-          (when range
+          (when (and range (>= (- (br-end br) (br-bit br)) 9))
             (dolist (name '("transform_skip_rotation" "transform_skip_context" "implicit_rdpcm"
                             "explicit_rdpcm" "extended_precision_processing"
                             "intra_smoothing_disabled" "high_precision_offsets"
@@ -393,7 +402,7 @@
               (when (= 1 (u1 br))
                 (%err "~a is a range extension tool this does not implement" name))))
           (when scc
-            (%err "the screen content coding extension is not supported")))))
+            (%err "the screen content coding extension is not supported"))))))
     (%check-sps s)
     s))
 

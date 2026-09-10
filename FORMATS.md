@@ -17,7 +17,7 @@ as data.
 |---|---|
 | **VP8**, key and inter frames | libvpx, bit-exact on eight clips and on Big Buck Bunny |
 | **H.264 Baseline, Main and High** | 69 of the JVT conformance streams bit-exact, plus ffmpeg's output on a 7672-frame YouTube file and 300 frames of 640x360 High profile, every frame |
-| **HEVC / H.265**, Main profile | 107 of the JCT-VC conformance streams bit-exact, whole streams, 1306 frames |
+| **HEVC / H.265**, Main profile | 136 of the JCT-VC conformance streams bit-exact, whole streams, 1573 frames |
 | **MPEG-1 and MPEG-2 video** | ffmpeg, bit-exact on thirteen fixtures, every frame |
 | **MPEG-4 Part 2** (DivX, XviD) | ffmpeg, bit-exact on eleven fixtures, every frame |
 | **WebM and Matroska** | they are the same demuxer; `.mkv` with H.264 decodes today |
@@ -116,13 +116,14 @@ because nobody knows to disbelieve it.
   on rather than on the profile that permits it, so a High profile stream using none of them decodes
   here. Multiple slices per picture, I_PCM macroblocks and both remaining `pic_order_cnt_type`s are
   decoded, not refused.
-- HEVC: tiles and wavefront entropy coding, PCM coding units, long-term references, more than 8
-  bits per sample, 4:2:2 and 4:4:4, dependent slice segments, weighted prediction, and reference
-  picture list modification. As with H.264 each is refused on the flag that turns it on, so a Main
-  profile stream using none of them decodes here — which is 107 of the 186 conformance streams.
-  Multiple slices per picture, both loop filters, all four asymmetric partitions, temporal motion
-  vector prediction and random access from a clean point rather than an IDR are decoded, not
-  refused.
+- HEVC: dependent slice segments, more than 8 bits per sample, long-term references, the range
+  extension tools, weighted prediction, reference picture list modification, and 4:2:2 and 4:4:4.
+  As with H.264 each is refused on the flag that turns it on, so a Main profile stream using none
+  of them decodes here — which is 136 of the 186 conformance streams. Tiles, wavefront entropy
+  coding, PCM coding units, multiple slices per picture, both loop filters, all four asymmetric
+  partitions, temporal motion vector prediction and random access from a clean point rather than
+  an IDR are decoded, not refused. The multilayer and 3D extensions are NOT refused: they describe
+  other layers, and a stereo stream's base layer is ordinary HEVC that this decodes exactly.
 - MPEG-2: field pictures, dual-prime motion vectors, and anything but 4:2:0.
 - MPEG-4 Part 2: sprites and global motion, interlaced objects, data partitioning, scalability, and
   arbitrary shapes. Also Microsoft's pre-standard MPEG-4 variants (DIV3, MP42), which share a name
@@ -276,15 +277,15 @@ What remains, which is the honest part:
 
 It was listed here as not worth it — larger than all of H.264 put together, and VP9 cheaper for a
 decoder that wanted one more modern codec. That was a fair estimate of the size and a wrong one of
-the value. It is built: 107 of the 186 JCT-VC conformance streams decode whole and bit-exact,
-sixteen frames each, both loop filters on, 1306 frames in total, with zero wrong.
+the value. It is built: 136 of the 186 JCT-VC conformance streams decode whole and bit-exact,
+sixteen frames each, both loop filters on, 1573 frames in total, with zero wrong.
 
-The other 79 are refused by name, and the list is the honest statement of what is missing: tiles
-and wavefront entropy coding (31), PCM coding units (11), long-term references (11), 10-bit and
-mixed bit depths (12), 4:4:4 and 4:2:2 (7), dependent slice segments (3), weighted prediction (2),
-reference picture list modification (2).
+The other 50 are refused by name, and the list is the honest statement of what is missing:
+dependent slice segments (14), 10-bit and mixed bit depths (12), long-term references (10), the
+range extension tools (8), weighted prediction (3), reference picture list modification (2). Tiles
+and wavefront entropy coding, which were the largest group, are built.
 
-Four things generalise beyond this codec.
+Five things generalise beyond this codec.
 
 - **Read the reference implementation, not your memory of the standard.** Half a day went into
   rewriting AMVP from memory, which made the stream it was meant to fix measurably worse. Every
@@ -306,6 +307,11 @@ Four things generalise beyond this codec.
   presented as 86 per cent of three frames wrong. Cross-comparing every picture against every
   reference frame — rather than comparing frame k to frame k — is what said so in one measurement.
   The cause was that a sub-layer non-reference picture must not update the order count predictors.
+- **A parse error is not a refusal, and neither is a wrong decode.** Both misattribute the problem.
+  A stream written to check that a decoder SKIPS extension data it does not understand was read as
+  though its bits were a structure invented afterwards, ran off the end of its payload, and was
+  reported as a broken stream when the decoder was the older party. Refusing on the flag that turns
+  a tool on is only half the discipline; the other half is not claiming a fault that is yours.
 
 ## Not worth it, and why
 

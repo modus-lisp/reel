@@ -181,10 +181,15 @@
       (unless (> dist threshold) (return-from %filter-references nil))
       (let ((n2 (* 2 n)))
         (declare (type fixnum n2))
+        ;; "nearly straight" is a distance between SAMPLES, so the threshold has to grow with the
+        ;; range they live in: one part in thirty-two of full scale, which is 8 at eight bits and
+        ;; 32 at ten.  Holding it at 8 makes a ten-bit gradient look bent and takes the strong
+        ;; filter off exactly the flat areas it exists for.
         (if (and (sps-strong-intra-smoothing (cx-sps c))
                  (= n 32)
-                 (< (abs (- (+ (aref top 0) (aref top n2)) (* 2 (aref top n)))) 8)
-                 (< (abs (- (+ (aref left 0) (aref left n2)) (* 2 (aref left n)))) 8))
+                 (let ((flat (ash 1 (- (sps-bit-depth-luma (cx-sps c)) 5))))
+                   (and (< (abs (- (+ (aref top 0) (aref top n2)) (* 2 (aref top n)))) flat)
+                        (< (abs (- (+ (aref left 0) (aref left n2)) (* 2 (aref left n)))) flat))))
             ;; STRONG SMOOTHING: the reference line is already nearly straight, so replace it with
             ;; the straight line exactly.  Filtering a gradient with [1 2 1] leaves a faint stair
             ;; that a 32x32 flat area shows as banding; this is the fix for that and nothing else.
@@ -249,7 +254,7 @@
         (loop for y from 1 below n
               do (setf (aref pred (* y n)) (ash (+ (aref left (1+ y)) (* 3 dc) 2) -2)))))))
 
-(defun %predict-angular (pred n c-idx mode top left)
+(defun %predict-angular (pred n c-idx mode top left maxv)
   "The thirty-three angular modes (8.4.4.2.6).
 
    One reference LINE is built — the top edge for the near-vertical modes, the left for the
@@ -258,7 +263,7 @@
    them onto this line; that projection is the part with no counterpart in H.264 at all."
   (declare (type (simple-array (signed-byte 32) (*)) pred)
            (type (simple-array (unsigned-byte 16) (*)) top left)
-           (type fixnum n c-idx mode) (optimize (speed 3) (safety 1)))
+           (type fixnum n c-idx mode maxv) (optimize (speed 3) (safety 1)))
   (let* ((angle (aref +intra-pred-angle+ mode))
          (vertical (>= mode 18))
          (main (if vertical top left))
@@ -296,7 +301,7 @@
             (let* ((at (if (= mode 26) (* i n) i))
                    (v (+ (aref main 1) (ash (- (aref side (1+ i)) corner) -1))))
               (declare (type fixnum v))
-              (setf (aref pred at) (max 0 (min 255 v))))))))))
+              (setf (aref pred at) (max 0 (min maxv v))))))))))
 
 (defun %intra-predict (c pic x0 y0 log2-size c-idx mode pred)
   "Fill PRED, nTbS by nTbS in raster order, with the prediction MODE calls for."
@@ -305,12 +310,15 @@
            (optimize (speed 3) (safety 1)))
   (let* ((n (ash 1 log2-size))
          (n2 (* 2 n))
-         (top (make-array (1+ n2) :element-type '(unsigned-byte 16) :initial-element 128))
-         (left (make-array (1+ n2) :element-type '(unsigned-byte 16) :initial-element 128)))
+         ;; WHEN NOTHING IS AVAILABLE THE REFERENCES ARE THE MIDDLE OF THE RANGE, which is 128 only
+         ;; at eight bits.  A ten-bit block with no decoded neighbour predicts from 512.
+         (neutral (ash 1 (1- (pic-bd pic c-idx))))
+         (top (make-array (1+ n2) :element-type '(unsigned-byte 16) :initial-element neutral))
+         (left (make-array (1+ n2) :element-type '(unsigned-byte 16) :initial-element neutral)))
     (declare (type fixnum n n2) (dynamic-extent top left))
     (when (%gather-references c pic x0 y0 log2-size c-idx top left)
       (%filter-references c log2-size c-idx mode top left))
     (case mode
       (0 (%predict-planar pred n log2-size top left))
       (1 (%predict-dc pred n log2-size c-idx top left))
-      (t (%predict-angular pred n c-idx mode top left)))))
+      (t (%predict-angular pred n c-idx mode top left (pic-max pic c-idx))))))

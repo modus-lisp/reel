@@ -97,7 +97,8 @@
                  (let ((ref (aref list idx))
                        (mvx (aref mv (* 4 lx))) (mvy (aref mv (+ (* 4 lx) 1))))
                    (%mc-luma buf w h (pic-y ref) (pic-ystride ref)
-                             (pic-width ref) (pic-height ref) x0 y0 mvx mvy)
+                             (pic-width ref) (pic-height ref) x0 y0 mvx mvy
+                             (pic-bd-luma pic))
                    ref)))))
       (cond
         (bi
@@ -105,13 +106,15 @@
            (one 0 a) (one 1 b)
            (multiple-value-bind (w0 o0 dn) (%weight c 0 r0 0)
              (multiple-value-bind (w1 o1) (%weight c 1 r1 0)
-               (%write-bi (pic-y pic) (pic-ystride pic) x0 y0 w h a b w0 o0 w1 o1 dn)))
+               (%write-bi (pic-y pic) (pic-ystride pic) x0 y0 w h a b
+                          (pic-bd-luma pic) w0 o0 w1 o1 dn)))
            (%mc-chroma-pair c x0 y0 w h mv t)))
         (t
          (let ((lx (if (>= r0 0) 0 1)) (a (cx-p0 c)))
            (when (one lx a)
              (multiple-value-bind (wt off dn) (%weight c lx (aref mv (+ (* 4 lx) 2)) 0)
-               (%write-uni (pic-y pic) (pic-ystride pic) x0 y0 w h a wt off dn))
+               (%write-uni (pic-y pic) (pic-ystride pic) x0 y0 w h a
+                           (pic-bd-luma pic) wt off dn))
              (%mc-chroma-pair c x0 y0 w h mv nil))))))))
 
 (defun %mc-chroma-pair (c x0 y0 w h mv bi)
@@ -134,19 +137,22 @@
                        (%mc-chroma buf cw ch rp (pic-cstride ref)
                                    (ash (pic-width ref) -1) (ash (pic-height ref) -1)
                                    cx0 cy0
-                                   (aref mv (* 4 lx)) (aref mv (+ (* 4 lx) 1)))
+                                   (aref mv (* 4 lx)) (aref mv (+ (* 4 lx) 1))
+                                   (pic-bd-chroma pic))
                        t)))))
           (if bi
               (let ((a (cx-p0 c)) (b (cx-p1 c)))
                 (one 0 a) (one 1 b)
                 (multiple-value-bind (w0 o0 dn) (%weight c 0 (aref mv 2) (1+ plane))
                   (multiple-value-bind (w1 o1) (%weight c 1 (aref mv 6) (1+ plane))
-                    (%write-bi dst (pic-cstride pic) cx0 cy0 cw ch a b w0 o0 w1 o1 dn))))
+                    (%write-bi dst (pic-cstride pic) cx0 cy0 cw ch a b
+                               (pic-bd-chroma pic) w0 o0 w1 o1 dn))))
               (let ((lx (if (>= (aref mv 2) 0) 0 1)) (a (cx-p0 c)))
                 (when (one lx a)
                   (multiple-value-bind (wt off dn)
                       (%weight c lx (aref mv (+ (* 4 lx) 2)) (1+ plane))
-                    (%write-uni dst (pic-cstride pic) cx0 cy0 cw ch a wt off dn))))))))))
+                    (%write-uni dst (pic-cstride pic) cx0 cy0 cw ch a
+                                (pic-bd-chroma pic) wt off dn))))))))))
 
 (defun %prediction-unit (c x0 y0 w h part-idx skip)
   "One prediction unit (7.3.8.6): read its motion, store it, and predict from it."

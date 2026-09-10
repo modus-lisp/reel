@@ -609,11 +609,14 @@
 
 (defun %qp-for (c c-idx)
   "The quantiser this component's residual was scaled by (8.6.1)."
-  (let ((sh (cx-sh c)) (pps (cx-pps c)) (qp (cx-qp c)))
+  (let* ((sh (cx-sh c)) (pps (cx-pps c)) (sps (cx-sps c)) (qp (cx-qp c))
+         (bdy (* 6 (- (sps-bit-depth-luma sps) 8)))
+         (bdc (* 6 (- (sps-bit-depth-chroma sps) 8))))
+    ;; what dequantisation wants is Qp' -- the quantiser with its bit-depth offset added back on
     (case c-idx
-      (0 qp)
-      (1 (%chroma-qp qp (+ (pps-cb-qp-offset pps) (sh-cb-qp-offset sh))))
-      (t (%chroma-qp qp (+ (pps-cr-qp-offset pps) (sh-cr-qp-offset sh)))))))
+      (0 (+ qp bdy))
+      (1 (%chroma-qp qp (+ (pps-cb-qp-offset pps) (sh-cb-qp-offset sh)) bdc))
+      (t (%chroma-qp qp (+ (pps-cr-qp-offset pps) (sh-cr-qp-offset sh)) bdc)))))
 
 (defun %reconstruct (c x0 y0 log2-size c-idx mode residual-p transform-skip)
   "Predict this transform block, add its residual if it has one, and write it to the picture.
@@ -628,8 +631,9 @@
          (pred (cx-pred c))
          (coeffs (cx-coeffs c))
          (plane (pic-plane pic c-idx))
-         (stride (pic-stride pic c-idx)))
-    (declare (type fixnum n stride))
+         (stride (pic-stride pic c-idx))
+         (maxv (pic-max pic c-idx)))
+    (declare (type fixnum n stride maxv))
     (if (cx-cu-intra c)
         (%intra-predict c pic x0 y0 log2-size c-idx mode pred)
         ;; an INTER block's prediction was written straight into the picture by motion
@@ -649,13 +653,14 @@
              (dc (and sl (>= log2-size 4) (aref (sl-dc sl) (- log2-size 4) mid))))
         (if (cx-cu-transquant-bypass c)
             nil                                 ; the levels ARE the residual, unscaled
-            (%dequantise coeffs (* n n) log2-size qp 8 matrix dc))
+            (%dequantise coeffs (* n n) log2-size qp (pic-bd (cx-pic c) c-idx) matrix dc))
         (cond ((cx-cu-transquant-bypass c) nil)
-              (transform-skip (%transform-skip coeffs (* n n) log2-size 8))
+              (transform-skip
+               (%transform-skip coeffs (* n n) log2-size (pic-bd (cx-pic c) c-idx)))
               (t (%inverse-transform coeffs (cx-scratch c) log2-size
                                      ;; the DST is for 4x4 intra LUMA only
                                      (and (= log2-size 2) (zerop c-idx) (cx-cu-intra c))
-                                     8)))))
+                                     (pic-bd (cx-pic c) c-idx))))))
     (dotimes (y n)
       (let ((row (+ (* (+ y0 y) stride) x0)))
         (declare (type fixnum row))
@@ -663,7 +668,7 @@
           (let ((v (aref pred (+ (* y n) x))))
             (declare (type fixnum v))
             (when residual-p (incf v (aref coeffs (+ (* y n) x))))
-            (setf (aref plane (+ row x)) (max 0 (min 255 v)))))))
+            (setf (aref plane (+ row x)) (max 0 (min maxv v)))))))
     (when (zerop c-idx)
       (when residual-p
         (let ((p (cx-pic c)))
@@ -713,13 +718,15 @@
     (let ((plane (pic-plane pic 0)) (stride (pic-stride pic 0)))
       (loop for y of-type fixnum from y0 below (+ y0 size)
             do (loop for x of-type fixnum from x0 below (+ x0 size)
-                     do (setf (aref plane (+ (* y stride) x)) (ash (ub br dl) (- 8 dl))))))
+                     do (setf (aref plane (+ (* y stride) x))
+                              (ash (ub br dl) (- (pic-bd-luma pic) dl))))))
     (dotimes (k 2)
       (let ((plane (pic-plane pic (1+ k))) (stride (pic-stride pic (1+ k)))
             (cx0 (ash x0 -1)) (cy0 (ash y0 -1)))
         (loop for y of-type fixnum from cy0 below (+ cy0 cs)
               do (loop for x of-type fixnum from cx0 below (+ cx0 cs)
-                       do (setf (aref plane (+ (* y stride) x)) (ash (ub br dc) (- 8 dc)))))))
+                       do (setf (aref plane (+ (* y stride) x))
+                                (ash (ub br dc) (- (pic-bd-chroma pic) dc)))))))
     ;; what the loop filters need to know: the quantiser, and that a block sent exactly must come
     ;; out exactly if the sequence parameter set says so
     (let ((w (pic-blk-w pic))
@@ -844,7 +851,11 @@
                      (= (logand (1- yq) ctb-mask) (logand yq ctb-mask)))
                 (aref (cx-qp-y c) (+ (* (ash (1- yq) (- s)) w) (ash xq (- s))))
                 prev))
-         (qp (mod (+ (ash (+ a b 1) -1) (cx-cu-qp-delta c) 52) 52)))
+         ;; THE RANGE IS EXTENDED DOWNWARDS BY QpBdOffsetY, six per bit of depth above eight.  The
+         ;; wrap is stated over the whole extended range and the result is shifted back below zero,
+         ;; so a ten-bit picture's quantiser runs from -12 to 51 and the modulus is 64, not 52.
+         (bdo (* 6 (- (sps-bit-depth-luma sps) 8)))
+         (qp (- (mod (+ (ash (+ a b 1) -1) (cx-cu-qp-delta c) 52 (* 2 bdo)) (+ 52 bdo)) bdo)))
     (setf (cx-qp c) qp)
     (let ((n (ash (ash 1 (cx-cu-log2 c)) (- s))))
       (dotimes (j n)
@@ -860,7 +871,7 @@
     (let* ((pic (cx-pic c))
            (bw (pic-blk-w pic))
            (size (ash 1 (cx-cu-log2 c)))
-           (v (max 0 (min 255 qp))))
+           (v qp))
       (declare (type fixnum bw size v))
       (loop for y of-type fixnum from (cx-cu-y c) below (+ (cx-cu-y c) size) by 8
             do (loop for x of-type fixnum from (cx-cu-x c) below (+ (cx-cu-x c) size) by 8

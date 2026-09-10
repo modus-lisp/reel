@@ -42,7 +42,10 @@
   (bs-vw 0 :type fixnum) (bs-hw 0 :type fixnum)
   ;; per eight-by-eight luma block: the quantiser it was reconstructed at, and whether it is
   ;; exempt from filtering at all (PCM with the filter disabled, or a transquant bypass block)
-  (blk-qp (make-array 0 :element-type '(unsigned-byte 8)) :type samples)
+  ;; QpY per eight-by-eight block, SIGNED: deeper samples extend the quantiser downwards, so a
+  ;; ten-bit picture's runs from -12 rather than from zero
+  (blk-qp (make-array 0 :element-type '(signed-byte 16))
+   :type (simple-array (signed-byte 16) (*)))
   (blk-nofilt (make-array 0 :element-type 'bit) :type simple-bit-vector)
   (blk-w 0 :type fixnum)
   ;; per coding tree block: the slice that coded it, its deblocking controls, and its SAO table
@@ -90,26 +93,42 @@
   (intra (make-array 0 :element-type 'bit) :type simple-bit-vector)
   ;; and true where its transform block carried any non-zero coefficient, which is one of the
   ;; three things the deblocking filter's boundary strength is derived from
-  (cbf (make-array 0 :element-type 'bit) :type simple-bit-vector))
+  (cbf (make-array 0 :element-type 'bit) :type simple-bit-vector)
+  ;; LUMA AND CHROMA DEPTHS ARE SEPARATE NUMBERS.  They are usually equal and a decoder that keeps
+  ;; only one is right until it meets a stream that does not, which the suite has: ten-bit luma
+  ;; with nine-bit chroma.  Every shift, every clamp and every neutral value below is derived from
+  ;; whichever of these applies to the plane being touched.
+  (bd-luma 8 :type fixnum) (bd-chroma 8 :type fixnum))
+
+(declaim (inline pic-bd pic-max))
+(defun pic-bd (pic c-idx)
+  (if (zerop c-idx) (pic-bd-luma pic) (pic-bd-chroma pic)))
+(defun pic-max (pic c-idx)
+  "The largest value a sample of this component can take."
+  (1- (ash 1 (pic-bd pic c-idx))))
 
 (defun make-picture-for (sps)
   (let* ((w (sps-width sps)) (h (sps-height sps))
          (cw (floor w (sps-sub-width sps))) (ch (floor h (sps-sub-height sps))))
     (make-picture
+     :bd-luma (sps-bit-depth-luma sps) :bd-chroma (sps-bit-depth-chroma sps)
      :width w :height h
      :crop-x (* (sps-sub-width sps) (sps-conf-left sps))
      :crop-y (* (sps-sub-height sps) (sps-conf-top sps))
      :disp-width (sps-display-width sps) :disp-height (sps-display-height sps)
-     :y (make-array (* w h) :element-type '(unsigned-byte 16) :initial-element 128)
-     :u (make-array (* cw ch) :element-type '(unsigned-byte 16) :initial-element 128)
-     :v (make-array (* cw ch) :element-type '(unsigned-byte 16) :initial-element 128)
+     :y (make-array (* w h) :element-type '(unsigned-byte 16)
+                            :initial-element (ash 1 (1- (sps-bit-depth-luma sps))))
+     :u (make-array (* cw ch) :element-type '(unsigned-byte 16)
+                              :initial-element (ash 1 (1- (sps-bit-depth-chroma sps))))
+     :v (make-array (* cw ch) :element-type '(unsigned-byte 16)
+                              :initial-element (ash 1 (1- (sps-bit-depth-chroma sps))))
      :ystride w :cstride cw
      :bs-v (make-array (* (ash w -3) (ash h -2)) :element-type '(unsigned-byte 8)
                                                  :initial-element 0)
      :bs-h (make-array (* (ash w -2) (ash h -3)) :element-type '(unsigned-byte 8)
                                                  :initial-element 0)
      :bs-vw (ash w -3) :bs-hw (ash w -2)
-     :blk-qp (make-array (* (ash w -3) (ash h -3)) :element-type '(unsigned-byte 8)
+     :blk-qp (make-array (* (ash w -3) (ash h -3)) :element-type '(signed-byte 16)
                                                    :initial-element 26)
      :blk-nofilt (make-array (* (ash w -3) (ash h -3)) :element-type 'bit :initial-element 0)
      :blk-w (ash w -3)
@@ -170,7 +189,34 @@
   (if (zerop c-idx) (pic-ystride pic) (pic-cstride pic)))
 
 (defun picture->yuv420 (pic)
-  "The visible picture as tightly packed I420 octets, the conformance window applied."
+  "The visible picture as tightly packed I420, the conformance window applied.
+
+   Eight-bit video comes out one octet per sample; anything deeper comes out two, LITTLE ENDIAN,
+   which is what every tool in this area means by p010le and friends.  The two cases are written
+   separately because the narrow one is a row-at-a-time REPLACE and the wide one cannot be."
+  (if (and (= 8 (pic-bd-luma pic)) (= 8 (pic-bd-chroma pic)))
+      (%picture->yuv420-8 pic)
+      (%picture->yuv420-16 pic)))
+
+(defun %picture->yuv420-16 (pic)
+  (let* ((w (pic-disp-width pic)) (h (pic-disp-height pic))
+         (cw (ceiling w 2)) (ch (ceiling h 2))
+         (out (make-array (* 2 (+ (* w h) (* 2 cw ch))) :element-type '(unsigned-byte 8)))
+         (o 0))
+    (flet ((emit (v)
+             (setf (aref out o) (logand v 255)
+                   (aref out (1+ o)) (ash v -8))
+             (incf o 2)))
+      (let ((base (+ (* (pic-crop-y pic) (pic-ystride pic)) (pic-crop-x pic))))
+        (dotimes (y h)
+          (dotimes (x w) (emit (aref (pic-y pic) (+ base (* y (pic-ystride pic)) x))))))
+      (let ((base (+ (* (ash (pic-crop-y pic) -1) (pic-cstride pic)) (ash (pic-crop-x pic) -1))))
+        (dolist (plane (list (pic-u pic) (pic-v pic)))
+          (dotimes (y ch)
+            (dotimes (x cw) (emit (aref plane (+ base (* y (pic-cstride pic)) x))))))))
+    out))
+
+(defun %picture->yuv420-8 (pic)
   (let* ((w (pic-disp-width pic)) (h (pic-disp-height pic))
          (cw (ceiling w 2)) (ch (ceiling h 2))
          (out (make-array (+ (* w h) (* 2 cw ch)) :element-type '(unsigned-byte 8)))

@@ -24,14 +24,19 @@
   "qPi to QpC for 4:2:0, for qPi in 30..43.")
 (declaim (type (simple-array (signed-byte 32) (14)) +chroma-qp-table+))
 
-(defun %chroma-qp (qp-y offset)
-  "Qp'C from the luma quantiser and the picture's and slice's chroma offsets (8.6.1)."
-  (declare (type fixnum qp-y offset) (optimize (speed 3) (safety 1)))
-  (let ((qpi (max 0 (min 57 (+ qp-y offset)))))
+(defun %chroma-qp (qp-y offset &optional (bd-offset 0))
+  "Qp'C from the luma quantiser and the picture's and slice's chroma offsets (8.6.1).
+
+   BD-OFFSET is QpBdOffsetC, which the RESIDUAL path adds and the deblocking filter does not: the
+   filter indexes its threshold tables by a quantiser it clips to their range anyway, while
+   dequantisation needs the extended one that deeper samples actually use."
+  (declare (type fixnum qp-y offset bd-offset) (optimize (speed 3) (safety 1)))
+  (let ((qpi (max (- bd-offset) (min 57 (+ qp-y offset)))))
     (declare (type fixnum qpi))
-    (cond ((< qpi 30) qpi)
-          ((> qpi 43) (- qpi 6))
-          (t (aref +chroma-qp-table+ (- qpi 30))))))
+    (+ bd-offset
+       (cond ((< qpi 30) qpi)
+             ((> qpi 43) (- qpi 6))
+             (t (aref +chroma-qp-table+ (- qpi 30)))))))
 
 (defun %dequantise (coeffs n log2-size qp bit-depth &optional matrix dc)
   "Scale the decoded levels back up (8.6.3).

@@ -108,12 +108,19 @@ for f in "$CONF"/hevc/*.bit; do
     CONFWIN_A_Sony_1.bit) crop="crop=412:236:2:0" ;;
     *) crop="" ;;
   esac
+  # AND AT THE STREAM'S OWN DEPTH.  Forcing yuv420p on a ten-bit stream makes ffmpeg convert it,
+  # so the reference would be of something nobody decoded.  ffprobe reports the format it decodes
+  # to; a stream ffprobe cannot read at all leaves this empty and is skipped, which is the honest
+  # answer for a stream the oracle refuses.
+  pf=$(ffprobe -v error -select_streams v -show_entries stream=pix_fmt -of csv=p=0 "$f" 2>/dev/null | head -1)
+  case "$pf" in yuv420p|yuv420p10le|yuv420p12le) ;; *) pf="" ;; esac
+  [ -n "$pf" ] || continue
   if [ -n "$crop" ]; then
     ffmpeg -v error -y -i "$f" -frames:v 16 -vf "$crop" -fps_mode passthrough \
-      -pix_fmt yuv420p -f framecrc "$f.framecrc" 2>/dev/null || true
+      -pix_fmt "$pf" -f framecrc "$f.framecrc" 2>/dev/null || true
   else
     ffmpeg -v error -y -i "$f" -frames:v 16 -fps_mode passthrough \
-      -pix_fmt yuv420p -f framecrc "$f.framecrc" 2>/dev/null || true
+      -pix_fmt "$pf" -f framecrc "$f.framecrc" 2>/dev/null || true
   fi
 done
 

@@ -104,25 +104,27 @@
        (pop (dec-out d))))
     (t nil)))
 
-(defun %inherit-slice-header (d sh)
-  "Fill in what a DEPENDENT slice segment did not send.
+(defun inherit-slice-header (base sh)
+  "Fill in what a DEPENDENT slice segment did not send, from BASE, the last independent one.
 
    It sends its picture parameter set, its address, its entry points and its byte alignment, and
    nothing else: the slice type, the quantiser, the reference lists, the SAO flags and both
    deblocking offsets all belong to the last independent segment and are simply carried forward.
-   Which is why the flag has to be honoured at the picture level rather than in the parser — the
-   parser has no way of knowing what came before it."
+   Which is why the flag has to be honoured above the parser — the parser has no way of knowing
+   what came before it, so anything that walks slice segments has to do this itself."
   (if (not (sh-dependent sh))
       sh
-      (let ((base (or (dec-indep-sh d)
-                      (%err "a dependent slice segment with no independent one before it"))))
-        (let ((merged (copy-slice base)))
-          (setf (sh-dependent merged) t
-                (sh-first-in-pic merged) nil
-                (sh-nal merged) (sh-nal sh)
-                (sh-segment-address merged) (sh-segment-address sh)
-                (sh-entry-points merged) (sh-entry-points sh))
-          merged))))
+      (let ((merged (copy-slice
+                     (or base (%err "a dependent slice segment with no independent one before it")))))
+        (setf (sh-dependent merged) t
+              (sh-first-in-pic merged) nil
+              (sh-nal merged) (sh-nal sh)
+              (sh-segment-address merged) (sh-segment-address sh)
+              (sh-entry-points merged) (sh-entry-points sh))
+        merged)))
+
+(defun %inherit-slice-header (d sh)
+  (inherit-slice-header (dec-indep-sh d) sh))
 
 (defun %collocated (d sh)
   "The picture a temporal merge candidate comes from, named by list and index in the slice header."

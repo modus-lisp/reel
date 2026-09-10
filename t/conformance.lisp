@@ -194,7 +194,10 @@
    because a single misread syntax element desynchronises the arithmetic decoder and a
    desynchronised decoder does not stop in the right place."
   (let ((pics 0) (good 0) (why nil) (refusal nil)
-        (any nil) (inter nil) (covered 0) (broke nil) (total 0))
+        (any nil) (inter nil) (covered 0) (broke nil) (total 0)
+        ;; a dependent segment inherits its header from the last independent one and CONTINUES its
+        ;; context, so walking slice segments means carrying both along
+        (indep nil) (ctx nil))
     (labels ((finish ()
                ;; a picture with a P or B slice in it is not something this can decode yet, so it
                ;; is not counted either way
@@ -215,16 +218,19 @@
                (setf (gethash (reel.hevc:pps-id pp) ppss) pp)))
             ((reel.hevc:nal-slice-p nal)
              (let* ((br (reel.hevc:make-bitreader (reel.hevc:nal-rbsp nal)))
-                    (sh (reel.hevc:parse-slice-header br nal spss ppss)))
-               (when (reel.hevc:sh-first-in-pic sh) (finish))
+                    (sh (reel.hevc::inherit-slice-header
+                         indep (reel.hevc:parse-slice-header br nal spss ppss))))
+               (when (reel.hevc:sh-first-in-pic sh) (finish) (setf indep nil ctx nil))
+               (unless (reel.hevc::sh-dependent sh) (setf indep sh))
                (setf total (reel.hevc:sps-ctbs (reel.hevc::sh-sps sh)) any t)
                (if (not (reel.hevc:sh-i-slice-p sh))
                    (setf inter t)
                    (handler-case
                        (multiple-value-bind (c n term)
                            (reel.hevc:decode-slice-data (reel.hevc::sh-sps sh)
-                                                        (reel.hevc::sh-pps sh) sh br)
-                         (declare (ignore c))
+                                                        (reel.hevc::sh-pps sh) sh br
+                                                        nil nil nil nil ctx)
+                         (setf ctx c)
                          (if term (incf covered n) (setf broke t)))
                      ;; a refusal names a tool this does not implement; it is not a wrong answer
                      (reel.hevc:hevc-error (e)

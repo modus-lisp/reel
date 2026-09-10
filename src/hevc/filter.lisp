@@ -59,7 +59,7 @@
    bypass, or PCM with the filter disabled — must come out exactly, but that says nothing about the
    block on the OTHER side of the edge, which is still filtered against it.  Suppressing the whole
    edge instead is wrong on one side either way."
-  (declare (type (simple-array (unsigned-byte 8) (*)) plane)
+  (declare (type (simple-array (unsigned-byte 16) (*)) plane)
            (type fixnum base step line-step bs qp beta-off tc-off)
            (optimize (speed 3) (safety 1)))
   (let* ((beta (aref +beta-table+ (%clip3 0 51 (+ qp beta-off))))
@@ -143,7 +143,7 @@
 (defun %filter-chroma-edge (plane base step line-step qp tc-off allow-p allow-q)
   "One two-line segment of a chroma edge.  Only strength 2 — an intra edge — is filtered at all:
    chroma has less detail to lose and more to gain from being left alone."
-  (declare (type (simple-array (unsigned-byte 8) (*)) plane)
+  (declare (type (simple-array (unsigned-byte 16) (*)) plane)
            (type fixnum base step line-step qp tc-off)
            (optimize (speed 3) (safety 1)))
   (let ((tc (aref +tc-table+ (%clip3 0 53 (+ qp 2 tc-off)))))

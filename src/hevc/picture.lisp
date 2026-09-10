@@ -9,6 +9,12 @@
 
 (deftype samples () '(simple-array (unsigned-byte 8) (*)))
 
+;; SAMPLE PLANES ARE SIXTEEN BITS WIDE WHATEVER THE STREAM SAYS.  Ten- and twelve-bit video needs
+;; the room, and eight-bit video does not pay for it: measured against the same work over byte
+;; planes, the wider ones came out level or a shade faster, because the arithmetic dominates and a
+;; block is cache-resident either way.  One code path is worth more than a byte per sample.
+(deftype plane () '(simple-array (unsigned-byte 16) (*)))
+
 (defstruct (picture (:conc-name pic-))
   (width 0 :type fixnum) (height 0 :type fixnum)          ; coded, a whole number of coding blocks
   ;; the conformance window: where the picture the file claims begins inside the coded one, and
@@ -16,9 +22,9 @@
   ;; reason and with the same trap.
   (crop-x 0 :type fixnum) (crop-y 0 :type fixnum)
   (disp-width 0 :type fixnum) (disp-height 0 :type fixnum)
-  (y (make-array 0 :element-type '(unsigned-byte 8)) :type samples)
-  (u (make-array 0 :element-type '(unsigned-byte 8)) :type samples)
-  (v (make-array 0 :element-type '(unsigned-byte 8)) :type samples)
+  (y (make-array 0 :element-type '(unsigned-byte 16)) :type plane)
+  (u (make-array 0 :element-type '(unsigned-byte 16)) :type plane)
+  (v (make-array 0 :element-type '(unsigned-byte 16)) :type plane)
   (ystride 0 :type fixnum) (cstride 0 :type fixnum)
   (poc 0 :type fixnum)
   ;; ---- what the loop filters need, recorded as the picture is decoded
@@ -94,9 +100,9 @@
      :crop-x (* (sps-sub-width sps) (sps-conf-left sps))
      :crop-y (* (sps-sub-height sps) (sps-conf-top sps))
      :disp-width (sps-display-width sps) :disp-height (sps-display-height sps)
-     :y (make-array (* w h) :element-type '(unsigned-byte 8) :initial-element 128)
-     :u (make-array (* cw ch) :element-type '(unsigned-byte 8) :initial-element 128)
-     :v (make-array (* cw ch) :element-type '(unsigned-byte 8) :initial-element 128)
+     :y (make-array (* w h) :element-type '(unsigned-byte 16) :initial-element 128)
+     :u (make-array (* cw ch) :element-type '(unsigned-byte 16) :initial-element 128)
+     :v (make-array (* cw ch) :element-type '(unsigned-byte 16) :initial-element 128)
      :ystride w :cstride cw
      :bs-v (make-array (* (ash w -3) (ash h -2)) :element-type '(unsigned-byte 8)
                                                  :initial-element 0)

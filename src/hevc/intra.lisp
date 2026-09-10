@@ -113,7 +113,7 @@
    top — anticlockwise — because that is the order in which a missing run can be filled from the
    sample before it.  Any other order leaves a hole or fills it from the wrong side."
   (declare (type ctx c) (type fixnum x0 y0 log2-size c-idx)
-           (type (simple-array (unsigned-byte 8) (*)) top left)
+           (type (simple-array (unsigned-byte 16) (*)) top left)
            (optimize (speed 3) (safety 1)))
   (let* ((n (ash 1 log2-size))
          (n2 (* 2 n))
@@ -169,7 +169,7 @@
    that falls as the block grows: a big block predicted at a shallow angle shows the steps in its
    reference line, a small one does not.  Nothing is signalled — both ends derive it."
   (declare (type ctx c) (type fixnum log2-size c-idx mode)
-           (type (simple-array (unsigned-byte 8) (*)) top left)
+           (type (simple-array (unsigned-byte 16) (*)) top left)
            (optimize (speed 3) (safety 1)))
   (let ((n (ash 1 log2-size)))
     (declare (type fixnum n))
@@ -195,8 +195,8 @@
               (loop for i from 1 below n2
                     do (setf (aref top i) (ash (+ (* (- 64 i) c0) (* i ct) 32) -6)
                              (aref left i) (ash (+ (* (- 64 i) c0) (* i cl) 32) -6))))
-            (let ((ft (make-array (1+ n2) :element-type '(unsigned-byte 8)))
-                  (fl (make-array (1+ n2) :element-type '(unsigned-byte 8))))
+            (let ((ft (make-array (1+ n2) :element-type '(unsigned-byte 16)))
+                  (fl (make-array (1+ n2) :element-type '(unsigned-byte 16))))
               (declare (dynamic-extent ft fl))
               (setf (aref ft 0) (ash (+ (aref left 1) (* 2 (aref top 0)) (aref top 1) 2) -2))
               (loop for i from 1 below n2
@@ -216,7 +216,7 @@
   "Planar (8.4.4.2.4): a bilinear surface through the four edges, which is what a smooth gradient
    looks like and what DC cannot express."
   (declare (type (simple-array (signed-byte 32) (*)) pred)
-           (type (simple-array (unsigned-byte 8) (*)) top left)
+           (type (simple-array (unsigned-byte 16) (*)) top left)
            (type fixnum n log2-size) (optimize (speed 3) (safety 1)))
   (let ((tr (aref top (1+ n)))                  ; p[nTbS][-1]
         (bl (aref left (1+ n))))                ; p[-1][nTbS]
@@ -234,7 +234,7 @@
 (defun %predict-dc (pred n log2-size c-idx top left)
   "DC (8.4.4.2.5), with the boundary smoothing that luma blocks below 32x32 get."
   (declare (type (simple-array (signed-byte 32) (*)) pred)
-           (type (simple-array (unsigned-byte 8) (*)) top left)
+           (type (simple-array (unsigned-byte 16) (*)) top left)
            (type fixnum n log2-size c-idx) (optimize (speed 3) (safety 1)))
   (let ((sum n))
     (declare (type fixnum sum))
@@ -257,7 +257,7 @@
    mode's angle.  A negative angle needs samples from the other edge, and invAngle is what projects
    them onto this line; that projection is the part with no counterpart in H.264 at all."
   (declare (type (simple-array (signed-byte 32) (*)) pred)
-           (type (simple-array (unsigned-byte 8) (*)) top left)
+           (type (simple-array (unsigned-byte 16) (*)) top left)
            (type fixnum n c-idx mode) (optimize (speed 3) (safety 1)))
   (let* ((angle (aref +intra-pred-angle+ mode))
          (vertical (>= mode 18))
@@ -305,8 +305,8 @@
            (optimize (speed 3) (safety 1)))
   (let* ((n (ash 1 log2-size))
          (n2 (* 2 n))
-         (top (make-array (1+ n2) :element-type '(unsigned-byte 8) :initial-element 128))
-         (left (make-array (1+ n2) :element-type '(unsigned-byte 8) :initial-element 128)))
+         (top (make-array (1+ n2) :element-type '(unsigned-byte 16) :initial-element 128))
+         (left (make-array (1+ n2) :element-type '(unsigned-byte 16) :initial-element 128)))
     (declare (type fixnum n n2) (dynamic-extent top left))
     (when (%gather-references c pic x0 y0 log2-size c-idx top left)
       (%filter-references c log2-size c-idx mode top left))

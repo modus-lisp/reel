@@ -53,7 +53,7 @@
    what lets a vector point off the picture at all — the standard says to clamp the COORDINATE, not
    to pad the buffer, so there is no border to maintain and no way to read the wrong memory."
   (declare (type (simple-array (signed-byte 32) (*)) dst)
-           (type (simple-array (unsigned-byte 8) (*)) ref)
+           (type (simple-array (unsigned-byte 16) (*)) ref)
            (type fixnum w h stride rw rh x0 y0 mvx mvy)
            (optimize (speed 3) (safety 1)))
   (let* ((fx (logand mvx 3)) (fy (logand mvy 3))
@@ -108,7 +108,7 @@
   "One chroma prediction block, at 14-bit precision.  The vector is in EIGHTHS of a chroma sample:
    a quarter-sample luma vector over half-resolution chroma is an eighth."
   (declare (type (simple-array (signed-byte 32) (*)) dst)
-           (type (simple-array (unsigned-byte 8) (*)) ref)
+           (type (simple-array (unsigned-byte 16) (*)) ref)
            (type fixnum w h stride rw rh x0 y0 mvx mvy)
            (optimize (speed 3) (safety 1)))
   (let* ((fx (logand mvx 7)) (fy (logand mvy 7))
@@ -162,7 +162,7 @@
    stated shift, then add the offset.  Without them this is the default process, which is the same
    arithmetic with a weight of one and an offset of zero — written separately because it is what
    almost every block does and the multiply is not free."
-  (declare (type (simple-array (unsigned-byte 8) (*)) plane)
+  (declare (type (simple-array (unsigned-byte 16) (*)) plane)
            (type (simple-array (signed-byte 32) (*)) src)
            (type fixnum stride x0 y0 w h)
            (optimize (speed 3) (safety 1)))
@@ -192,7 +192,7 @@
 
    With explicit weights the two are scaled independently and the offsets are folded in at the
    shared shift, so the single rounding still happens once and at the end."
-  (declare (type (simple-array (unsigned-byte 8) (*)) plane)
+  (declare (type (simple-array (unsigned-byte 16) (*)) plane)
            (type (simple-array (signed-byte 32) (*)) a b)
            (type fixnum stride x0 y0 w h)
            (optimize (speed 3) (safety 1)))

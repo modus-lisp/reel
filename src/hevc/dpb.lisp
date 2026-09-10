@@ -27,6 +27,10 @@
   ;; whether the picture currently being read is one of them
   (max-ra most-positive-fixnum :type fixnum)
   (skipping nil)
+  ;; the last INDEPENDENT slice segment header, which the dependent segments after it inherit, and
+  ;; the decoding context they carry on from.  Both belong to the picture, not to the sequence.
+  (indep-sh nil)
+  (ctx nil)
   (frames 0 :type fixnum))
 
 (defun make-hevc-decoder () (make-decoder))

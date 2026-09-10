@@ -64,7 +64,10 @@
   (let* ((sps (sh-sps sh))
          (pic (make-picture-for sps)))
     (setf (pic-poc pic) poc
-          (pic-reference-p pic) (nal-reference-p nal))
+          (pic-reference-p pic) (nal-reference-p nal)
+          ;; a slice segment never inherits across a picture boundary
+          (dec-indep-sh d) nil
+          (dec-ctx d) nil)
     (multiple-value-bind (before after) (%apply-rps d sh poc nal)
       ;; the current picture goes in only after the set has been applied, so it cannot keep itself
       (setf (dec-current d) pic)
@@ -83,7 +86,7 @@
      nil)
     ((nal-slice-p nal)
      (let* ((br (make-bitreader (nal-rbsp nal)))
-            (sh (parse-slice-header br nal (dec-sps d) (dec-pps d))))
+            (sh (%inherit-slice-header d (parse-slice-header br nal (dec-sps d) (dec-pps d)))))
        (when (sh-first-in-pic sh)
          (%finish-picture d)
          (let ((poc (%picture-order-count d sh nal)))
@@ -93,10 +96,33 @@
        (when (dec-skipping d) (return-from feed-nal nil))
        (unless (dec-current d) (%err "a slice arrived before any picture was started"))
        (setf (dec-cur-sh d) sh)
-       (decode-slice-data (sh-sps sh) (sh-pps sh) sh br (dec-current d)
-                          (dec-list0 d) (dec-list1 d) (%collocated d sh))
+       (unless (sh-dependent sh) (setf (dec-indep-sh d) sh))
+       (setf (dec-ctx d)
+             (decode-slice-data (sh-sps sh) (sh-pps sh) sh br (dec-current d)
+                                (dec-list0 d) (dec-list1 d) (%collocated d sh)
+                                (dec-ctx d)))
        (pop (dec-out d))))
     (t nil)))
+
+(defun %inherit-slice-header (d sh)
+  "Fill in what a DEPENDENT slice segment did not send.
+
+   It sends its picture parameter set, its address, its entry points and its byte alignment, and
+   nothing else: the slice type, the quantiser, the reference lists, the SAO flags and both
+   deblocking offsets all belong to the last independent segment and are simply carried forward.
+   Which is why the flag has to be honoured at the picture level rather than in the parser — the
+   parser has no way of knowing what came before it."
+  (if (not (sh-dependent sh))
+      sh
+      (let ((base (or (dec-indep-sh d)
+                      (%err "a dependent slice segment with no independent one before it"))))
+        (let ((merged (copy-slice base)))
+          (setf (sh-dependent merged) t
+                (sh-first-in-pic merged) nil
+                (sh-nal merged) (sh-nal sh)
+                (sh-segment-address merged) (sh-segment-address sh)
+                (sh-entry-points merged) (sh-entry-points sh))
+          merged))))
 
 (defun %collocated (d sh)
   "The picture a temporal merge candidate comes from, named by list and index in the slice header."

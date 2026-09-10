@@ -57,6 +57,12 @@
    :type (simple-array (unsigned-byte 8) (*)))
   (wpp-stats (make-array 4 :element-type '(signed-byte 32))
    :type (simple-array (signed-byte 32) (*)))
+  ;; and the contexts as they stood at the END of this slice segment, which a DEPENDENT segment
+  ;; carries on from — that is the whole of what makes it dependent
+  (seg-state (make-array +cabac-contexts+ :element-type '(unsigned-byte 8))
+   :type (simple-array (unsigned-byte 8) (*)))
+  (seg-stats (make-array 4 :element-type '(signed-byte 32))
+   :type (simple-array (signed-byte 32) (*)))
   ;; the current coding unit, as the syntax elements that outlive one function
   (cu-x 0 :type fixnum) (cu-y 0 :type fixnum)
   (cu-log2 0 :type fixnum)
@@ -1165,19 +1171,27 @@
       (setf (aref (pic-sao-off pic) (+ (* 12 to) (* 4 comp) i))
             (aref (pic-sao-off pic) (+ (* 12 from) (* 4 comp) i))))))
 
-(defun decode-slice-data (sps pps sh br &optional pic list0 list1 collocated)
-  "Walk one independent slice segment's coding tree units.
+(defun decode-slice-data (sps pps sh br &optional pic list0 list1 collocated prev)
+  "Walk one slice segment's coding tree units.
 
    Returns the context, whose counters are what stands in for a picture until reconstruction
    exists.  The check that matters is that end_of_slice_segment_flag comes up exactly at the last
    coding tree unit of the slice: a syntax error anywhere desynchronises the arithmetic decoder,
-   and a desynchronised decoder does not stop in the right place."
-  (when (sh-dependent sh)
-    (%err "dependent slice segments are not supported"))
+   and a desynchronised decoder does not stop in the right place.
+
+   A DEPENDENT segment continues PREV rather than starting anything.  It is not a slice boundary:
+   prediction crosses it, the quantiser predictor crosses it, and the arithmetic decoder's context
+   variables cross it — a new engine at the new payload's first byte, loaded with the contexts the
+   segment before it finished with.  What it is for is transport: a picture can be cut into pieces
+   small enough to packetise without paying the compression cost of a real slice boundary at each
+   cut.  Only the ADDRESS is its own, so the context's slice address stays the first segment's,
+   which is what availability and the SAO merge flags are asked about."
   (when (and (not (sh-i-slice-p sh)) (zerop (length (or list0 #()))))
     (%err "an inter slice with no reference pictures"))
+  (when (and (sh-dependent sh) (null prev))
+    (%err "a dependent slice segment with no segment before it"))
   (let* ((cab (init-cabac br (sh-qp sh) (sh-type sh) (sh-cabac-init sh)))
-         (c (%make-ctx sps pps sh cab))
+         (c (if (sh-dependent sh) prev (%make-ctx sps pps sh cab)))
          (pic (or pic (make-picture-for sps)))
          (wide (sps-ctbs-wide sps))
          (total (sps-ctbs sps))
@@ -1187,12 +1201,38 @@
     (declare (type fixnum n))
     (destructuring-bind (tile-id ts->rs rs->ts) (%tiling sps pps)
       (declare (type (simple-array (signed-byte 32) (*)) tile-id ts->rs rs->ts))
-      (setf (cx-slice-addr c) (sh-segment-address sh)
-            (cx-pic c) pic
+      (cond
+        ((sh-dependent sh)
+         ;; carry on: a new engine at this payload's first byte, the previous segment's contexts,
+         ;; and everything else — including the slice address — left exactly as it was.  Unless a
+         ;; TILE begins here, in which case the tile's own rule wins and the contexts start fresh.
+         (setf (cx-cabac c) cab (cx-sh c) sh)
+         (let* ((ts (aref rs->ts (sh-segment-address sh)))
+                ;; a dependent segment may still BEGIN A TILE, and then the tile's rule wins over
+                ;; the segment's: fresh contexts, and the quantiser predicted from the slice's own
+                ;; rather than carried across a boundary nothing may be carried across
+                (new-tile (and (plusp ts)
+                               (/= (aref tile-id (sh-segment-address sh))
+                                   (aref tile-id (aref ts->rs (1- ts)))))))
+           (if new-tile
+               (setf (cx-qp-y-prev c) (sh-qp sh)
+                     (cx-qp c) (sh-qp sh)
+                     (cx-qp-reset c) t)
+               (load-cabac-state cab (cx-seg-state c) (cx-seg-stats c)))
+           (when (and wpp (zerop (mod ts wide)))
+             (if (= wide 1)
+                 (init-cabac-state cab (sh-qp sh) (sh-type sh) (sh-cabac-init sh))
+                 (load-cabac-state cab (cx-wpp-state c) (cx-wpp-stats c)))
+             (setf (cx-qp-y-prev c) (sh-qp sh)
+                   (cx-qp c) (sh-qp sh)
+                   (cx-qp-reset c) t))))
+        (t
+         (setf (cx-slice-addr c) (sh-segment-address sh)
+               (cx-qg-x c) 0 (cx-qg-y c) 0)))
+      (setf (cx-pic c) pic
             (cx-list0 c) (or list0 #()) (cx-list1 c) (or list1 #())
             (cx-collocated c) collocated
-            (cx-cur-tile c) (aref tile-id (sh-segment-address sh))
-            (cx-qg-x c) 0 (cx-qg-y c) 0)
+            (cx-cur-tile c) (aref tile-id (sh-segment-address sh)))
       (loop for ts of-type fixnum from (aref rs->ts (sh-segment-address sh)) below total do
         (let* ((addr (aref ts->rs ts))
                (rx (mod addr wide)) (ry (floor addr wide)))
@@ -1243,6 +1283,7 @@
             ;; T: the slice said it was finished.  A slice segment covers only its own run of
             ;; coding tree units, so how many that is says nothing about whether the parse was
             ;; right — whether it STOPPED ON ITS OWN, rather than by running out of picture, does.
+            (save-cabac-state cab (cx-seg-state c) (cx-seg-stats c))
             (return-from decode-slice-data (values c n t)))
           ;; end_of_subset_one_bit, which is a terminate bin that is always 1, sits between two
           ;; substreams and is read only when one actually ends here

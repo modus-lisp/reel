@@ -94,6 +94,29 @@ for f in "$CONF"/hevc/*.bit; do
     -f rawvideo -pix_fmt yuv420p "$f.filt.yuv" 2>/dev/null || true
 done
 
+# and the WHOLE stream, sixteen frames of it, as one checksum per frame rather than as samples.
+# Sixteen is enough to exercise every reference structure the suite has -- the longest random
+# access pattern in it spans eight -- and a raw YUV of the 2560x1600 streams is a hundred megabytes
+# each, which is more disk than the streams themselves.  ffmpeg's framecrc muxer writes an Adler-32
+# per frame, INITIALISED TO ZERO rather than to one: libavformat calls av_adler32_update(0, ...)
+# where the usual definition starts at 1, so a checker that uses a stock Adler-32 is off by one in
+# the low half and by the frame length in the high half.
+for f in "$CONF"/hevc/*.bit; do
+  [ -f "$f" ] || continue
+  case "$(basename "$f")" in
+    # the same conformance-window correction as above: ffmpeg does not apply the left offset
+    CONFWIN_A_Sony_1.bit) crop="crop=412:236:2:0" ;;
+    *) crop="" ;;
+  esac
+  if [ -n "$crop" ]; then
+    ffmpeg -v error -y -i "$f" -frames:v 16 -vf "$crop" -fps_mode passthrough \
+      -pix_fmt yuv420p -f framecrc "$f.framecrc" 2>/dev/null || true
+  else
+    ffmpeg -v error -y -i "$f" -frames:v 16 -fps_mode passthrough \
+      -pix_fmt yuv420p -f framecrc "$f.framecrc" 2>/dev/null || true
+  fi
+done
+
 # TWO ORACLE CORRECTIONS, both verified by decoding the stream and comparing where the reference
 # actually put the picture rather than where it said it did.
 #

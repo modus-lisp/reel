@@ -69,27 +69,21 @@
 (defun %edge-simple-h8 (data p1o p0o q0o q1o elim)
   (declare (type u8vec data) (type dim p1o p0o q0o q1o) (type (signed-byte 16) elim)
            (optimize (speed 3) (safety 0)))
-  (let ((a (%vc8 (%vi-add16 (%vc8 (%vi-sub16 (%vi-uxtl (%vi-ld8 data p1o))
-                                             (%vi-uxtl (%vi-ld8 data q1o))))
-                            (%vi-mul16 (%vi-sub16 (%vi-uxtl (%vi-ld8 data q0o))
-                                                  (%vi-uxtl (%vi-ld8 data p0o)))
-                                       (%vi-dup16 3))))))
-    (declare (type vi-pack a))
-    (let ((mask (%vle (%vi-dup16 elim)
-                      (%vi-add16 (%vi-shl16 (%vi-abs16 (%vi-sub16 (%vi-uxtl (%vi-ld8 data p0o))
-                                                                  (%vi-uxtl (%vi-ld8 data q0o)))) 1)
-                                 (%vi-sshr16 (%vi-abs16 (%vi-sub16 (%vi-uxtl (%vi-ld8 data p1o))
-                                                                   (%vi-uxtl (%vi-ld8 data q1o)))) 1)))))
-      (declare (type vi-pack mask))
-      (%vi-st8 data p0o
-        (%vi-sqxtun (%vi-bsl mask
-                            (%vcl255 (%vi-add16 (%vi-uxtl (%vi-ld8 data p0o))
-                                                (%vi-sshr16 (%vc8 (%vi-add16 a (%vi-dup16 3))) 3)))
-                            (%vi-uxtl (%vi-ld8 data p0o)))))
-      (%vi-st8 data q0o
-        (%vi-sqxtun (%vi-bsl mask
-                            (%vcl255 (%vi-sub16 (%vi-uxtl (%vi-ld8 data q0o))
-                                                (%vi-sshr16 (%vc8 (%vi-add16 a (%vi-dup16 4))) 3)))
-                            (%vi-uxtl (%vi-ld8 data q0o))))))))
+  ;; The FP pool is 12 wide now, so every sample and derived value is held in a
+  ;; register: p1/p0/q0/q1 loaded once, the adjustment computed from them.
+  (let* ((p1 (%vi-uxtl (%vi-ld8 data p1o)))
+         (p0 (%vi-uxtl (%vi-ld8 data p0o)))
+         (q0 (%vi-uxtl (%vi-ld8 data q0o)))
+         (q1 (%vi-uxtl (%vi-ld8 data q1o)))
+         (a  (%vc8 (%vi-add16 (%vc8 (%vi-sub16 p1 q1))
+                              (%vi-mul16 (%vi-sub16 q0 p0) (%vi-dup16 3)))))
+         (mask (%vle (%vi-dup16 elim)
+                     (%vi-add16 (%vi-shl16 (%vi-abs16 (%vi-sub16 p0 q0)) 1)
+                                (%vi-sshr16 (%vi-abs16 (%vi-sub16 p1 q1)) 1))))
+         (b  (%vi-sshr16 (%vc8 (%vi-add16 a (%vi-dup16 3))) 3))
+         (a2 (%vi-sshr16 (%vc8 (%vi-add16 a (%vi-dup16 4))) 3)))
+    (declare (type vi-pack p1 p0 q0 q1 a mask b a2))
+    (%vi-st8 data p0o (%vi-sqxtun (%vi-bsl mask (%vcl255 (%vi-add16 p0 b)) p0)))
+    (%vi-st8 data q0o (%vi-sqxtun (%vi-bsl mask (%vcl255 (%vi-sub16 q0 a2)) q0)))))
 
 ) ; progn

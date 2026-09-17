@@ -682,14 +682,14 @@
       (let ((blk (aref yc b)))
         (declare (type (simple-array (signed-byte 32) (16)) blk))
         (unless (every #'zerop blk)
-          (add-residual yp (+ mx (* 4 (logand b 3))) (+ my (* 4 (ash b -2))) (vp8-idct blk)))))
+          (add-residual yp (+ mx (* 4 (logand b 3))) (+ my (* 4 (ash b -2))) (vp8-idct-s16 blk (d-idct-tmp d) (d-res16 d))))))
     (dolist (spec (list (cons (d-uplane d) (d-ublocks d)) (cons (d-vplane d) (d-vblocks d))))
       (let ((pl (car spec)) (blocks (cdr spec)))
         (dotimes (b 4)
           (let ((blk (aref blocks b)))
             (declare (type (simple-array (signed-byte 32) (16)) blk))
             (unless (every #'zerop blk)
-              (add-residual pl (+ cx (* 4 (logand b 1))) (+ cy (* 4 (ash b -1))) (vp8-idct blk)))))))))
+              (add-residual pl (+ cx (* 4 (logand b 1))) (+ cy (* 4 (ash b -1))) (vp8-idct-s16 blk (d-idct-tmp d) (d-res16 d))))))))))
 
 ;;; ---- macroblock loop ----------------------------------------------------------------
 

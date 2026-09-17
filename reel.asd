@@ -39,6 +39,7 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
        (:file "bool")          ; frame header + boolean decoder
        (:file "transform")     ; inverse DCT and WHT
        (:file "intra")         ; the key-frame pixel pipeline
+       (:file "intra-neon")    ; #+modus: 4x4 residual add on integer NEON lanes
        (:file "loopfilter")    ; the in-loop deblocking filter
        (:file "inter-tables")  ; mode contexts, MV probabilities, sub-pixel filters
        (:file "inter")         ; inter frames, references, and the decoder proper

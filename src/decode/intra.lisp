@@ -314,6 +314,9 @@
   (ref-lf-delta (make-array 4 :element-type '(signed-byte 32) :initial-element 0))
   (mode-lf-delta (make-array 4 :element-type '(signed-byte 32) :initial-element 0))
   ;; per-MB records for the loop filter
+  ;; IDCT scratch: the column pass, and the residual as 16 packed s16 (32 octets)
+  (idct-tmp (make-array 16 :element-type '(signed-byte 32)) :type (simple-array (signed-byte 32) (16)))
+  (res16 (make-array 32 :element-type '(unsigned-byte 8)) :type u8vec)
   (mb-i4x4 #() :type simple-vector) (mb-nonzero #() :type simple-vector)
   (mb-seg (%emptyfx) :type fxvec)
   ;; per-MB work buffers
@@ -494,26 +497,41 @@
 
 ;;; ---- reconstruction (RFC 6386 §14) ------------------------------------
 
+(declaim (inline res16-ref))
+(defun res16-ref (res k)
+  "Element K of a residual stored as 16 packed little-endian s16 (32 octets)."
+  (declare (type u8vec res) (type fixnum k))
+  (let ((x (logior (aref res (* 2 k)) (ash (aref res (+ 1 (* 2 k))) 8))))
+    (declare (type fixnum x))
+    (if (>= x 32768) (- x 65536) x)))
+
 (defun add-residual (pl mx my res)
-  "Add a 4x4 IDCT residual RES to the prediction already present in plane PL at
-   pixel (MX,MY), clamping to 0..255."
-  (declare (type plane pl) (type (signed-byte 26) mx my)
-           (type (simple-array (signed-byte 32) (16)) res))
-  (dotimes (i 4)
-    (dotimes (j 4)
-      (pset pl (+ mx j) (+ my i)
-            (clamp255 (+ (pget pl (+ mx j) (+ my i)) (aref res (+ (* i 4) j))))))))
+  "Add a 4x4 IDCT residual RES (16 packed s16, see vp8-idct-s16) to the
+   prediction already present in plane PL at pixel (MX,MY), clamping to 0..255."
+  (declare (type plane pl) (type (signed-byte 26) mx my) (type u8vec res))
+  (let* ((data (pl-data pl)) (stride (pl-stride pl)) (base (pidx pl mx my)))
+    (declare (type u8vec data) (type fixnum stride base))
+    (dotimes (i 4)
+      (let ((o (+ base (* i stride))))
+        (declare (type fixnum o))
+        (dotimes (j 4)
+          (setf (aref data (+ o j))
+                (clamp255 (+ (aref data (+ o j)) (res16-ref res (+ (* i 4) j))))))))))
 
 (defun add-residual-pred (pl mx my pred res)
-  "Write PRED (a 4x4 raster) plus the 4x4 IDCT residual RES into plane PL at
-   pixel (MX,MY), clamping to 0..255.  The B_PRED subblock path: the prediction
-   is not in the plane yet, so this is add-residual with a separate source."
-  (declare (type plane pl) (type (signed-byte 26) mx my) (type u8vec pred)
-           (type (simple-array (signed-byte 32) (16)) res))
-  (dotimes (i 4)
-    (dotimes (j 4)
-      (pset pl (+ mx j) (+ my i)
-            (clamp255 (+ (aref pred (+ (* i 4) j)) (aref res (+ (* i 4) j))))))))
+  "Write PRED (a 4x4 raster) plus the 4x4 IDCT residual RES (packed s16) into
+   plane PL at pixel (MX,MY), clamping to 0..255.  The B_PRED subblock path: the
+   prediction is not in the plane yet, so this is add-residual with a separate
+   source."
+  (declare (type plane pl) (type (signed-byte 26) mx my) (type u8vec pred res))
+  (let* ((data (pl-data pl)) (stride (pl-stride pl)) (base (pidx pl mx my)))
+    (declare (type u8vec data) (type fixnum stride base))
+    (dotimes (i 4)
+      (let ((o (+ base (* i stride))))
+        (declare (type fixnum o))
+        (dotimes (j 4)
+          (setf (aref data (+ o j))
+                (clamp255 (+ (aref pred (+ (* i 4) j)) (res16-ref res (+ (* i 4) j))))))))))
 
 (defun reconstruct-luma16 (d mx my ymode has-above has-left)
   (declare (type dec d) (type (signed-byte 26) mx my))
@@ -530,7 +548,7 @@
     (dotimes (br 4)
       (dotimes (bc 4)
         (add-residual yp (+ mx (* bc 4)) (+ my (* br 4))
-                      (vp8-idct (aref (d-ycoeffs d) (+ (* br 4) bc))))))))
+                      (vp8-idct-s16 (aref (d-ycoeffs d) (+ (* br 4) bc)) (d-idct-tmp d) (d-res16 d)))))))
 
 (defun reconstruct-bpred (d mx my)
   (declare (type dec d) (type (signed-byte 26) mx my))
@@ -548,7 +566,7 @@
               (dotimes (k 4) (setf (aref a (+ 4 k)) (pget yp (+ mx 16 k) (- my 1)))))
           (dotimes (k 4) (setf (aref l k) (pget yp (- bx 1) (+ by k))))
           (predict-subblock (aref bm idx) a p l pred)
-          (add-residual-pred yp bx by pred (vp8-idct (aref (d-ycoeffs d) idx))))))))
+          (add-residual-pred yp bx by pred (vp8-idct-s16 (aref (d-ycoeffs d) idx) (d-idct-tmp d) (d-res16 d))))))))
 
 (defun reconstruct-chroma (d mbx mby uvmode has-above has-left)
   (declare (type dec d) (type fixnum mbx mby))
@@ -567,7 +585,7 @@
         (dotimes (br 2)
           (dotimes (bc 2)
             (add-residual pl (+ cx (* bc 4)) (+ cy (* br 4))
-                          (vp8-idct (aref blocks (+ (* br 2) bc))))))))))
+                          (vp8-idct-s16 (aref blocks (+ (* br 2) bc)) (d-idct-tmp d) (d-res16 d)))))))))
 
 (defun scatter-y2 (d)
   "Invert the Y2 WHT and place its outputs as the DC of the 16 Y blocks."

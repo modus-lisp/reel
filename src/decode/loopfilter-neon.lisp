@@ -160,3 +160,81 @@
                         (%vcl255 (%vi-sub16 q1 (%vi-sshr16 (%vi-add16 (%vi-sshr16 (%vc8 (%vi-add16 a (%vi-dup16 4))) 3) (%vi-dup16 1)) 1))) q1)))))
 
 ) ; progn
+
+;;; ---- macroblock-edge filter (RFC 6386 s15.3), 8 along-samples at a time ------
+;;; Same gate and hev as the sub-block filter.  w always includes the outer
+;;; term c8(p1-q1); with hev only p0/q0 move by b=(c8(w+3))>>3 / a=(c8(w+4))>>3;
+;;; without hev the three pairs move by (27w+63)>>7, (18w+63)>>7, (9w+63)>>7,
+;;; each clamped to s8 first, exactly as the scalar %edge-mb.
+#+modus
+(defun %edge-mb-h8 (data p3o p2o p1o p0o q0o q1o q2o q3o hthr ilim elim)
+  (declare (type u8vec data) (type dim p3o p2o p1o p0o q0o q1o q2o q3o)
+           (type (signed-byte 16) hthr ilim elim) (optimize (speed 3) (safety 0)))
+  ;; Five register-resident values; p1/q1/p2/q2 are re-loaded at each use so the
+  ;; store trees fit the vector pool.
+  (let* ((p0 (%vld data p0o)) (q0 (%vld data q0o))
+         (ok (%vi-and
+              (%vi-and (%vi-and (%vle (%vi-dup16 elim)
+                                      (%vi-add16 (%vi-shl16 (%vabsd p0 q0) 1) (%vi-sshr16 (%vabsd (%vld data p1o) (%vld data q1o)) 1)))
+                                (%vi-and (%vle (%vi-dup16 ilim) (%vabsd (%vld data p3o) (%vld data p2o)))
+                                         (%vle (%vi-dup16 ilim) (%vabsd (%vld data p2o) (%vld data p1o)))))
+                       (%vi-and (%vle (%vi-dup16 ilim) (%vabsd (%vld data p1o) p0))
+                                (%vle (%vi-dup16 ilim) (%vabsd (%vld data q1o) q0))))
+              (%vi-and (%vle (%vi-dup16 ilim) (%vabsd (%vld data q3o) (%vld data q2o)))
+                       (%vle (%vi-dup16 ilim) (%vabsd (%vld data q2o) (%vld data q1o))))))
+         (hev (%vi-orr (%vgt (%vi-dup16 hthr) (%vabsd (%vld data p1o) p0)) (%vgt (%vi-dup16 hthr) (%vabsd (%vld data q1o) q0))))
+         (w (%vc8 (%vi-add16 (%vc8 (%vi-sub16 (%vld data p1o) (%vld data q1o))) (%vi-mul16 (%vi-sub16 q0 p0) (%vi-dup16 3))))))
+    (declare (type vi-pack p0 q0 ok hev w))
+    ;; p0/q0: hev -> b=(c8(w+3))>>3 / a=(c8(w+4))>>3; not hev -> c8((27w+63)>>7): clamp AFTER the shift, as the scalar does.
+    (%vi-st8 data p0o (%vi-sqxtun (%vi-bsl ok
+                        (%vcl255 (%vi-add16 p0 (%vi-bsl hev (%vi-sshr16 (%vc8 (%vi-add16 w (%vi-dup16 3))) 3)
+                                                          (%vc8 (%vi-sshr16 (%vi-add16 (%vi-mul16 w (%vi-dup16 27)) (%vi-dup16 63)) 7)))))
+                        p0)))
+    (%vi-st8 data q0o (%vi-sqxtun (%vi-bsl ok
+                        (%vcl255 (%vi-sub16 q0 (%vi-bsl hev (%vi-sshr16 (%vc8 (%vi-add16 w (%vi-dup16 4))) 3)
+                                                          (%vc8 (%vi-sshr16 (%vi-add16 (%vi-mul16 w (%vi-dup16 27)) (%vi-dup16 63)) 7)))))
+                        q0)))
+    ;; p1/q1, p2/q2: only where ok and not hev, by (c8(18w+63))>>7 and (c8(9w+63))>>7.
+    (%vi-st8 data p1o (%vi-sqxtun (%vi-bsl (%vi-and ok (%vi-eor hev (%vi-dup16 -1)))
+                        (%vcl255 (%vi-add16 (%vld data p1o) (%vc8 (%vi-sshr16 (%vi-add16 (%vi-mul16 w (%vi-dup16 18)) (%vi-dup16 63)) 7)))) (%vld data p1o))))
+    (%vi-st8 data q1o (%vi-sqxtun (%vi-bsl (%vi-and ok (%vi-eor hev (%vi-dup16 -1)))
+                        (%vcl255 (%vi-sub16 (%vld data q1o) (%vc8 (%vi-sshr16 (%vi-add16 (%vi-mul16 w (%vi-dup16 18)) (%vi-dup16 63)) 7)))) (%vld data q1o))))
+    (%vi-st8 data p2o (%vi-sqxtun (%vi-bsl (%vi-and ok (%vi-eor hev (%vi-dup16 -1)))
+                        (%vcl255 (%vi-add16 (%vld data p2o) (%vc8 (%vi-sshr16 (%vi-add16 (%vi-mul16 w (%vi-dup16 9)) (%vi-dup16 63)) 7)))) (%vld data p2o))))
+    (%vi-st8 data q2o (%vi-sqxtun (%vi-bsl (%vi-and ok (%vi-eor hev (%vi-dup16 -1)))
+                        (%vcl255 (%vi-sub16 (%vld data q2o) (%vc8 (%vi-sshr16 (%vi-add16 (%vi-mul16 w (%vi-dup16 9)) (%vi-dup16 63)) 7)))) (%vld data q2o))))))
+
+(defun %edge-mb (data start along s count hthr ilim elim)
+  (declare (type u8vec data) (type dim start along s) (type (integer 0 64) count)
+           (type (signed-byte 16) hthr ilim elim) (optimize (speed 3) (safety 0)))
+  (if (/= along 1)
+      (let ((s2 (* 2 s)) (s3 (* 3 s)) (s4 (* 4 s)))
+        (declare (type dim s2 s3 s4))
+        (%along (q0i start along count)
+          (let* ((p3i (- q0i s4)) (p2i (- q0i s3)) (p1i (- q0i s2)) (p0i (- q0i s))
+                 (q1i (+ q0i s)) (q2i (+ q0i s2)) (q3i (+ q0i s3))
+                 (p3 (aref data p3i)) (p2 (aref data p2i)) (p1 (aref data p1i)) (p0 (aref data p0i))
+                 (q0 (aref data q0i)) (q1 (aref data q1i)) (q2 (aref data q2i)) (q3 (aref data q3i)))
+            (declare (type dim p3i p2i p1i p0i q1i q2i q3i)
+                     (type (unsigned-byte 8) p3 p2 p1 p0 q0 q1 q2 q3))
+            (when (%edge-ok ilim elim p3 p2 p1 p0 q0 q1 q2 q3)
+              (if (%hev hthr p1 p0 q0 q1)
+                  (multiple-value-bind (np0 nq0) (%adjust t p1 p0 q0 q1)
+                    (setf (aref data p0i) np0 (aref data q0i) nq0))
+                  (let ((w (c8 (+ (c8 (- p1 q1)) (* 3 (- q0 p0))))))
+                    (declare (type fixnum w))
+                    (let ((a (c8 (ash (+ (* 27 w) 63) -7))))
+                      (setf (aref data q0i) (clamp255 (- q0 a)) (aref data p0i) (clamp255 (+ p0 a))))
+                    (let ((a (c8 (ash (+ (* 18 w) 63) -7))))
+                      (setf (aref data q1i) (clamp255 (- q1 a)) (aref data p1i) (clamp255 (+ p1 a))))
+                    (let ((a (c8 (ash (+ (* 9 w) 63) -7))))
+                      (setf (aref data q2i) (clamp255 (- q2 a)) (aref data p2i) (clamp255 (+ p2 a))))))))))
+      (let ((s2 (* 2 s)) (s3 (* 3 s)) (s4 (* 4 s)) (g 0))
+        (declare (type dim s2 s3 s4) (type (integer 0 64) g))
+        (loop
+          (when (>= g count) (return nil))
+          (let ((q0o (+ start g)))
+            (declare (type dim q0o))
+            (%edge-mb-h8 data (- q0o s4) (- q0o s3) (- q0o s2) (- q0o s)
+                         q0o (+ q0o s) (+ q0o s2) (+ q0o s3) hthr ilim elim))
+          (setq g (+ g 8))))))

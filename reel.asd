@@ -41,7 +41,12 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
        (:file "intra")         ; the key-frame pixel pipeline
        (:file "loopfilter")    ; the in-loop deblocking filter
        (:file "inter-tables")  ; mode contexts, MV probabilities, sub-pixel filters
-       (:file "inter")))     ; inter frames, references, and the decoder proper
+       (:file "inter")         ; inter frames, references, and the decoder proper
+       ;; #+modus NEON (SIMD layer 2b) kernels: last-def replaces the scalar
+       ;; mc-filter / loop-filter edges.  On Modus the linkage-cell late binding
+       ;; makes the precompiled callers pick these up; #-modus they no-op.
+       (:file "inter-neon")    ; six-tap motion-compensation on integer NEON lanes
+       (:file "loopfilter-neon"))) ; loop-filter edge kernels on integer NEON lanes
      ;; ---- H.264 / AVC, its own package again and for the same reason: a second codec
      (:module "h264"
       :serial t

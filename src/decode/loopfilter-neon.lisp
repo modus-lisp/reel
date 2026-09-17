@@ -38,64 +38,96 @@
 (defmacro %vld (data off) `(%vi-uxtl (%vi-ld8 ,data ,off)))
 
 ;; ---------------------------------------------------------------------------
-;; Vertical edges (S = 1): a line's taps are consecutive bytes, so eight lines
-;; are gathered TAP-MAJOR into a 64-byte scratch (sc[tap*8 + line]) and the
-;; same bit-exact -h8 kernels run on the scratch with tap offsets 0,8,..,56;
-;; the taps a kernel can change are scattered back.  No transpose ops needed.
-(defvar *lf-vscratch* (make-array 64 :element-type '(unsigned-byte 8) :initial-element 0))
+;; Vertical edges (S = 1): a line's eight taps p3..q3 are eight consecutive
+;; bytes, so an 8x8 BYTE TRANSPOSE turns eight lines into eight tap vectors.
+;; It is done by NEON through the scratch in three pair stages (TRN1/TRN2 on
+;; .8B, then .4H, then .2S), each store a 4-instruction ld/ld/trn/st tree, so
+;; nothing exceeds the vector register pool.  Scratch layout: stage-1 output A
+;; at 0..63, stage-2 B at 64..127, the tap-major result C at 128..191
+;; (tap k = 8 bytes at 128+8k).  The same network run backwards puts the
+;; filtered taps back on the eight lines.  The h8 kernels run unchanged on C.
+(defvar *lf-vscratch* (make-array 192 :element-type '(unsigned-byte 8) :initial-element 0))
 
-(defun %lf-gather8 (data q0 along sc)
+(defun %lf-vtrans-in (data q0 along sc)
   (declare (type u8vec data sc) (type fixnum q0 along) (optimize (speed 3) (safety 0)))
-  (dotimes (r 8)
-    (let ((row (- (+ q0 (* r along)) 4)))
-      (declare (type fixnum row))
-      (dotimes (tp 8) (setf (aref sc (+ (* tp 8) r)) (aref data (+ row tp)))))))
+  (let* ((r0 (- q0 4)) (r1 (+ r0 along)) (r2 (+ r1 along)) (r3 (+ r2 along))
+         (r4 (+ r3 along)) (r5 (+ r4 along)) (r6 (+ r5 along)) (r7 (+ r6 along)))
+    (declare (type fixnum r0 r1 r2 r3 r4 r5 r6 r7))
+    ;; stage 1 (bytes): A0/A1 from lines 0,1; A2/A3 from 2,3; A4/A5 from 4,5; A6/A7 from 6,7
+    (%vi-st8 sc 0 (%vi-trn1-8 (%vi-ld8 data r0) (%vi-ld8 data r1)))
+    (%vi-st8 sc 8 (%vi-trn2-8 (%vi-ld8 data r0) (%vi-ld8 data r1)))
+    (%vi-st8 sc 16 (%vi-trn1-8 (%vi-ld8 data r2) (%vi-ld8 data r3)))
+    (%vi-st8 sc 24 (%vi-trn2-8 (%vi-ld8 data r2) (%vi-ld8 data r3)))
+    (%vi-st8 sc 32 (%vi-trn1-8 (%vi-ld8 data r4) (%vi-ld8 data r5)))
+    (%vi-st8 sc 40 (%vi-trn2-8 (%vi-ld8 data r4) (%vi-ld8 data r5)))
+    (%vi-st8 sc 48 (%vi-trn1-8 (%vi-ld8 data r6) (%vi-ld8 data r7)))
+    (%vi-st8 sc 56 (%vi-trn2-8 (%vi-ld8 data r6) (%vi-ld8 data r7)))
+    ;; stage 2 (halfwords): B0/B2 from (A0,A2), B1/B3 from (A1,A3), B4/B6 from (A4,A6), B5/B7 from (A5,A7)
+    (%vi-st8 sc 64 (%vi-trn1 (%vi-ld8 sc 0) (%vi-ld8 sc 16)))
+    (%vi-st8 sc 80 (%vi-trn2 (%vi-ld8 sc 0) (%vi-ld8 sc 16)))
+    (%vi-st8 sc 72 (%vi-trn1 (%vi-ld8 sc 8) (%vi-ld8 sc 24)))
+    (%vi-st8 sc 88 (%vi-trn2 (%vi-ld8 sc 8) (%vi-ld8 sc 24)))
+    (%vi-st8 sc 96 (%vi-trn1 (%vi-ld8 sc 32) (%vi-ld8 sc 48)))
+    (%vi-st8 sc 112 (%vi-trn2 (%vi-ld8 sc 32) (%vi-ld8 sc 48)))
+    (%vi-st8 sc 104 (%vi-trn1 (%vi-ld8 sc 40) (%vi-ld8 sc 56)))
+    (%vi-st8 sc 120 (%vi-trn2 (%vi-ld8 sc 40) (%vi-ld8 sc 56)))
+    ;; stage 3 (words): C0/C4 from (B0,B4), C1/C5 from (B1,B5), C2/C6 from (B2,B6), C3/C7 from (B3,B7)
+    (%vi-st8 sc 128 (%vi-trn1-32 (%vi-ld8 sc 64) (%vi-ld8 sc 96)))
+    (%vi-st8 sc 160 (%vi-trn2-32 (%vi-ld8 sc 64) (%vi-ld8 sc 96)))
+    (%vi-st8 sc 136 (%vi-trn1-32 (%vi-ld8 sc 72) (%vi-ld8 sc 104)))
+    (%vi-st8 sc 168 (%vi-trn2-32 (%vi-ld8 sc 72) (%vi-ld8 sc 104)))
+    (%vi-st8 sc 144 (%vi-trn1-32 (%vi-ld8 sc 80) (%vi-ld8 sc 112)))
+    (%vi-st8 sc 176 (%vi-trn2-32 (%vi-ld8 sc 80) (%vi-ld8 sc 112)))
+    (%vi-st8 sc 152 (%vi-trn1-32 (%vi-ld8 sc 88) (%vi-ld8 sc 120)))
+    (%vi-st8 sc 184 (%vi-trn2-32 (%vi-ld8 sc 88) (%vi-ld8 sc 120)))
+    nil))
 
-(defun %lf-scatter6 (data q0 along sc)              ; p2..q2 (taps 1..6)
+(defun %lf-vtrans-out (data q0 along sc)
+  "The transpose network run on C (taps) yields the eight lines; the last stage stores them."
   (declare (type u8vec data sc) (type fixnum q0 along) (optimize (speed 3) (safety 0)))
-  (dotimes (r 8)
-    (let ((row (- (+ q0 (* r along)) 3)))
-      (declare (type fixnum row))
-      (dotimes (tp 6) (setf (aref data (+ row tp)) (aref sc (+ (* (+ tp 1) 8) r)))))))
+  (let* ((r0 (- q0 4)) (r1 (+ r0 along)) (r2 (+ r1 along)) (r3 (+ r2 along))
+         (r4 (+ r3 along)) (r5 (+ r4 along)) (r6 (+ r5 along)) (r7 (+ r6 along)))
+    (declare (type fixnum r0 r1 r2 r3 r4 r5 r6 r7))
+    (%vi-st8 sc 0 (%vi-trn1-8 (%vi-ld8 sc 128) (%vi-ld8 sc 136)))
+    (%vi-st8 sc 8 (%vi-trn2-8 (%vi-ld8 sc 128) (%vi-ld8 sc 136)))
+    (%vi-st8 sc 16 (%vi-trn1-8 (%vi-ld8 sc 144) (%vi-ld8 sc 152)))
+    (%vi-st8 sc 24 (%vi-trn2-8 (%vi-ld8 sc 144) (%vi-ld8 sc 152)))
+    (%vi-st8 sc 32 (%vi-trn1-8 (%vi-ld8 sc 160) (%vi-ld8 sc 168)))
+    (%vi-st8 sc 40 (%vi-trn2-8 (%vi-ld8 sc 160) (%vi-ld8 sc 168)))
+    (%vi-st8 sc 48 (%vi-trn1-8 (%vi-ld8 sc 176) (%vi-ld8 sc 184)))
+    (%vi-st8 sc 56 (%vi-trn2-8 (%vi-ld8 sc 176) (%vi-ld8 sc 184)))
+    (%vi-st8 sc 64 (%vi-trn1 (%vi-ld8 sc 0) (%vi-ld8 sc 16)))
+    (%vi-st8 sc 80 (%vi-trn2 (%vi-ld8 sc 0) (%vi-ld8 sc 16)))
+    (%vi-st8 sc 72 (%vi-trn1 (%vi-ld8 sc 8) (%vi-ld8 sc 24)))
+    (%vi-st8 sc 88 (%vi-trn2 (%vi-ld8 sc 8) (%vi-ld8 sc 24)))
+    (%vi-st8 sc 96 (%vi-trn1 (%vi-ld8 sc 32) (%vi-ld8 sc 48)))
+    (%vi-st8 sc 112 (%vi-trn2 (%vi-ld8 sc 32) (%vi-ld8 sc 48)))
+    (%vi-st8 sc 104 (%vi-trn1 (%vi-ld8 sc 40) (%vi-ld8 sc 56)))
+    (%vi-st8 sc 120 (%vi-trn2 (%vi-ld8 sc 40) (%vi-ld8 sc 56)))
+    (%vi-st8 data r0 (%vi-trn1-32 (%vi-ld8 sc 64) (%vi-ld8 sc 96)))
+    (%vi-st8 data r4 (%vi-trn2-32 (%vi-ld8 sc 64) (%vi-ld8 sc 96)))
+    (%vi-st8 data r1 (%vi-trn1-32 (%vi-ld8 sc 72) (%vi-ld8 sc 104)))
+    (%vi-st8 data r5 (%vi-trn2-32 (%vi-ld8 sc 72) (%vi-ld8 sc 104)))
+    (%vi-st8 data r2 (%vi-trn1-32 (%vi-ld8 sc 80) (%vi-ld8 sc 112)))
+    (%vi-st8 data r6 (%vi-trn2-32 (%vi-ld8 sc 80) (%vi-ld8 sc 112)))
+    (%vi-st8 data r3 (%vi-trn1-32 (%vi-ld8 sc 88) (%vi-ld8 sc 120)))
+    (%vi-st8 data r7 (%vi-trn2-32 (%vi-ld8 sc 88) (%vi-ld8 sc 120)))
+    nil))
 
-(defun %lf-scatter4 (data q0 along sc)              ; p1..q1 (taps 2..5)
-  (declare (type u8vec data sc) (type fixnum q0 along) (optimize (speed 3) (safety 0)))
-  (dotimes (r 8)
-    (let ((row (- (+ q0 (* r along)) 2)))
-      (declare (type fixnum row))
-      (dotimes (tp 4) (setf (aref data (+ row tp)) (aref sc (+ (* (+ tp 2) 8) r)))))))
-
-(defun %lf-gather4 (data q0 along sc)               ; p1 p0 q0 q1
-  (declare (type u8vec data sc) (type fixnum q0 along) (optimize (speed 3) (safety 0)))
-  (dotimes (r 8)
-    (let ((row (- (+ q0 (* r along)) 2)))
-      (declare (type fixnum row))
-      (dotimes (tp 4) (setf (aref sc (+ (* tp 8) r)) (aref data (+ row tp)))))))
-
-(defun %lf-scatter2 (data q0 along sc)              ; p0 q0 (taps 1..2)
-  (declare (type u8vec data sc) (type fixnum q0 along) (optimize (speed 3) (safety 0)))
-  (dotimes (r 8)
-    (let ((row (- (+ q0 (* r along)) 1)))
-      (declare (type fixnum row))
-      (dotimes (tp 2) (setf (aref data (+ row tp)) (aref sc (+ (* (+ tp 1) 8) r)))))))
-
-;; the simple filter's adjustment for one 8-lane half at byte offset OFF into
-;; the vectors, stored back through masked bsl.  Written as a LET* of vi-pack
-;; temps so the compiler keeps them in Q registers.
 (defun %edge-simple (data start along s count elim)
   (declare (type u8vec data) (type dim start along s) (type (integer 0 64) count)
            (type (signed-byte 16) elim) (optimize (speed 3) (safety 0)))
   (if (/= along 1)
-      ;; vertical edge: gather 8 lines tap-major, run the h8 kernel on the scratch, scatter back
+      ;; vertical edge: NEON-transpose 8 lines into tap vectors, run the h8 kernel, transpose back
       (let ((sc *lf-vscratch*) (g 0))
         (declare (type u8vec sc) (type (integer 0 64) g))
         (loop
           (when (>= g count) (return nil))
           (let ((q0 (+ start (* g along))))
             (declare (type fixnum q0))
-            (%lf-gather4 data q0 along sc)
-            (%edge-simple-h8 sc 0 8 16 24 elim)
-            (%lf-scatter2 data q0 along sc))
+            (%lf-vtrans-in data q0 along sc)
+            (%edge-simple-h8 sc 144 152 160 168 elim)
+            (%lf-vtrans-out data q0 along sc))
           (setq g (+ g 8))))
       ;; horizontal edge: COUNT contiguous along-samples in [start, start+count)
       (let ((s2 (* 2 s)) (g 0))
@@ -137,16 +169,16 @@
   (declare (type u8vec data) (type dim start along s) (type (integer 0 64) count)
            (type (signed-byte 16) hthr ilim elim) (optimize (speed 3) (safety 0)))
   (if (/= along 1)
-      ;; vertical edge: gather 8 lines tap-major, run the h8 kernel on the scratch, scatter back
+      ;; vertical edge: NEON-transpose 8 lines into tap vectors, run the h8 kernel, transpose back
       (let ((sc *lf-vscratch*) (g 0))
         (declare (type u8vec sc) (type (integer 0 64) g))
         (loop
           (when (>= g count) (return nil))
           (let ((q0 (+ start (* g along))))
             (declare (type fixnum q0))
-            (%lf-gather8 data q0 along sc)
-            (%edge-sub-h8 sc 0 8 16 24 32 40 48 56 hthr ilim elim)
-            (%lf-scatter4 data q0 along sc))
+            (%lf-vtrans-in data q0 along sc)
+            (%edge-sub-h8 sc 128 136 144 152 160 168 176 184 hthr ilim elim)
+            (%lf-vtrans-out data q0 along sc))
           (setq g (+ g 8))))
       (let ((s2 (* 2 s)) (s3 (* 3 s)) (s4 (* 4 s)) (g 0))
         (declare (type dim s2 s3 s4) (type (integer 0 64) g))
@@ -240,16 +272,16 @@
   (declare (type u8vec data) (type dim start along s) (type (integer 0 64) count)
            (type (signed-byte 16) hthr ilim elim) (optimize (speed 3) (safety 0)))
   (if (/= along 1)
-      ;; vertical edge: gather 8 lines tap-major, run the h8 kernel on the scratch, scatter back
+      ;; vertical edge: NEON-transpose 8 lines into tap vectors, run the h8 kernel, transpose back
       (let ((sc *lf-vscratch*) (g 0))
         (declare (type u8vec sc) (type (integer 0 64) g))
         (loop
           (when (>= g count) (return nil))
           (let ((q0 (+ start (* g along))))
             (declare (type fixnum q0))
-            (%lf-gather8 data q0 along sc)
-            (%edge-mb-h8 sc 0 8 16 24 32 40 48 56 hthr ilim elim)
-            (%lf-scatter6 data q0 along sc))
+            (%lf-vtrans-in data q0 along sc)
+            (%edge-mb-h8 sc 128 136 144 152 160 168 176 184 hthr ilim elim)
+            (%lf-vtrans-out data q0 along sc))
           (setq g (+ g 8))))
       (let ((s2 (* 2 s)) (s3 (* 3 s)) (s4 (* 4 s)) (g 0))
         (declare (type dim s2 s3 s4) (type (integer 0 64) g))

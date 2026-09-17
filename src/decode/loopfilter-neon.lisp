@@ -268,6 +268,8 @@
     (%vi-st8 data q2o (%vi-sqxtun (%vi-bsl (%vi-and ok (%vi-eor hev (%vi-dup16 -1)))
                         (%vcl255 (%vi-sub16 (%vld data q2o) (%vc8 (%vi-sshr16 (%vi-add16 (%vi-mul16 w (%vi-dup16 9)) (%vi-dup16 63)) 7)))) (%vld data q2o))))))
 
+;; (outside the PROGN above: it must still be Modus-only — under SBCL the scalar %edge-mb stays)
+#+modus
 (defun %edge-mb (data start along s count hthr ilim elim)
   (declare (type u8vec data) (type dim start along s) (type (integer 0 64) count)
            (type (signed-byte 16) hthr ilim elim) (optimize (speed 3) (safety 0)))

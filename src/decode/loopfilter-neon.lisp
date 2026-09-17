@@ -27,9 +27,15 @@
 (defmacro %vc8 (v) `(%vi-smax16 (%vi-smin16 ,v (%vi-dup16 127)) (%vi-dup16 -128)))
 ;; clamp a value already known to fit widely -> [0,255], kept in s16.
 (defmacro %vcl255 (v) `(%vi-smax16 (%vi-smin16 ,v (%vi-dup16 255)) (%vi-dup16 0)))
-;; per-lane mask 0xFFFF where (elim >= cond), else 0, from the sign of elim-cond.
-(defmacro %vle (elimv condv)
-  `(%vi-eor (%vi-sshr16 (%vi-sub16 ,elimv ,condv) 15) (%vi-dup16 -1)))
+;; per-lane mask 0xFFFF where (lim >= x), else 0, from the sign of lim-x.
+(defmacro %vle (limv xv)
+  `(%vi-eor (%vi-sshr16 (%vi-sub16 ,limv ,xv) 15) (%vi-dup16 -1)))
+;; mask where (x > thr): the complement of (thr >= x).
+(defmacro %vgt (thrv xv) `(%vi-eor (%vle ,thrv ,xv) (%vi-dup16 -1)))
+;; |a-b| on s16 lanes.
+(defmacro %vabsd (a b) `(%vi-abs16 (%vi-sub16 ,a ,b)))
+;; load u8x8 at OFF widened to s16x8.
+(defmacro %vld (data off) `(%vi-uxtl (%vi-ld8 ,data ,off)))
 
 ;; the simple filter's adjustment for one 8-lane half at byte offset OFF into
 ;; the vectors, stored back through masked bsl.  Written as a LET* of vi-pack
@@ -85,5 +91,72 @@
     (declare (type vi-pack p1 p0 q0 q1 a mask b a2))
     (%vi-st8 data p0o (%vi-sqxtun (%vi-bsl mask (%vcl255 (%vi-add16 p0 b)) p0)))
     (%vi-st8 data q0o (%vi-sqxtun (%vi-bsl mask (%vcl255 (%vi-sub16 q0 a2)) q0)))))
+
+;;; ---- normal sub-block edge filter (%edge-sub): p1..q1 may move -------------
+(defun %edge-sub (data start along s count hthr ilim elim)
+  (declare (type u8vec data) (type dim start along s) (type (integer 0 64) count)
+           (type (signed-byte 16) hthr ilim elim) (optimize (speed 3) (safety 0)))
+  (if (/= along 1)
+      (let ((s2 (* 2 s)) (s3 (* 3 s)) (s4 (* 4 s)))
+        (declare (type dim s2 s3 s4))
+        (%along (q0i start along count)
+          (let* ((p3i (- q0i s4)) (p2i (- q0i s3)) (p1i (- q0i s2)) (p0i (- q0i s))
+                 (q1i (+ q0i s)) (q2i (+ q0i s2)) (q3i (+ q0i s3))
+                 (p3 (aref data p3i)) (p2 (aref data p2i)) (p1 (aref data p1i)) (p0 (aref data p0i))
+                 (q0 (aref data q0i)) (q1 (aref data q1i)) (q2 (aref data q2i)) (q3 (aref data q3i)))
+            (declare (type dim p3i p2i p1i p0i q1i q2i q3i)
+                     (type (unsigned-byte 8) p3 p2 p1 p0 q0 q1 q2 q3))
+            (when (%edge-ok ilim elim p3 p2 p1 p0 q0 q1 q2 q3)
+              (let ((hv (%hev hthr p1 p0 q0 q1)))
+                (multiple-value-bind (np0 nq0 a0) (%adjust hv p1 p0 q0 q1)
+                  (declare (type fixnum a0))
+                  (setf (aref data p0i) np0 (aref data q0i) nq0)
+                  (unless hv
+                    (let ((a (ash (+ a0 1) -1)))
+                      (declare (type fixnum a))
+                      (setf (aref data q1i) (clamp255 (- q1 a))
+                            (aref data p1i) (clamp255 (+ p1 a)))))))))))
+      (let ((s2 (* 2 s)) (s3 (* 3 s)) (s4 (* 4 s)) (g 0))
+        (declare (type dim s2 s3 s4) (type (integer 0 64) g))
+        (loop
+          (when (>= g count) (return nil))
+          (let ((q0o (+ start g)))
+            (declare (type dim q0o))
+            (%edge-sub-h8 data (- q0o s4) (- q0o s3) (- q0o s2) (- q0o s)
+                          q0o (+ q0o s) (+ q0o s2) (+ q0o s3) hthr ilim elim))
+          (setq g (+ g 8))))))
+
+;; one 8-lane group of the normal sub-block filter.  Held in registers: the four
+;; near samples p1/p0/q0/q1, the edge-ok mask OK, the adjustment A, and OKHEV
+;; (edge-ok AND NOT hev, the p1/q1-update mask).  p2/p3/q2/q3 are inline in the
+;; gate; b/a2/adj are recomputed inline in the stores.
+(defun %edge-sub-h8 (data p3o p2o p1o p0o q0o q1o q2o q3o hthr ilim elim)
+  (declare (type u8vec data) (type dim p3o p2o p1o p0o q0o q1o q2o q3o)
+           (type (signed-byte 16) hthr ilim elim) (optimize (speed 3) (safety 0)))
+  (let* ((p1 (%vld data p1o)) (p0 (%vld data p0o)) (q0 (%vld data q0o)) (q1 (%vld data q1o))
+         (ok (%vi-and
+              (%vi-and (%vi-and (%vle (%vi-dup16 elim)
+                                      (%vi-add16 (%vi-shl16 (%vabsd p0 q0) 1) (%vi-sshr16 (%vabsd p1 q1) 1)))
+                                (%vi-and (%vle (%vi-dup16 ilim) (%vabsd (%vld data p3o) (%vld data p2o)))
+                                         (%vle (%vi-dup16 ilim) (%vabsd (%vld data p2o) p1))))
+                       (%vi-and (%vle (%vi-dup16 ilim) (%vabsd p1 p0))
+                                (%vle (%vi-dup16 ilim) (%vabsd q1 q0))))
+              (%vi-and (%vle (%vi-dup16 ilim) (%vabsd (%vld data q3o) (%vld data q2o)))
+                       (%vle (%vi-dup16 ilim) (%vabsd (%vld data q2o) q1)))))
+         (hev (%vi-orr (%vgt (%vi-dup16 hthr) (%vabsd p1 p0)) (%vgt (%vi-dup16 hthr) (%vabsd q1 q0))))
+         (a (%vc8 (%vi-add16 (%vi-bsl hev (%vc8 (%vi-sub16 p1 q1)) (%vi-dup16 0))
+                             (%vi-mul16 (%vi-sub16 q0 p0) (%vi-dup16 3)))))
+         (okhev (%vi-and ok (%vi-eor hev (%vi-dup16 -1)))))
+    (declare (type vi-pack p1 p0 q0 q1 ok hev a okhev))
+    ;; p0,q0: updated where edge-ok.  b = (c8(a+3))>>3, a2 = (c8(a+4))>>3.
+    (%vi-st8 data p0o (%vi-sqxtun (%vi-bsl ok
+                        (%vcl255 (%vi-add16 p0 (%vi-sshr16 (%vc8 (%vi-add16 a (%vi-dup16 3))) 3))) p0)))
+    (%vi-st8 data q0o (%vi-sqxtun (%vi-bsl ok
+                        (%vcl255 (%vi-sub16 q0 (%vi-sshr16 (%vc8 (%vi-add16 a (%vi-dup16 4))) 3))) q0)))
+    ;; p1,q1: updated where edge-ok AND NOT hev, by adj = (a2+1)>>1.
+    (%vi-st8 data p1o (%vi-sqxtun (%vi-bsl okhev
+                        (%vcl255 (%vi-add16 p1 (%vi-sshr16 (%vi-add16 (%vi-sshr16 (%vc8 (%vi-add16 a (%vi-dup16 4))) 3) (%vi-dup16 1)) 1))) p1)))
+    (%vi-st8 data q1o (%vi-sqxtun (%vi-bsl okhev
+                        (%vcl255 (%vi-sub16 q1 (%vi-sshr16 (%vi-add16 (%vi-sshr16 (%vc8 (%vi-add16 a (%vi-dup16 4))) 3) (%vi-dup16 1)) 1))) q1)))))
 
 ) ; progn

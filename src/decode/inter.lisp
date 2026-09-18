@@ -63,11 +63,19 @@
         ;; the visible row: 8 bytes per step on Modus (a REPLACE per row is a
         ;; runtime call — 8 % of the frame's cycles were here), scalar tail
         (copy-bytes dst di src si w)
-        ;; left and right border of this row
+        ;; left and right border of this row: 8-byte DUP stores on Modus
+        ;; (BORDER is a multiple of 8), scalar elsewhere
         (let ((l (aref dst di)) (r (aref dst (+ di w -1))))
           (declare (type (unsigned-byte 8) l r))
-          (dotimes (k border) (setf (aref dst (+ (- di border) k)) l))
-          (dotimes (k border) (setf (aref dst (+ di w k)) r)))))
+          #+modus (let ((lo (- di border)) (ro (+ di w)) (k 0))
+                    (declare (type fixnum lo ro k))
+                    (loop (when (>= k border) (return))
+                          (%vi-st8 dst (+ lo k) (%vi-dup8 l))
+                          (%vi-st8 dst (+ ro k) (%vi-dup8 r))
+                          (setq k (+ k 8))))
+          #-modus (progn
+                    (dotimes (k border) (setf (aref dst (+ (- di border) k)) l))
+                    (dotimes (k border) (setf (aref dst (+ di w k)) r))))))
     ;; top and bottom rows
     (let ((top (* border stride)) (bot (* (+ border h -1) stride)))
       (declare (type fixnum top bot))
@@ -379,7 +387,8 @@
          (bias (vd-sign-bias vd))
          (n 0))
     (declare (type fxvec nr nc cnt refs mvr mvc modes bias) (type fixnum cols n))
-    (fill nr 0) (fill nc 0) (fill cnt 0)
+    ;; typed stores, not FILL (a generic runtime loop, three calls per inter MB)
+    (dotimes (i 4) (setf (aref nr i) 0 (aref nc i) 0 (aref cnt i) 0))
     (flet ((neighbour (dx dy weight)
              (let ((bx (+ mbx dx)) (by (+ mby dy)))
                (when (and (>= bx 0) (>= by 0))
@@ -715,12 +724,19 @@
 ;;; ---- macroblock loop ----------------------------------------------------------------
 
 (defun decode-macroblocks (vd part0 tokens nparts key)
+  (declare (type simple-vector tokens) (type fixnum nparts))
   (let* ((d (vd-d vd)) (cols (vd-mb-cols vd)) (rows (vd-mb-rows vd))
-         (segs (vd-mb-segment vd)))
+         (segs (vd-mb-segment vd))
+         ;; typed locals: an AREF through an undeclared struct slot is the
+         ;; generic runtime path (%MDA-P) on Modus
+         (mrefs (vd-mb-ref vd)) (mmvr (vd-mb-mvr vd)) (mmvc (vd-mb-mvc vd))
+         (mym (vd-mb-ymode vd)) (muvm (vd-mb-uvmode vd)) (segdq (d-seg-dq d)))
+    (declare (type fxvec segs mrefs mmvr mmvc mym muvm) (type simple-vector segdq)
+             (type fixnum cols rows))
     (fill (d-above-y d) 0) (fill (d-above-u d) 0) (fill (d-above-v d) 0)
     (fill (d-above-y2 d) 0) (fill (d-above-bmode d) 0)
     (dotimes (mby rows)
-      (let ((bd (aref tokens (mod mby nparts))))
+      (let ((bd (svref tokens (mod mby nparts))))
         (fill (d-left-y d) 0) (fill (d-left-u d) 0) (fill (d-left-v d) 0)
         (setf (d-left-y2 d) 0)
         (fill (d-left-bmode d) 0)
@@ -738,19 +754,19 @@
               (cond
                 (key
                  (multiple-value-setq (ymode uvmode) (read-mb-modes d part0 mbx))
-                 (setf (aref (vd-mb-ref vd) mi) +intra-frame+
-                       (aref (vd-mb-mvr vd) mi) 0 (aref (vd-mb-mvc vd) mi) 0
-                       (aref (vd-mb-ymode vd) mi) ymode (aref (vd-mb-uvmode vd) mi) uvmode))
+                 (setf (aref mrefs mi) +intra-frame+
+                       (aref mmvr mi) 0 (aref mmvc mi) 0
+                       (aref mym mi) ymode (aref muvm mi) uvmode))
                 ((= 1 (bool-bit part0 (vd-prob-intra vd)))
                  (setf inter t
                        ymode (read-inter-modes vd part0 mi mbx mby)))
                 (t
                  (multiple-value-setq (ymode uvmode) (read-intra-modes-inter-frame vd part0))
-                 (setf (aref (vd-mb-ref vd) mi) +intra-frame+
-                       (aref (vd-mb-mvr vd) mi) 0 (aref (vd-mb-mvc vd) mi) 0
-                       (aref (vd-mb-ymode vd) mi) ymode (aref (vd-mb-uvmode vd) mi) uvmode)))
+                 (setf (aref mrefs mi) +intra-frame+
+                       (aref mmvr mi) 0 (aref mmvc mi) 0
+                       (aref mym mi) ymode (aref muvm mi) uvmode)))
               (let* ((has-y2 (and (/= ymode +b-pred+) (/= ymode +splitmv+)))
-                     (dq (aref (d-seg-dq d) seg))
+                     (dq (svref segdq seg))
                      (nz (decode-residue d bd mbx skip has-y2 dq)))
                 (cond
                   (inter

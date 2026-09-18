@@ -60,14 +60,24 @@ function and a type sharing a name is legal but reads like a mistake."
 ;;; Slot widths are declared as tightly as the arithmetic allows: a 63-bit
 ;;; FIXNUM slot means (- range 1) may legally be a bignum, so the compiler keeps
 ;;; a tag test and an overflow check on every step; with RANGE < 2^9, VALUE <
-;;; 2^17 and POS/END < 2^31 every intermediate provably fits and the checks go.
+;;; 2^16 and POS/END < 2^31 every intermediate provably fits and the checks go.
+;;; Normalization shift per range (libvpx vp8_norm): the count that brings
+;;; RANGE back into [128, 255].  One table lookup and one variable shift per
+;;; decoded bit instead of the RFC's shift-by-one loop.
+(declaim (type (simple-array (unsigned-byte 8) (*)) +bd-norm+))
+(defparameter +bd-norm+
+  (let ((v (make-array 256 :element-type '(unsigned-byte 8) :initial-element 0)))
+    (loop for r from 1 below 256 do (setf (aref v r) (- 8 (integer-length r))))
+    v))
+
 (defstruct (bool-dec (:conc-name bd-))
   (buf nil :type (or null octets))
   (pos 0 :type (unsigned-byte 31))       ; next byte to load
   (end 0 :type (unsigned-byte 31))
   (range 255 :type (unsigned-byte 9))    ; 128..255 between calls
-  (value 0 :type (unsigned-byte 17))     ; 16-bit window + 1 shifted bit
-  (bit-count 0 :type (unsigned-byte 4)))
+  (value 0 :type (unsigned-byte 16))     ; the 16-bit window (< range << 8)
+  (bit-count 0 :type (unsigned-byte 4))  ; bits shifted since the last byte load, 0..7
+  (norm +bd-norm+ :type octets))         ; the normalization table, reached through the struct (a global read is a generic array access on Modus)
 
 (defun bool-init (buf pos end)
   "A boolean decoder over BUF[POS..END)."
@@ -80,7 +90,10 @@ function and a type sharing a name is legal but reads like a mistake."
 
 (declaim (inline bool-bit))
 (defun bool-bit (bd prob)
-  "Decode one boolean with probability PROB/256 of being 0 (RFC 6386 §7.3)."
+  "Decode one boolean with probability PROB/256 of being 0 (RFC 6386 §7.3).
+   Normalization is batched: SHIFT = norm[range] bits at once (libvpx), with
+   the byte refill placed at the bit position the per-bit process would have
+   moved it to (bit-count + shift - 8)."
   (declare (type bool-dec bd) (type (unsigned-byte 8) prob))
   (let* ((range (bd-range bd))
          (split (+ 1 (ash (* (- range 1) prob) -8)))
@@ -88,20 +101,66 @@ function and a type sharing a name is legal but reads like a mistake."
          (value (bd-value bd))
          (bit 0))
     (declare (type (unsigned-byte 9) range) (type (unsigned-byte 8) split)
-             (type (unsigned-byte 16) bigsplit) (type (unsigned-byte 17) value)
+             (type (unsigned-byte 16) bigsplit value)
              (type (unsigned-byte 1) bit))
     (cond ((>= value bigsplit)
            (setf bit 1 range (- range split) value (- value bigsplit)))
           (t (setf range split)))
-    (loop while (< range 128) do
-      (setf value (logand (ash value 1) #x1ffff) range (ash range 1))
-      (when (= (incf (bd-bit-count bd)) 8)
-        (setf (bd-bit-count bd) 0)
-        (when (< (bd-pos bd) (bd-end bd))
-          (setf value (logior value (aref (bd-buf bd) (bd-pos bd))))
-          (incf (bd-pos bd)))))
+    (let* ((norm (bd-norm bd)) (shift (aref norm range)))   ; NORM as a declared local: the u8 fast path needs a variable
+      (declare (type octets norm) (type (unsigned-byte 3) shift))
+      (when (> shift 0)
+        (setf range (ash range shift)
+              value (ash value shift))
+        (let ((bc (+ (bd-bit-count bd) shift)))
+          (declare (type (unsigned-byte 4) bc))
+          (when (>= bc 8)
+            (setf bc (- bc 8))
+            (when (< (bd-pos bd) (bd-end bd))
+              (setf value (logior value (ash (aref (bd-buf bd) (bd-pos bd)) bc)))
+              (incf (bd-pos bd))))
+          (setf (bd-bit-count bd) bc))))
     (setf (bd-range bd) range (bd-value bd) value)
     bit))
+
+;;; Cached decoder state (libvpx keeps value/range/count in registers across a
+;;; whole token loop and writes the struct once per block).  WITH-BD-CACHE
+;;; binds the state in locals for BODY — BD-BIT* decodes on those locals —
+;;; and writes it back at the end.  The body must not call anything that
+;;; reads BD through the struct (BOOL-BIT, BOOL-LITERAL, ...) while cached.
+
+(defmacro with-bd-cache (bd &body body)   ; flat lambda list: Modus's DEFMACRO does not destructure
+  `(let ((%range (bd-range ,bd)) (%value (bd-value ,bd)) (%bc (bd-bit-count ,bd))
+         (%pos (bd-pos ,bd)) (%end (bd-end ,bd)) (%buf (bd-buf ,bd)) (%norm (bd-norm ,bd)))
+     (declare (type (unsigned-byte 9) %range) (type (unsigned-byte 16) %value)
+              (type (unsigned-byte 4) %bc) (type (unsigned-byte 31) %pos %end)
+              (type octets %buf %norm))
+     ,@body
+     (setf (bd-range ,bd) %range (bd-value ,bd) %value
+           (bd-bit-count ,bd) %bc (bd-pos ,bd) %pos)))
+
+(defmacro bd-bit* (prob)
+  "BOOL-BIT on the WITH-BD-CACHE locals; PROB must be an (unsigned-byte 8) form."
+  `(let* ((%prob ,prob)
+          (%split (+ 1 (ash (* (- %range 1) %prob) -8)))
+          (%bigsplit (ash %split 8))
+          (%bit 0))
+     (declare (type (unsigned-byte 8) %prob %split) (type (unsigned-byte 16) %bigsplit)
+              (type (unsigned-byte 1) %bit))
+     (cond ((>= %value %bigsplit)
+            (setf %bit 1 %range (- %range %split) %value (- %value %bigsplit)))
+           (t (setf %range %split)))
+     (let ((%shift (aref %norm %range)))
+       (declare (type (unsigned-byte 3) %shift))
+       (when (> %shift 0)
+         (setf %range (ash %range %shift)
+               %value (ash %value %shift)
+               %bc (+ %bc %shift))
+         (when (>= %bc 8)
+           (setf %bc (- %bc 8))
+           (when (< %pos %end)
+             (setf %value (logior %value (ash (aref %buf %pos) %bc)))
+             (setf %pos (+ %pos 1))))))
+     %bit))
 
 (defun bool-literal (bd nbits)
   "Read NBITS as an unsigned literal (flat probability 128), MSB first."

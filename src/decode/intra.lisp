@@ -77,59 +77,66 @@
   (declare (type fixnum plane band ctx))
   (the fixnum (* (+ (* (+ (* plane 8) band) 3) ctx) 11)))
 
-(defun get-large-value (bd cp base)
-  "Decode the magnitude of a dct_cat token given prob base BASE (RFC §13.2)."
-  (declare (type (simple-array (signed-byte 32) (*)) cp) (type fixnum base))
-  (if (zerop (bool-bit bd (aref cp (+ base 3))))
-      (if (zerop (bool-bit bd (aref cp (+ base 4))))
-          2
-          (+ 3 (bool-bit bd (aref cp (+ base 5)))))
-      (if (zerop (bool-bit bd (aref cp (+ base 6))))
-          (if (zerop (bool-bit bd (aref cp (+ base 7))))
-              (+ 5 (bool-bit bd 159))
-              (+ 7 (* 2 (bool-bit bd 165)) (bool-bit bd 145)))
-          (let* ((bit1 (bool-bit bd (aref cp (+ base 8))))
-                 (bit0 (bool-bit bd (aref cp (+ base (+ 9 bit1)))))
-                 (cat (+ (* 2 bit1) bit0))
-                 (tab (aref +cat3456+ cat))
-                 (v 0))
-            (declare (type (simple-array (signed-byte 32) (*)) tab) (type fixnum v))
-            (dotimes (k (length tab))
-              (setf v (+ v v (bool-bit bd (aref tab k)))))
-            (+ v 3 (ash 8 cat))))))
+(defmacro get-large-value* (cp base)
+  "GET-LARGE-VALUE on the WITH-BD-CACHE locals (RFC §13.2)."
+  `(if (zerop (bd-bit* (aref ,cp (+ ,base 3))))
+       (if (zerop (bd-bit* (aref ,cp (+ ,base 4))))
+           2
+           (+ 3 (bd-bit* (aref ,cp (+ ,base 5)))))
+       (if (zerop (bd-bit* (aref ,cp (+ ,base 6))))
+           (if (zerop (bd-bit* (aref ,cp (+ ,base 7))))
+               (+ 5 (bd-bit* 159))
+               (+ 7 (* 2 (bd-bit* 165)) (bd-bit* 145)))
+           (let* ((bit1 (bd-bit* (aref ,cp (+ ,base 8))))
+                  (bit0 (bd-bit* (aref ,cp (+ ,base (+ 9 bit1)))))
+                  (cat (+ (* 2 bit1) bit0))
+                  (tab (aref +cat3456+ cat))
+                  (v 0))
+             (declare (type (simple-array (signed-byte 32) (*)) tab) (type fixnum v)
+                      (type (unsigned-byte 1) bit1 bit0) (type (unsigned-byte 2) cat))
+             (dotimes (k (length tab))
+               (setf v (+ v v (bd-bit* (aref tab k)))))
+             (+ v 3 (ash 8 cat))))))
 
 (defun get-coeffs (bd cp plane out ctx dqdc dqac first)
   "Decode one 4x4 block's tokens into OUT (raster, pre-zeroed) applying the
-   dequant factors DQDC/DQAC.  Returns T if any non-zero coefficient appeared."
+   dequant factors DQDC/DQAC.  Returns a flags fixnum: bit 0 = a non-zero
+   coefficient appeared, bit 1 = one beyond the DC did.  The decoder state is
+   cached in locals for the whole block (WITH-BD-CACHE)."
   (declare (type (simple-array (signed-byte 32) (*)) cp out)
-           (type fixnum plane ctx dqdc dqac first))
-  (let ((n first) (saw nil) (saw-ac nil))
-    (declare (type fixnum n))
-    (loop
-      (when (= n 16) (return))
-      (let ((base (cprob-base plane (aref +coeff-bands+ n) ctx)))
-        (when (zerop (bool-bit bd (aref cp base)))   ; end-of-block
-          (return))
-        ;; run of DCT_0 tokens (no EOB check follows a zero)
+           (type fixnum plane ctx dqdc dqac first) (type bool-dec bd))
+  (let ((n first) (saw 0) (saw-ac 0))
+    (declare (type (integer 0 16) n) (type (unsigned-byte 1) saw saw-ac))
+    (with-bd-cache bd
+      (block scan
         (loop
-          (if (zerop (bool-bit bd (aref cp (+ base 1))))
-              (progn                                  ; DCT_0
-                (incf n)
-                (when (= n 16) (return-from get-coeffs (values saw saw-ac)))
-                (setf base (cprob-base plane (aref +coeff-bands+ n) 0)))
-              (return)))
-        ;; a non-zero coefficient
-        (let ((v (if (zerop (bool-bit bd (aref cp (+ base 2))))
-                     1
-                     (get-large-value bd cp base))))
-          (declare (type fixnum v))
-          (setf ctx (if (= v 1) 1 2))
-          (when (= 1 (bool-bit bd 128)) (setf v (- v)))
-          (setf (aref out (aref +coeff-scan+ n)) (* v (if (= n 0) dqdc dqac)))
-          (setf saw t)
-          (when (> n 0) (setf saw-ac t))
-          (incf n))))
-    (values saw saw-ac)))
+          (when (= n 16) (return-from scan))
+          (let ((base (cprob-base plane (aref +coeff-bands+ n) ctx)))
+            (declare (type (unsigned-byte 12) base))
+            (when (zerop (bd-bit* (aref cp base)))   ; end-of-block
+              (return-from scan))
+            ;; run of DCT_0 tokens (no EOB check follows a zero)
+            (loop
+              (if (zerop (bd-bit* (aref cp (+ base 1))))
+                  (progn                                  ; DCT_0
+                    (incf n)
+                    (when (= n 16) (return-from scan))
+                    (setf base (cprob-base plane (aref +coeff-bands+ n) 0)))
+                  (return)))
+            ;; a non-zero coefficient
+            (let ((v (if (zerop (bd-bit* (aref cp (+ base 2))))
+                         1
+                         (get-large-value* cp base))))
+              (declare (type fixnum v))
+              (setf ctx (if (= v 1) 1 2))
+              (when (= 1 (bd-bit* 128)) (setf v (- v)))
+              (setf (aref out (aref +coeff-scan+ n)) (* v (if (= n 0) dqdc dqac)))
+              (setf saw 1)
+              (when (> n 0) (setf saw-ac 1))
+              (incf n))))))
+    ;; One fixnum, not (VALUES SAW SAW-AC): a multiple-value return plus the
+    ;; caller's MULTIPLE-VALUE-BIND costs ~1200 instructions on Modus, per block.
+    (logior saw (ash saw-ac 1))))
 
 ;;; ---- intra prediction (RFC 6386 §12) ----------------------------------
 
@@ -472,7 +479,7 @@
          (let* ((ctx (+ (aref ay2 mbx) (d-left-y2 d)))
                 (blk (d-y2coeffs d)))
            (zero16 blk)
-           (multiple-value-bind (nz ac) (get-coeffs bd cp 1 blk ctx y2dc y2ac 0)
+           (let* ((%f (get-coeffs bd cp 1 blk ctx y2dc y2ac 0)) (nz (= 1 (logand %f 1))) (ac (= 2 (logand %f 2))))
              (setf (aref ay2 mbx) (if nz 1 0) (d-left-y2 d) (if nz 1 0))
              (when nz (setf nonzero t (aref nzm 24) 1))
              (when ac (setf (aref acm 24) 1)))))
@@ -483,7 +490,7 @@
                     (ctx (+ (aref ay (+ (* mbx 4) sc)) (aref ly sr)))
                     (blk (aref (d-ycoeffs d) idx)))
                (zero16 blk)
-               (multiple-value-bind (nz ac) (get-coeffs bd cp plane blk ctx y1dc y1ac first)
+               (let* ((%f (get-coeffs bd cp plane blk ctx y1dc y1ac first)) (nz (= 1 (logand %f 1))) (ac (= 2 (logand %f 2))))
                  (setf (aref ay (+ (* mbx 4) sc)) (if nz 1 0) (aref ly sr) (if nz 1 0))
                  (when nz (setf nonzero t (aref nzm idx) 1))
                  (when ac (setf (aref acm idx) 1)))))))
@@ -493,7 +500,7 @@
                   (ctx (+ (aref au (+ (* mbx 2) sc)) (aref lu sr)))
                   (blk (aref (d-ublocks d) idx)))
              (zero16 blk)
-             (multiple-value-bind (nz ac) (get-coeffs bd cp 2 blk ctx uvdc uvac 0)
+             (let* ((%f (get-coeffs bd cp 2 blk ctx uvdc uvac 0)) (nz (= 1 (logand %f 1))) (ac (= 2 (logand %f 2))))
                (setf (aref au (+ (* mbx 2) sc)) (if nz 1 0) (aref lu sr) (if nz 1 0))
                (when nz (setf nonzero t (aref nzm (+ 16 idx)) 1))
                (when ac (setf (aref acm (+ 16 idx)) 1))))))
@@ -503,7 +510,7 @@
                   (ctx (+ (aref av (+ (* mbx 2) sc)) (aref lv sr)))
                   (blk (aref (d-vblocks d) idx)))
              (zero16 blk)
-             (multiple-value-bind (nz ac) (get-coeffs bd cp 2 blk ctx uvdc uvac 0)
+             (let* ((%f (get-coeffs bd cp 2 blk ctx uvdc uvac 0)) (nz (= 1 (logand %f 1))) (ac (= 2 (logand %f 2))))
                (setf (aref av (+ (* mbx 2) sc)) (if nz 1 0) (aref lv sr) (if nz 1 0))
                (when nz (setf nonzero t (aref nzm (+ 20 idx)) 1))
                (when ac (setf (aref acm (+ 20 idx)) 1))))))))

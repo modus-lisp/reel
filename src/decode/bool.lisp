@@ -57,13 +57,17 @@ function and a type sharing a name is legal but reads like a mistake."
 
 ;;; ---- boolean entropy decoder (RFC 6386 §7) -----------------------------
 
+;;; Slot widths are declared as tightly as the arithmetic allows: a 63-bit
+;;; FIXNUM slot means (- range 1) may legally be a bignum, so the compiler keeps
+;;; a tag test and an overflow check on every step; with RANGE < 2^9, VALUE <
+;;; 2^17 and POS/END < 2^31 every intermediate provably fits and the checks go.
 (defstruct (bool-dec (:conc-name bd-))
   (buf nil :type (or null octets))
-  (pos 0 :type fixnum)       ; next byte to load
-  (end 0 :type fixnum)
-  (range 255 :type fixnum)
-  (value 0 :type fixnum)
-  (bit-count 0 :type fixnum))
+  (pos 0 :type (unsigned-byte 31))       ; next byte to load
+  (end 0 :type (unsigned-byte 31))
+  (range 255 :type (unsigned-byte 9))    ; 128..255 between calls
+  (value 0 :type (unsigned-byte 17))     ; 16-bit window + 1 shifted bit
+  (bit-count 0 :type (unsigned-byte 4)))
 
 (defun bool-init (buf pos end)
   "A boolean decoder over BUF[POS..END)."
@@ -77,13 +81,15 @@ function and a type sharing a name is legal but reads like a mistake."
 (declaim (inline bool-bit))
 (defun bool-bit (bd prob)
   "Decode one boolean with probability PROB/256 of being 0 (RFC 6386 §7.3)."
-  (declare (type bool-dec bd) (type fixnum prob))
+  (declare (type bool-dec bd) (type (unsigned-byte 8) prob))
   (let* ((range (bd-range bd))
          (split (+ 1 (ash (* (- range 1) prob) -8)))
          (bigsplit (ash split 8))
          (value (bd-value bd))
          (bit 0))
-    (declare (type fixnum range split bigsplit value bit))
+    (declare (type (unsigned-byte 9) range) (type (unsigned-byte 8) split)
+             (type (unsigned-byte 16) bigsplit) (type (unsigned-byte 17) value)
+             (type (unsigned-byte 1) bit))
     (cond ((>= value bigsplit)
            (setf bit 1 range (- range split) value (- value bigsplit)))
           (t (setf range split)))

@@ -56,7 +56,10 @@
       (setf (aref tmp i) (+ a1 d1)
             (aref tmp (+ 12 i)) (- a1 d1)
             (aref tmp (+ 4 i)) (+ b1 c1)
-            (aref tmp (+ 8 i)) (- b1 c1))))
+            (aref tmp (+ 8 i)) (- b1 c1))
+      ;; clear-on-consume: the block is zero again for the next macroblock
+      ;; (DECODE-RESIDUE writes only the non-zero coefficients it decodes)
+      (setf (aref ip i) 0 (aref ip (+ 4 i)) 0 (aref ip (+ 8 i)) 0 (aref ip (+ 12 i)) 0)))
   (dotimes (i 4)
     (let* ((b (* 4 i))
            (a1 (+ (aref tmp b) (aref tmp (+ b 2))))

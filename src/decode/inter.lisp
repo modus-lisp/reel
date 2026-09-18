@@ -761,8 +761,6 @@
                   (t
                    (let ((has-above (> mby 0)) (has-left (> mbx 0)))
                      (when (and has-y2 (not skip)) (scatter-y2 d))
-                     (when (and has-y2 skip)
-                       (dotimes (idx 16) (setf (aref (aref (d-ycoeffs d) idx) 0) 0)))
                      (if (= ymode +b-pred+)
                          (reconstruct-bpred d mx my)
                          (reconstruct-luma16 d mx my ymode has-above has-left))

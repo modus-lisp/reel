@@ -105,13 +105,16 @@
    cached in locals for the whole block (WITH-BD-CACHE)."
   (declare (type (simple-array (signed-byte 32) (*)) cp out)
            (type fixnum plane ctx dqdc dqac first) (type bool-dec bd))
-  (let ((n first) (saw 0) (saw-ac 0))
-    (declare (type (integer 0 16) n) (type (unsigned-byte 1) saw saw-ac))
+  ;; The two scan tables are read once here: a special-variable reference is
+  ;; a %GV-CELL hash probe on Modus, and the token loop reads them per token.
+  (let ((n first) (saw 0) (saw-ac 0) (bands +coeff-bands+) (scan +coeff-scan+))
+    (declare (type (integer 0 16) n) (type (unsigned-byte 1) saw saw-ac)
+             (type (simple-array (signed-byte 32) (*)) bands scan))
     (with-bd-cache bd
       (block scan
         (loop
           (when (= n 16) (return-from scan))
-          (let ((base (cprob-base plane (aref +coeff-bands+ n) ctx)))
+          (let ((base (cprob-base plane (aref bands n) ctx)))
             (declare (type (unsigned-byte 12) base))
             (when (zerop (bd-bit* (aref cp base)))   ; end-of-block
               (return-from scan))
@@ -121,7 +124,7 @@
                   (progn                                  ; DCT_0
                     (incf n)
                     (when (= n 16) (return-from scan))
-                    (setf base (cprob-base plane (aref +coeff-bands+ n) 0)))
+                    (setf base (cprob-base plane (aref bands n) 0)))
                   (return)))
             ;; a non-zero coefficient
             (let ((v (if (zerop (bd-bit* (aref cp (+ base 2))))
@@ -130,7 +133,7 @@
               (declare (type fixnum v))
               (setf ctx (if (= v 1) 1 2))
               (when (= 1 (bd-bit* 128)) (setf v (- v)))
-              (setf (aref out (aref +coeff-scan+ n)) (* v (if (= n 0) dqdc dqac)))
+              (setf (aref out (aref scan n)) (* v (if (= n 0) dqdc dqac)))
               (setf saw 1)
               (when (> n 0) (setf saw-ac 1))
               (incf n))))))
@@ -482,16 +485,11 @@
        (dotimes (i 4) (setf (aref ay (+ (* mbx 4) i)) 0 (aref ly i) 0))
        (dotimes (i 2) (setf (aref au (+ (* mbx 2) i)) 0 (aref lu i) 0
                             (aref av (+ (* mbx 2) i)) 0 (aref lv i) 0))
-       (when has-y2 (setf (aref ay2 mbx) 0 (d-left-y2 d) 0))
-       ;; a skipped MB has no residue: clear the reused block buffers
-       (zero16 (d-y2coeffs d))
-       (dotimes (i 16) (zero16 (aref (d-ycoeffs d) i)))
-       (dotimes (i 4) (zero16 (aref (d-ublocks d) i)) (zero16 (aref (d-vblocks d) i))))
+       (when has-y2 (setf (aref ay2 mbx) 0 (d-left-y2 d) 0)))
       (t
        (when has-y2
          (let* ((ctx (+ (aref ay2 mbx) (d-left-y2 d)))
                 (blk (d-y2coeffs d)))
-           (zero16 blk)
            (let* ((%f (get-coeffs bd cp 1 blk ctx y2dc y2ac 0)) (nz (= 1 (logand %f 1))) (ac (= 2 (logand %f 2))))
              (setf (aref ay2 mbx) (if nz 1 0) (d-left-y2 d) (if nz 1 0))
              (when nz (setf nonzero t (aref nzm 24) 1))
@@ -502,7 +500,6 @@
              (let* ((idx (+ (* sr 4) sc))
                     (ctx (+ (aref ay (+ (* mbx 4) sc)) (aref ly sr)))
                     (blk (aref (d-ycoeffs d) idx)))
-               (zero16 blk)
                (let* ((%f (get-coeffs bd cp plane blk ctx y1dc y1ac first)) (nz (= 1 (logand %f 1))) (ac (= 2 (logand %f 2))))
                  (setf (aref ay (+ (* mbx 4) sc)) (if nz 1 0) (aref ly sr) (if nz 1 0))
                  (when nz (setf nonzero t (aref nzm idx) 1))
@@ -512,7 +509,6 @@
            (let* ((idx (+ (* sr 2) sc))
                   (ctx (+ (aref au (+ (* mbx 2) sc)) (aref lu sr)))
                   (blk (aref (d-ublocks d) idx)))
-             (zero16 blk)
              (let* ((%f (get-coeffs bd cp 2 blk ctx uvdc uvac 0)) (nz (= 1 (logand %f 1))) (ac (= 2 (logand %f 2))))
                (setf (aref au (+ (* mbx 2) sc)) (if nz 1 0) (aref lu sr) (if nz 1 0))
                (when nz (setf nonzero t (aref nzm (+ 16 idx)) 1))
@@ -522,7 +518,6 @@
            (let* ((idx (+ (* sr 2) sc))
                   (ctx (+ (aref av (+ (* mbx 2) sc)) (aref lv sr)))
                   (blk (aref (d-vblocks d) idx)))
-             (zero16 blk)
              (let* ((%f (get-coeffs bd cp 2 blk ctx uvdc uvac 0)) (nz (= 1 (logand %f 1))) (ac (= 2 (logand %f 2))))
                (setf (aref av (+ (* mbx 2) sc)) (if nz 1 0) (aref lv sr) (if nz 1 0))
                (when nz (setf nonzero t (aref nzm (+ 20 idx)) 1))
@@ -598,7 +593,10 @@
         (dotimes (j 4) (setf (aref data (+ o j)) (aref pred (+ (* i 4) j))))))))
 
 (declaim (inline dc-of))
-(defun dc-of (blk) (declare (type (simple-array (signed-byte 32) (16)) blk)) (ash (+ (aref blk 0) 4) -3))
+(defun dc-of (blk)
+  "The DC-only residual of BLK, clearing the DC on the way out (clear-on-consume)."
+  (declare (type (simple-array (signed-byte 32) (16)) blk))
+  (let ((dc (aref blk 0))) (declare (type fixnum dc)) (setf (aref blk 0) 0) (ash (+ dc 4) -3)))
 
 (defun reconstruct-luma16 (d mx my ymode has-above has-left)
   (declare (type dec d) (type (signed-byte 26) mx my))
@@ -674,11 +672,14 @@
 
 (defun scatter-y2 (d)
   "Invert the Y2 WHT and place its outputs as the DC of the 16 Y blocks."
-  (let ((out (vp8-iwht (d-y2coeffs d))) (nzm (d-blk-nz d)))
-    (declare (type u8vec nzm))
+  (declare (type dec d))
+  (let ((out (vp8-iwht (d-y2coeffs d))) (nzm (d-blk-nz d)) (yc (d-ycoeffs d)))
+    (declare (type u8vec nzm) (type (simple-array (signed-byte 32) (16)) out) (type simple-vector yc))
+    (zero16 (d-y2coeffs d))                ; consumed
     (dotimes (idx 16)
-      (let ((v (aref out idx)))
-        (setf (aref (aref (d-ycoeffs d) idx) 0) v)
+      (let ((v (aref out idx)) (blk (svref yc idx)))
+        (declare (type fixnum v) (type (simple-array (signed-byte 32) (16)) blk))
+        (setf (aref blk 0) v)
         (unless (zerop v) (setf (aref nzm idx) 1))))))
 
 ;;; ---- macroblock loop --------------------------------------------------
@@ -707,8 +708,6 @@
                      (mx (* mbx 16)) (my (* mby 16))
                      (has-above (> mby 0)) (has-left (> mbx 0)))
                 (when (and has-y2 (not skip)) (scatter-y2 d))
-                (when (and has-y2 skip)
-                  (dotimes (idx 16) (setf (aref (aref (d-ycoeffs d) idx) 0) 0)))
                 (if (= ymode 4)
                     (reconstruct-bpred d mx my)
                     (reconstruct-luma16 d mx my ymode has-above has-left))

@@ -17,52 +17,69 @@
 (defconstant +golden-frame+ 2) (defconstant +altref-frame+ 3)
 
 ;;; inter-frame intra mode trees (differ from the key-frame ymode tree)
+(declaim (type (simple-array (signed-byte 32) (*)) +y-mode-tree+))
 (defparameter +y-mode-tree+ (fixnum-vector 0 2 4 6 -1 -2 -3 -4))       ; -DC_PRED = 0 is a leaf
+(declaim (type (simple-array (signed-byte 32) (*)) +default-y-mode-probs+))
 (defparameter +default-y-mode-probs+ (fixnum-vector 112 86 140 37))
+(declaim (type (simple-array (signed-byte 32) (*)) +default-uv-mode-probs+))
 (defparameter +default-uv-mode-probs+ (fixnum-vector 162 101 204))
+(declaim (type (simple-array (signed-byte 32) (*)) +default-b-mode-probs+))
 (defparameter +default-b-mode-probs+ (fixnum-vector 120 90 79 133 87 85 80 111 151))
 
 ;;; mv_ref_tree: ZEROMV | NEARESTMV | NEARMV | NEWMV | SPLITMV
+(declaim (type (simple-array (signed-byte 32) (*)) +mv-ref-tree+))
 (defparameter +mv-ref-tree+ (fixnum-vector -7 2 -5 4 -6 6 -8 -9))
+(declaim (type (simple-array (signed-byte 32) (6 4)) +mode-contexts+))
 (defparameter +mode-contexts+                   ; mv_counts_to_probs[6][4]
   (make-array '(6 4) :element-type '(signed-byte 32)
                      :initial-contents '((7 1 1 143) (14 18 14 107) (135 64 57 68)
                                          (60 56 128 65) (159 134 128 34) (234 188 128 28))))
 
 ;;; split mv
+(declaim (type (simple-array (signed-byte 32) (*)) +split-mv-tree+))
 (defparameter +split-mv-tree+ (fixnum-vector -3 2 -2 4 0 -1))          ; 16x8=0 8x16=1 8x8=2 4x4=3
+(declaim (type (simple-array (signed-byte 32) (*)) +split-mv-probs+))
 (defparameter +split-mv-probs+ (fixnum-vector 110 111 150))
+(declaim (type (simple-array (signed-byte 32) (4 16)) +mv-partitions+))
 (defparameter +mv-partitions+
   (make-array '(4 16) :element-type '(signed-byte 32)
                       :initial-contents '((0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1)
                                           (0 0 1 1 0 0 1 1 0 0 1 1 0 0 1 1)
                                           (0 0 1 1 0 0 1 1 2 2 3 3 2 2 3 3)
                                           (0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15))))
+(declaim (type (simple-array (signed-byte 32) (*)) +mv-partition-count+))
 (defparameter +mv-partition-count+ (fixnum-vector 2 2 4 16))
 ;;; sub_mv_ref tree: LEFT4X4=0 | ABOVE4X4=1 | ZERO4X4=2 | NEW4X4=3
+(declaim (type (simple-array (signed-byte 32) (*)) +submv-ref-tree+))
 (defparameter +submv-ref-tree+ (fixnum-vector 0 2 -1 4 -2 -3))
+(declaim (type (simple-array (signed-byte 32) (5 3)) +submv-ref-probs+))
 (defparameter +submv-ref-probs+                 ; [context][3]
   (make-array '(5 3) :element-type '(signed-byte 32)
                      :initial-contents '((147 136 18) (106 145 1) (179 121 1) (223 1 34) (208 1 1))))
 
 ;;; motion vector component coding (RFC 6386 s17)
 ;;; layout per component (19 entries): 0 is_short, 1 sign, 2..8 short tree, 9..18 long bits
+(declaim (type (simple-array (signed-byte 32) (*)) +small-mv-tree+))
 (defparameter +small-mv-tree+ (fixnum-vector 2 8 4 6 0 -1 -2 -3 10 12 -4 -5 -6 -7))
+(declaim (type (simple-array (signed-byte 32) (*)) +mv-update-probs+))
 (defparameter +mv-update-probs+
   (make-array 38 :element-type '(signed-byte 32)
                  :initial-contents '(237 246 253 253 254 254 254 254 254 254 254 254 254 254 250 250 252 254 254
                                      231 243 245 253 254 254 254 254 254 254 254 254 254 254 251 251 254 254 254)))
+(declaim (type (simple-array (signed-byte 32) (*)) +default-mv-probs+))
 (defparameter +default-mv-probs+                ; row component then column component
   (make-array 38 :element-type '(signed-byte 32)
                  :initial-contents '(162 128 225 146 172 147 214 39 156 128 129 132 75 145 178 206 239 254 254
                                      164 128 204 170 119 235 140 230 228 128 130 130 74 148 180 203 236 254 254)))
 
 ;;; sub-pixel interpolation filters (RFC 6386 s18.3), indexed by eighth-pel fraction
+(declaim (type (simple-array (signed-byte 32) (8 6)) +sixtap-filters+))
 (defparameter +sixtap-filters+
   (make-array '(8 6) :element-type '(signed-byte 32)
                      :initial-contents '((0 0 128 0 0 0) (0 -6 123 12 -1 0) (2 -11 108 36 -8 1)
                                          (0 -9 93 50 -6 0) (3 -16 77 77 -16 3) (0 -6 50 93 -9 0)
                                          (1 -8 36 108 -11 2) (0 -1 12 123 -6 0))))
+(declaim (type (simple-array (signed-byte 32) (8 6)) +bilinear-filters+))
 (defparameter +bilinear-filters+
   (make-array '(8 6) :element-type '(signed-byte 32)
                      :initial-contents '((0 0 128 0 0 0) (0 0 112 16 0 0) (0 0 96 32 0 0)

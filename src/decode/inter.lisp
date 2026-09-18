@@ -37,6 +37,19 @@
                  :v (make-array (* cs cr) :element-type '(unsigned-byte 8))
                  :ystride ys :uvstride cs :aw aw :ah ah :yrows yr :uvrows cr)))
 
+(defmacro copy-bytes (dst di src si n)
+  "Copy N bytes SRC[si..] -> DST[di..] (non-overlapping or forward-safe): NEON
+   8-byte moves plus a scalar tail on Modus, REPLACE elsewhere."
+  #+modus `(let ((%n8 (logand ,n -8)) (%k 0))
+             (declare (type fixnum %n8 %k))
+             (loop (when (>= %k %n8) (return))
+                   (%vi-st8 ,dst (+ ,di %k) (%vi-ld8 ,src (+ ,si %k)))
+                   (setq %k (+ %k 8)))
+             (loop (when (>= %k ,n) (return))
+                   (setf (aref ,dst (+ ,di %k)) (aref ,src (+ ,si %k)))
+                   (setq %k (+ %k 1))))
+  #-modus `(replace ,dst ,src :start1 ,di :end1 (+ ,di ,n) :start2 ,si :end2 (+ ,si ,n)))
+
 (defun plane->rframe-plane (pl dst stride border w h)
   "Copy the visible WxH of plane PL into DST (stride STRIDE, BORDER pixels on
    each side) and replicate its edges into the border."
@@ -47,18 +60,20 @@
     (dotimes (y h)
       (let ((si (+ (* (1+ y) ps) 1)) (di (+ (* (+ y border) stride) border)))
         (declare (type dim si di))
-        ;; both sides are octets now, so this is a block move rather than a loop
-        (replace dst src :start1 di :end1 (+ di w) :start2 si :end2 (+ si w))
+        ;; the visible row: 8 bytes per step on Modus (a REPLACE per row is a
+        ;; runtime call — 8 % of the frame's cycles were here), scalar tail
+        (copy-bytes dst di src si w)
         ;; left and right border of this row
         (let ((l (aref dst di)) (r (aref dst (+ di w -1))))
-          (fill dst l :start (- di border) :end di)
-          (fill dst r :start (+ di w) :end (+ di w border)))))
+          (declare (type (unsigned-byte 8) l r))
+          (dotimes (k border) (setf (aref dst (+ (- di border) k)) l))
+          (dotimes (k border) (setf (aref dst (+ di w k)) r)))))
     ;; top and bottom rows
     (let ((top (* border stride)) (bot (* (+ border h -1) stride)))
       (declare (type fixnum top bot))
       (dotimes (i border)
-        (replace dst dst :start1 (* i stride) :end1 (* (1+ i) stride) :start2 top)
-        (replace dst dst :start1 (* (+ border h i) stride) :end1 (* (+ border h i 1) stride) :start2 bot)))
+        (copy-bytes dst (* i stride) dst top stride)
+        (copy-bytes dst (* (+ border h i) stride) dst bot stride)))
     dst))
 
 ;;; ---- pictures (what the caller sees) -------------------------------------------

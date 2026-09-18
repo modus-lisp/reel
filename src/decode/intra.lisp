@@ -359,7 +359,20 @@
   (subl (make-array 4 :element-type '(unsigned-byte 8)) :type u8vec))
 
 (declaim (inline zero16))
-(defun zero16 (a) (declare (type fxvec a)) (fill a 0))
+(defun zero16 (a)
+  "Zero a 16-coefficient block.  An explicit typed loop: FILL is a generic
+   runtime element loop on Modus and this runs 25 times per macroblock."
+  (declare (type fxvec a) (optimize (speed 3) (safety 0)))
+  (dotimes (i 16) (setf (aref a i) 0)))
+
+;;; Row copies from a prediction block into a plane: NEON 8-byte moves on Modus
+;;; (REPLACE is a runtime call per row), REPLACE elsewhere.
+(defmacro copy-row8 (dst o src p)
+  #+modus `(%vi-st8 ,dst ,o (%vi-ld8 ,src ,p))
+  #-modus `(replace ,dst ,src :start1 ,o :end1 (+ ,o 8) :start2 ,p :end2 (+ ,p 8)))
+(defmacro copy-row16 (dst o src p)
+  #+modus `(progn (%vi-st8 ,dst ,o (%vi-ld8 ,src ,p)) (%vi-st8 ,dst (+ ,o 8) (%vi-ld8 ,src (+ ,p 8))))
+  #-modus `(replace ,dst ,src :start1 ,o :end1 (+ ,o 16) :start2 ,p :end2 (+ ,p 16)))
 
 ;;; ---- header continuation (RFC 6386 §9.2-9.11) -------------------------
 
@@ -598,7 +611,7 @@
     (dotimes (r 16)
       (let ((o (+ base (* r stride))) (p (* r 16)))
         (declare (type fixnum o p))
-        (replace data pred :start1 o :end1 (+ o 16) :start2 p :end2 (+ p 16))))
+        (copy-row16 data o pred p)))
     (let ((nzm (d-blk-nz d)) (acm (d-blk-ac d)))
       (declare (type u8vec nzm acm))
       (dotimes (br 4)
@@ -646,7 +659,7 @@
         (dotimes (r 8)
           (let ((o (+ base (* r stride))) (p (* r 8)))
             (declare (type fixnum o p))
-            (replace data pred :start1 o :end1 (+ o 8) :start2 p :end2 (+ p 8))))
+            (copy-row8 data o pred p)))
         (let ((nzm (d-blk-nz d)) (acm (d-blk-ac d)))
           (declare (type u8vec nzm acm) (type fixnum bit0))
           (dotimes (br 2)

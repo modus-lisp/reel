@@ -1,0 +1,77 @@
+name: ci
+
+# WHAT THIS WATCHES, AND WHY IT IS THIS AND NOT MORE.
+#
+# t/conformance.lisp is the real oracle: the official suites for VP8, VP9, H.264 and HEVC,
+# against ffmpeg-produced reference decodes.  It needs the cassette and reed repositories
+# beside this one and it downloads film excerpts, so it is not something every push can run.
+# What every push CAN run is one official libvpx vector against ffmpeg's decode of it,
+# and that is worth having: it is the check that caught two COMPILER miscompiles in September
+# 2026 which nothing else saw.  Both left a decoder that still ran and still produced
+# pictures; only a checksum told them apart from correct ones.
+#
+# The vector is fetched, not committed — the same rule t/fetch-conformance.sh states: these
+# are the format's own fixtures and they belong at their source, not mirrored here.  The
+# reference is ffmpeg's decode of the same stream, computed in the job: FATE does not carry
+# the .md5 sidecars, and a checksum this repository generated itself would be circular.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  load:
+    # The cheapest possible regression net: does the system still compile?  Most of what
+    # breaks a Lisp repository is caught here, in under a minute, with no fixtures at all.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y sbcl
+      - name: load :reel
+        run: |
+          sbcl --noinform --non-interactive \
+               --eval '(require :asdf)' \
+               --eval '(asdf:load-asd (merge-pathnames "reel.asd" (truename ".")))' \
+               --eval '(handler-bind ((warning (function muffle-warning))) (asdf:load-system :reel))' \
+               --eval '(format t "~&LOAD OK~%")'
+
+  vp8-vector:
+    # One official vector, decoded and checksummed picture by picture.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y sbcl
+      - run: sudo apt-get install -y ffmpeg
+      - name: fetch the vector
+        run: |
+          set -e
+          # -f so a 404 is an error rather than an HTML page saved under a video file's name
+          curl -fsSL -o /tmp/v.ivf \
+            https://fate-suite.ffmpeg.org/vp8-test-vectors-r1/vp80-00-comprehensive-006.ivf
+      - name: reference-decode it with ffmpeg
+        run: |
+          set -e
+          # -fps_mode passthrough, or ffmpeg duplicates frames to a constant rate and every
+          # comparison after the first repeat is nonsense (t/conformance.lisp, same trap).
+          ffmpeg -hide_banner -loglevel error -i /tmp/v.ivf -fps_mode passthrough \
+                 -f rawvideo -pix_fmt yuv420p /tmp/ref.yuv
+      - name: decode
+        run: VEC=/tmp/v.ivf OUT=/tmp/frames sbcl --noinform --non-interactive --load t/ci-vp8.lisp
+      - name: compare every picture against ffmpeg's
+        run: |
+          python3 - <<'EOF'
+          import hashlib, os, glob, sys
+          ref = open("/tmp/ref.yuv","rb").read()
+          mine = sorted(glob.glob("/tmp/frames/*.i420"))
+          if not mine: sys.exit("no pictures decoded")
+          fs = os.path.getsize(mine[0])          # this stream keeps one picture size
+          n  = len(ref) // fs
+          bad = 0
+          for i, f in enumerate(mine):
+              if i >= n: break
+              if hashlib.md5(open(f,"rb").read()).hexdigest() != \
+                 hashlib.md5(ref[i*fs:(i+1)*fs]).hexdigest():
+                  bad += 1; print("picture %d differs" % i)
+          print("%d pictures, %d differ" % (n, bad))
+          sys.exit(1 if bad or len(mine) != n else 0)
+          EOF

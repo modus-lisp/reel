@@ -63,7 +63,7 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
        ;; picture's slots in its innermost loop; a file compiled before the DEFSTRUCT is seen
        ;; cannot inline those reads and does not know what type they return, so the arithmetic on
        ;; them goes generic.  It measured at more than half the decode time at 1080p.
-       (:file "picture")      ; the decoded picture, the slice state, and per-block accessors
+       (:file "picture")      ; the decoded picture, the slice state, and per-block accessors, the slice state, and per-block accessors
        (:file "cavlc")        ; residual blocks: coeff_token, levels, runs
        (:file "cabac-tables") ; GENERATED: the normative CABAC constants
        (:file "transform")    ; dequantisation, the inverse 4x4 and the DC transforms
@@ -78,6 +78,36 @@ Verified bit-exact against ffmpeg/libvpx in both directions."
        (:file "decode")      ; NAL units in, pictures out
        (:file "parallel"))    ; independent pictures, decoded at the same time
       )
+     ;; ---- HEVC / H.265, its own package again.  Nothing here is shared with h264 except the
+     ;; shape of the ideas: the CABAC arithmetic engine is bit-identical, but its context set,
+     ;; its binarizations and everything they drive are not.
+     (:module "hevc"
+      :serial t
+      :components
+      ((:file "bits")         ; NAL units (a TWO byte header), RBSP, the Exp-Golomb bit reader
+       ;; the scan orders and the default scaling lists come first: the parameter set parser
+       ;; scatters a transmitted scaling list through the diagonal scan as it reads it
+       (:file "scan")         ; the coefficient scan orders, derived rather than tabulated
+       (:file "scaling-tables")   ; GENERATED: the default scaling lists
+       (:file "params")       ; profile/tier/level, sequence and picture parameter sets, slices
+       (:file "cabac-tables") ; GENERATED: the 179 context initialisation values
+       (:file "cabac-state-tables") ; GENERATED: rangeTabLps and the state transitions
+       (:file "cabac")        ; the arithmetic decoder and the binarizations above it
+       (:file "sig-ctx-tables")   ; GENERATED: sig_coeff_flag's context by position
+       (:file "transform-tables") ; GENERATED: the inverse transform matrices
+       (:file "transform")    ; dequantisation and the inverse transforms
+       (:file "picture")      ; the decoded picture and its motion field
+       (:file "dpb")          ; picture order counts, the reference set, the reference lists
+       (:file "mc")           ; the fractional-sample interpolation filters
+       (:file "slice")        ; the coding tree, coding units, and residual coding
+       ;; AFTER slice.lisp: prediction reads the decode state defined there, and the slice walk
+       ;; calls back into it through the FTYPE declaim at the top of that file
+       (:file "intra")        ; the thirty-five intra prediction modes
+       (:file "mv")           ; merge and AMVP candidate derivation
+       (:file "inter")        ; prediction units, and using the motion they carry
+       (:file "filter")       ; deblocking and sample adaptive offset
+       (:file "decode")))     ; NAL units in, pictures out
+
      ;; ---- MPEG-1 and MPEG-2 video, which are one bitstream with one of them extended
      (:module "mpeg2"
       :serial t

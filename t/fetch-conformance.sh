@@ -57,6 +57,10 @@ for f in BA1_FT_C.264 BA1_Sony_D.jsv BA2_Sony_F.jsv BA3_SVA_C.264 BAMQ1_JVC_C.26
   get h264 h264-conformance "$f"
 done
 
+echo "HEVC: the JCT-VC conformance streams"
+curl -sSL "$BASE/hevc-conformance/" | grep -oE 'href="[A-Za-z0-9_.-]+\.bit"' | sed 's/href="//;s/"//' \
+  | while read -r f; do get hevc hevc-conformance "$f"; done
+
 echo "AC-3: real Dolby-encoded material, which ffmpeg's encoder cannot stand in for"
 for f in millers_crossing_4.0.ac3 monsters_inc_2.0_192_small.ac3 monsters_inc_5.1_448_small.ac3; do
   get ac3 ac3 "$f"
@@ -74,6 +78,43 @@ for f in "$CONF"/vp8/*.ivf "$CONF"/vp9/*.webm "$CONF"/h264/*.264 "$CONF"/h264/*.
   ffmpeg -v error -y -i "$f" -fps_mode passthrough -f rawvideo -pix_fmt yuv420p "$f.ref.yuv" \
     2>/dev/null || true
 done
+# HEVC has no reference decodes yet — the decoder is still being built and only reads headers — so
+# what is recorded for it is the picture geometry ffprobe reports, which is what the sequence
+# parameter set parser can be held to today.  A few bytes per stream rather than a raw YUV.
+for f in "$CONF"/hevc/*.bit; do
+  [ -f "$f" ] || continue
+  ffprobe -v error -select_streams v -show_entries stream=width,height -of csv=p=0 "$f" 2>/dev/null \
+    | head -1 | tr ',' 'x' > "$f.dims"
+done
+
+# HEVC reconstruction references: the FIRST picture of each stream, filters and all.
+for f in "$CONF"/hevc/*.bit; do
+  [ -f "$f" ] || continue
+  ffmpeg -v error -y -i "$f" -frames:v 1 -fps_mode passthrough \
+    -f rawvideo -pix_fmt yuv420p "$f.filt.yuv" 2>/dev/null || true
+done
+
+# TWO ORACLE CORRECTIONS, both verified by decoding the stream and comparing where the reference
+# actually put the picture rather than where it said it did.
+#
+# CONFWIN_A does not get its conf_win_left_offset applied by ffmpeg — it emits 414-wide frames
+# where the sequence parameter set, and ffprobe's own report of the stream, both say 412, with the
+# picture sitting two samples in.  This is the same defect as H.264's CVFC1 below.
+if [ -f "$CONF/hevc/CONFWIN_A_Sony_1.bit" ]; then
+  ffmpeg -v error -y -i "$CONF/hevc/CONFWIN_A_Sony_1.bit" -frames:v 1 \
+    -vf "crop=412:236:2:0" -fps_mode passthrough -f rawvideo -pix_fmt yuv420p \
+    "$CONF/hevc/CONFWIN_A_Sony_1.bit.filt.yuv" 2>/dev/null || true
+fi
+#
+# POC_A is a picture-order-count test, so its first DECODED picture is not its first DISPLAYED one:
+# ffmpeg outputs in display order and the intra picture comes out second.  Keep that frame.
+if [ -f "$CONF/hevc/POC_A_Bossen_3.bit" ]; then
+  ffmpeg -v error -y -i "$CONF/hevc/POC_A_Bossen_3.bit" -frames:v 2 \
+    -fps_mode passthrough -f rawvideo -pix_fmt yuv420p "$CONF/hevc/POC_A.tmp" 2>/dev/null \
+    && tail -c 149760 "$CONF/hevc/POC_A.tmp" > "$CONF/hevc/POC_A_Bossen_3.bit.filt.yuv" \
+    && rm -f "$CONF/hevc/POC_A.tmp"
+fi
+
 # CVFC1 is the one stream in the suite that crops from the LEFT as well as the right, and ffmpeg
 # does not apply frame_crop_left_offset: it emits 326-wide frames where the sequence parameter set
 # says 300, with the picture sitting 26 samples in.  Its own stream metadata says 300, so this is an

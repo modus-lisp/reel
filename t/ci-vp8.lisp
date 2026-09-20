@@ -30,8 +30,8 @@
 
 (defpackage #:reel-ci (:use #:cl)) (in-package #:reel-ci)
 
-(defvar *vec* (or (sb-posix:getenv "VEC") (error "set VEC to an .ivf vector")))
-(defvar *out* (or (sb-posix:getenv "OUT") "/tmp/frames"))
+(defvar *vec* (or (sb-ext:posix-getenv "VEC") (error "set VEC to an .ivf vector")))
+(defvar *out* (or (sb-ext:posix-getenv "OUT") "/tmp/frames"))
 
 (defun slurp (p)
   (with-open-file (s p :element-type '(unsigned-byte 8))

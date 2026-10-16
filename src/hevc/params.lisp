@@ -139,6 +139,17 @@
 
 (defun strps-count (s) (+ (length (strps-negative s)) (length (strps-positive s))))
 
+(defun strps-used-count (s)
+  "NumPicTotalCurr, near enough: how many of this set's pictures the CURRENT one may predict from.
+
+   The rest are kept only because a later picture wants them.  The number matters because it is
+   what a list modification's entries are indexed against, and so how many bits each of them
+   takes — get it wrong and the slice header ends in the wrong place."
+  (if (null s)
+      0
+      (+ (count-if #'identity (strps-used-neg s))
+         (count-if #'identity (strps-used-pos s)))))
+
 (defun %parse-strps (br idx sets num-sets)
   "st_ref_pic_set (7.3.7), including the inter-set prediction that most streams use.
 
@@ -251,6 +262,57 @@
 (defun sps-display-height (s)
   (- (sps-height s) (* (sps-sub-height s) (+ (sps-conf-top s) (sps-conf-bottom s)))))
 
+(defun %skip-sub-layer-hrd (br cpb-cnt sub-pic)
+  "sub_layer_hrd_parameters (E.2.3): one entry per coded picture buffer, none of which is read."
+  (dotimes (j cpb-cnt)
+    (ue br) (ue br)                             ; bit_rate_value, cpb_size_value
+    (when sub-pic (ue br) (ue br))              ; cpb_size_du_value, bit_rate_du_value
+    (u1 br)))                                   ; cbr_flag
+
+(defun %skip-hrd (br common-inf max-sub-layers-minus1)
+  "hrd_parameters (E.2.2), consumed and discarded.
+
+   Nothing above this wants an answer from it.  It is parsed only because the SEQUENCE PARAMETER
+   SET EXTENSION FLAGS ARE ON THE OTHER SIDE OF IT, and those say whether the stream uses tools
+   this decoder would otherwise decode wrongly rather than refuse."
+  (let ((nal nil) (vcl nil) (sub-pic nil))
+    (when common-inf
+      (setf nal (= 1 (u1 br)) vcl (= 1 (u1 br)))
+      (when (or nal vcl)
+        (setf sub-pic (= 1 (u1 br)))
+        (when sub-pic (ub br 8) (ub br 5) (u1 br) (ub br 5))
+        (ub br 4) (ub br 4)                     ; bit_rate_scale, cpb_size_scale
+        (when sub-pic (ub br 4))
+        (ub br 5) (ub br 5) (ub br 5)))
+    (dotimes (i (1+ max-sub-layers-minus1))
+      (let ((general (= 1 (u1 br))) (within t) (low-delay nil) (cpb 1))
+        (unless general (setf within (= 1 (u1 br))))
+        (if within
+            (ue br)                             ; elemental_duration_in_tc_minus1
+            (setf low-delay (= 1 (u1 br))))
+        (unless low-delay (setf cpb (1+ (ue br))))
+        (when nal (%skip-sub-layer-hrd br cpb sub-pic))
+        (when vcl (%skip-sub-layer-hrd br cpb sub-pic))))))
+
+(defun %skip-vui (br max-sub-layers-minus1)
+  "vui_parameters (E.2.1), consumed and discarded, for the same reason as the timing above it."
+  (when (= 1 (u1 br))                           ; aspect_ratio_info_present_flag
+    (when (= 255 (ub br 8)) (ub br 16) (ub br 16)))
+  (when (= 1 (u1 br)) (u1 br))                  ; overscan
+  (when (= 1 (u1 br))                           ; video_signal_type_present_flag
+    (ub br 3) (u1 br)
+    (when (= 1 (u1 br)) (ub br 8) (ub br 8) (ub br 8)))
+  (when (= 1 (u1 br)) (ue br) (ue br))          ; chroma_loc_info
+  (u1 br) (u1 br) (u1 br)                       ; neutral chroma, field_seq, frame_field_info
+  (when (= 1 (u1 br)) (ue br) (ue br) (ue br) (ue br))   ; default display window
+  (when (= 1 (u1 br))                           ; vui_timing_info_present_flag
+    (ub br 32) (ub br 32)
+    (when (= 1 (u1 br)) (ue br))                ; poc proportional to timing
+    (when (= 1 (u1 br)) (%skip-hrd br t max-sub-layers-minus1)))
+  (when (= 1 (u1 br))                           ; bitstream_restriction_flag
+    (u1 br) (u1 br) (u1 br)
+    (ue br) (ue br) (ue br) (ue br) (ue br)))
+
 (defun parse-sps (rbsp)
   "One sequence parameter set (7.3.2.2)."
   (let ((br (make-bitreader rbsp))
@@ -315,9 +377,43 @@
         (setf (sps-long-term-poc s) poc (sps-long-term-used s) used)))
     (setf (sps-temporal-mvp-enabled s) (= 1 (u1 br))
           (sps-strong-intra-smoothing s) (= 1 (u1 br)))
-    ;; Nothing past here is read.  The VUI and the extension flags follow, and skipping the VUI
-    ;; correctly means parsing hrd_parameters, which is a long mechanical function with nothing
-    ;; above it that wants an answer.  It goes in when something needs what comes after it.
+    ;; The VUI is skipped rather than read, but it HAS to be skipped exactly, because the extension
+    ;; flags are on the other side of it — and those are the only place a stream says it uses the
+    ;; range extension tools.  Without them a high-throughput stream looks like an ordinary one and
+    ;; decodes to nonsense instead of being refused, which is the failure this decoder exists to
+    ;; not have.
+    (when (= 1 (u1 br))                         ; vui_parameters_present_flag
+      (%skip-vui br (1- (sps-max-sub-layers s))))
+    ;; AND THE EXTENSION FLAGS ARE READ ONLY IF THEY FIT.  The first version of this standard put
+    ;; a single sps_extension_flag here followed by arbitrary data to the end of the payload, and
+    ;; the version that added the range extensions redefined those bits as four named flags and a
+    ;; four-bit remainder.  A stream written to test that a decoder SKIPS data it does not
+    ;; understand — which is exactly what EXT_A is for — therefore has bits here that are not the
+    ;; later structure at all.  Reading them anyway runs off the end of the payload, and a parse
+    ;; error is not a refusal: it says the stream is broken when it is this decoder that is old.
+    (when (and (plusp (- (br-end br) (br-bit br)))
+               (= 1 (u1 br)))                   ; sps_extension_present_flag
+      (when (>= (- (br-end br) (br-bit br)) 8)
+       (let ((range (= 1 (u1 br))))
+        (u1 br)                                 ; sps_multilayer_extension_flag
+        (u1 br)                                 ; sps_3d_extension_flag
+        (let ((scc (= 1 (u1 br))))
+          (ub br 4)                             ; sps_extension_4bits
+          ;; THE MULTILAYER AND 3D EXTENSIONS DESCRIBE OTHER LAYERS, not this one.  A stereo or
+          ;; depth stream's base layer is ordinary HEVC and Annex F says a decoder that wants only
+          ;; that layer discards the rest — which this one does, on the NAL header.  Refusing on
+          ;; their presence turns four streams that decode exactly into four that decode not at
+          ;; all.  The range and screen-content extensions are different: those change how THIS
+          ;; layer is coded, so a stream that uses one and is decoded without it is decoded wrong.
+          (when (and range (>= (- (br-end br) (br-bit br)) 9))
+            (dolist (name '("transform_skip_rotation" "transform_skip_context" "implicit_rdpcm"
+                            "explicit_rdpcm" "extended_precision_processing"
+                            "intra_smoothing_disabled" "high_precision_offsets"
+                            "persistent_rice_adaptation" "cabac_bypass_alignment"))
+              (when (= 1 (u1 br))
+                (%err "~a is a range extension tool this does not implement" name))))
+          (when scc
+            (%err "the screen content coding extension is not supported"))))))
     (%check-sps s)
     s))
 
@@ -326,6 +422,12 @@
   (unless (= 1 (sps-chroma-format s))
     (%err "chroma_format_idc ~d (~a); this decodes 4:2:0" (sps-chroma-format s)
           (case (sps-chroma-format s) (0 "monochrome") (2 "4:2:2") (3 "4:4:4") (t "unknown"))))
+  ;; THE MACHINERY FOR DEEPER SAMPLES IS ALL HERE and every shift below derives its constant from
+  ;; the picture's own depth rather than assuming eight.  It is not turned on because six of the
+  ;; conformance streams still decode wrongly at ten bits and they share no feature that could be
+  ;; refused instead — so accepting the depth would mean silently wrong pictures for content this
+  ;; cannot name in advance, which is the one thing this decoder does not do.  See FORMATS.md for
+  ;; what is verified working and what is not.
   (unless (and (= 8 (sps-bit-depth-luma s)) (= 8 (sps-bit-depth-chroma s)))
     (%err "~d-bit luma and ~d-bit chroma; this decodes eight"
           (sps-bit-depth-luma s) (sps-bit-depth-chroma s)))
@@ -353,6 +455,7 @@
   (tiles-enabled nil) (entropy-coding-sync nil)
   (num-tile-columns 1) (num-tile-rows 1) (uniform-spacing t)
   (column-widths nil) (row-heights nil) (loop-filter-across-tiles t)
+  (tiling nil)                          ; the tile map, computed once on first use
   (loop-filter-across-slices nil)
   (deblocking-control-present nil) (deblocking-override-enabled nil)
   (deblocking-disabled nil) (beta-offset 0) (tc-offset 0)
@@ -420,7 +523,7 @@
   (first-in-pic nil) (dependent nil)
   (segment-address 0)
   (type 2)                              ; 0 B, 1 P, 2 I — note the ORDER, which is not H.264's
-  (pic-output t)
+  (pic-output t) (no-output-prior nil)
   (poc-lsb 0) (strps nil)
   (temporal-mvp nil)
   (sao-luma nil) (sao-chroma nil)
@@ -428,6 +531,15 @@
   (mvd-l1-zero nil) (cabac-init nil)
   (collocated-from-l0 t) (collocated-ref-idx 0)
   (max-merge-cand 5)
+  ;; ref_pic_lists_modification: a permutation of the list the reference picture set implies, or
+  ;; NIL for the identity, which is what almost every picture sends
+  (list-entry-l0 nil) (list-entry-l1 nil)
+  ;; the long-term references this picture names, each as (POC-LSB USED MSB-PRESENT MSB-CYCLE)
+  (long-term #() :type simple-vector)
+  ;; the explicit weights, when the picture parameter set turns them on: a shift, and per reference
+  ;; index a (LUMA-W LUMA-O CB-W CB-O CR-W CR-O)
+  (wp-luma-denom 0) (wp-chroma-denom 0)
+  (wp-l0 nil) (wp-l1 nil)
   (qp 26) (cb-qp-offset 0) (cr-qp-offset 0)
   (deblocking-disabled nil) (beta-offset 0) (tc-offset 0)
   (loop-filter-across-slices nil)
@@ -436,6 +548,151 @@
 (defun sh-i-slice-p (sh) (= 2 (sh-type sh)))
 (defun sh-p-slice-p (sh) (= 1 (sh-type sh)))
 (defun sh-b-slice-p (sh) (= 0 (sh-type sh)))
+
+(defun %parse-pred-weights (br sh sps)
+  "pred_weight_table (7.3.6.3): a multiplier and an offset per reference index.
+
+   It exists for FADES.  Ordinary motion compensation copies samples and adds a residual, so a
+   picture uniformly darker than its reference costs a residual over every block; a weight and an
+   offset say the same thing in a few bits per reference.  The cost is that the weights are per
+   reference INDEX rather than per block, so an encoder that wants two weights for one picture has
+   to put it in the list twice — which is legal, and is why a list may name the same picture more
+   than once.
+
+   The flags for all the references come before any of the values, which is the same shape the
+   coefficient syntax uses and for the same reason: a run of like bins together."
+  (let* ((chroma-p (plusp (sps-chroma-format sps)))
+         (ld (ue br))
+         (cd (if chroma-p (+ ld (se br)) 0)))
+    (setf (sh-wp-luma-denom sh) ld (sh-wp-chroma-denom sh) cd)
+    (flet ((one-list (n)
+             (let ((lflags (make-array n)) (cflags (make-array n :initial-element nil))
+                   (v (make-array n)))
+               (dotimes (i n) (setf (aref lflags i) (= 1 (u1 br))))
+               (when chroma-p (dotimes (i n) (setf (aref cflags i) (= 1 (u1 br)))))
+               (dotimes (i n)
+                 (let ((lw (ash 1 ld)) (lo 0) (cbw (ash 1 cd)) (cbo 0) (crw (ash 1 cd)) (cro 0))
+                   (when (aref lflags i)
+                     (setf lw (+ (ash 1 ld) (se br)) lo (se br)))
+                   (when (aref cflags i)
+                     ;; the chroma offset is sent RELATIVE to what the weight already does to the
+                     ;; neutral value, so the neutral point survives a weight that is not one
+                     (let* ((dw (se br)) (dof (se br)))
+                       (setf cbw (+ (ash 1 cd) dw))
+                       (setf cbo (%clip3 -128 127 (+ (- dof (ash (* 128 cbw) (- cd))) 128))))
+                     (let* ((dw (se br)) (dof (se br)))
+                       (setf crw (+ (ash 1 cd) dw))
+                       (setf cro (%clip3 -128 127 (+ (- dof (ash (* 128 crw) (- cd))) 128)))))
+                   (setf (aref v i) (list lw lo cbw cbo crw cro))))
+               v)))
+      (setf (sh-wp-l0 sh) (one-list (sh-num-ref-idx-l0 sh)))
+      (when (sh-b-slice-p sh)
+        (setf (sh-wp-l1 sh) (one-list (sh-num-ref-idx-l1 sh)))))))
+
+(defun %independent-slice-header (br sh nal pps sps)
+  "The part of a slice segment header that only an INDEPENDENT segment carries.
+
+   A dependent segment sends none of it and inherits all of it from the last independent
+   segment of the same slice — but it does send its own address, its own entry points and its
+   own byte alignment, so the parse cannot simply stop when it sees the flag.  Stopping is what
+   this used to do, and it left the bit reader pointing at the entry point offsets rather than
+   at the slice data."
+  (declare (ignorable nal sps))
+  (dotimes (i (pps-extra-slice-header-bits pps)) (u1 br))
+  (setf (sh-type sh) (ue br))
+  (unless (<= 0 (sh-type sh) 2)
+    (%err "slice_type ~d, which is not one of B, P or I" (sh-type sh)))
+  (when (pps-output-flag-present pps)
+    (setf (sh-pic-output sh) (= 1 (u1 br))))
+  (when (sps-separate-colour-planes sps) (ub br 2))
+  (unless (nal-idr-p nal)
+    (setf (sh-poc-lsb sh) (ub br (sps-log2-max-poc-lsb sps)))
+    (if (zerop (u1 br))                     ; short_term_ref_pic_set_sps_flag
+        (setf (sh-strps sh)
+              (%parse-strps br (length (sps-strps sps)) (sps-strps sps)
+                            (length (sps-strps sps))))
+        (let ((n (length (sps-strps sps))))
+          (setf (sh-strps sh)
+                (aref (sps-strps sps)
+                      (if (> n 1) (ub br (integer-length (1- n))) 0)))))
+    ;; LONG-TERM references are named by their order count rather than by their distance, which is
+    ;; the whole difference: a short-term set says "two pictures back", so it stops meaning anything
+    ;; once decoding moves on, while a long-term entry keeps naming the same picture for as long as
+    ;; the encoder wants it.  That is what makes a static background usable a hundred pictures later.
+    (when (sps-long-term-present sps)
+      (let* ((nsps (length (sps-long-term-poc sps)))
+             (num-sps (if (plusp nsps) (ue br) 0))
+             (num-pics (ue br))
+             (n (+ num-sps num-pics))
+             (v (make-array n))
+             (prev 0))
+        (dotimes (i n)
+          (let ((lsb 0) (used nil))
+            (if (< i num-sps)
+                (let ((idx (if (> nsps 1) (ub br (integer-length (1- nsps))) 0)))
+                  (unless (< idx nsps)
+                    (%err "a long-term reference names sequence entry ~d of ~d" idx nsps))
+                  (setf lsb (aref (sps-long-term-poc sps) idx)
+                        used (aref (sps-long-term-used sps) idx)))
+                (setf lsb (ub br (sps-log2-max-poc-lsb sps))
+                      used (= 1 (u1 br))))
+            (let* ((msb-present (= 1 (u1 br)))
+                   (cycle (if msb-present (ue br) 0)))
+              ;; the cycles accumulate along the list, and the chain restarts where the entries
+              ;; sent in the slice header begin
+              (setf prev (if (or (zerop i) (= i num-sps)) cycle (+ cycle prev)))
+              (setf (aref v i) (list lsb used msb-present prev)))))
+        (setf (sh-long-term sh) v)))
+    (when (sps-temporal-mvp-enabled sps)
+      (setf (sh-temporal-mvp sh) (= 1 (u1 br)))))
+  (when (sps-sao-enabled sps)
+    (setf (sh-sao-luma sh) (= 1 (u1 br))
+          (sh-sao-chroma sh) (= 1 (u1 br))))
+  (unless (sh-i-slice-p sh)
+    (setf (sh-num-ref-idx-l0 sh) (pps-num-ref-idx-l0 pps)
+          (sh-num-ref-idx-l1 sh) (pps-num-ref-idx-l1 pps))
+    (when (= 1 (u1 br))                     ; num_ref_idx_active_override_flag
+      (setf (sh-num-ref-idx-l0 sh) (1+ (ue br)))
+      (when (sh-b-slice-p sh) (setf (sh-num-ref-idx-l1 sh) (1+ (ue br)))))
+    ;; the lists the reference picture set implies are in a fixed order — nearest backwards first,
+    ;; then nearest forwards — and an encoder that wants a different one says so here.  It costs
+    ;; bits and buys a cheaper index for whichever reference this particular slice leans on
+    (let ((total (+ (strps-used-count (sh-strps sh))
+                    (count-if #'second (sh-long-term sh)))))
+      (when (and (pps-lists-modification-present pps) (> total 1))
+        (let ((bits (integer-length (1- total))))
+          (flet ((entries (n)
+                   (let ((v (make-array n)))
+                     (dotimes (i n v) (setf (aref v i) (ub br bits))))))
+            (when (= 1 (u1 br))
+              (setf (sh-list-entry-l0 sh) (entries (sh-num-ref-idx-l0 sh))))
+            (when (and (sh-b-slice-p sh) (= 1 (u1 br)))
+              (setf (sh-list-entry-l1 sh) (entries (sh-num-ref-idx-l1 sh))))))))
+    (when (sh-b-slice-p sh) (setf (sh-mvd-l1-zero sh) (= 1 (u1 br))))
+    (when (pps-cabac-init-present pps) (setf (sh-cabac-init sh) (= 1 (u1 br))))
+    (when (sh-temporal-mvp sh)
+      (when (sh-b-slice-p sh) (setf (sh-collocated-from-l0 sh) (= 1 (u1 br))))
+      (when (or (and (sh-collocated-from-l0 sh) (> (sh-num-ref-idx-l0 sh) 1))
+                (and (not (sh-collocated-from-l0 sh)) (> (sh-num-ref-idx-l1 sh) 1)))
+        (setf (sh-collocated-ref-idx sh) (ue br))))
+    (when (or (and (pps-weighted-pred pps) (sh-p-slice-p sh))
+              (and (pps-weighted-bipred pps) (sh-b-slice-p sh)))
+      (%parse-pred-weights br sh sps))
+    (setf (sh-max-merge-cand sh) (- 5 (ue br))))
+  (setf (sh-qp sh) (+ (pps-init-qp pps) (se br)))
+  (when (pps-slice-chroma-qp-offsets pps)
+    (setf (sh-cb-qp-offset sh) (se br)
+          (sh-cr-qp-offset sh) (se br)))
+  (let ((override (and (pps-deblocking-override-enabled pps) (= 1 (u1 br)))))
+    (when override
+      (setf (sh-deblocking-disabled sh) (= 1 (u1 br)))
+      (unless (sh-deblocking-disabled sh)
+        (setf (sh-beta-offset sh) (* 2 (se br))
+              (sh-tc-offset sh) (* 2 (se br))))))
+  (when (and (pps-loop-filter-across-slices pps)
+             (or (sh-sao-luma sh) (sh-sao-chroma sh) (not (sh-deblocking-disabled sh))))
+    (setf (sh-loop-filter-across-slices sh) (= 1 (u1 br))))
+  sh)
 
 (defun parse-slice-header (br nal sps-table pps-table)
   "Parse a slice segment header (7.3.6.1), leaving BR at the first byte of the slice data.
@@ -448,7 +705,8 @@
   (let* ((sh (make-slice :nal nal))
          (first-p (= 1 (u1 br))))
     (setf (sh-first-in-pic sh) first-p)
-    (when (nal-irap-p nal) (u1 br))             ; no_output_of_prior_pics_flag
+    (when (nal-irap-p nal)
+      (setf (sh-no-output-prior sh) (= 1 (u1 br))))
     (let* ((pps (or (gethash (ue br) pps-table)
                     (%err "slice refers to a picture parameter set that has not been seen")))
            (sps (or (gethash (pps-sps-id pps) sps-table)
@@ -465,64 +723,8 @@
         ;; the address is a CTB index, in exactly as many bits as the picture needs
         (setf (sh-segment-address sh)
               (ub br (max 1 (integer-length (1- (sps-ctbs sps)))))))
-      (when (sh-dependent sh)
-        (return-from parse-slice-header sh))
-      (dotimes (i (pps-extra-slice-header-bits pps)) (u1 br))
-      (setf (sh-type sh) (ue br))
-      (unless (<= 0 (sh-type sh) 2)
-        (%err "slice_type ~d, which is not one of B, P or I" (sh-type sh)))
-      (when (pps-output-flag-present pps)
-        (setf (sh-pic-output sh) (= 1 (u1 br))))
-      (when (sps-separate-colour-planes sps) (ub br 2))
-      (unless (nal-idr-p nal)
-        (setf (sh-poc-lsb sh) (ub br (sps-log2-max-poc-lsb sps)))
-        (if (zerop (u1 br))                     ; short_term_ref_pic_set_sps_flag
-            (setf (sh-strps sh)
-                  (%parse-strps br (length (sps-strps sps)) (sps-strps sps)
-                                (length (sps-strps sps))))
-            (let ((n (length (sps-strps sps))))
-              (setf (sh-strps sh)
-                    (aref (sps-strps sps)
-                          (if (> n 1) (ub br (integer-length (1- n))) 0)))))
-        (when (sps-long-term-present sps)
-          (%err "long-term reference pictures are not supported"))
-        (when (sps-temporal-mvp-enabled sps)
-          (setf (sh-temporal-mvp sh) (= 1 (u1 br)))))
-      (when (sps-sao-enabled sps)
-        (setf (sh-sao-luma sh) (= 1 (u1 br))
-              (sh-sao-chroma sh) (= 1 (u1 br))))
-      (unless (sh-i-slice-p sh)
-        (setf (sh-num-ref-idx-l0 sh) (pps-num-ref-idx-l0 pps)
-              (sh-num-ref-idx-l1 sh) (pps-num-ref-idx-l1 pps))
-        (when (= 1 (u1 br))                     ; num_ref_idx_active_override_flag
-          (setf (sh-num-ref-idx-l0 sh) (1+ (ue br)))
-          (when (sh-b-slice-p sh) (setf (sh-num-ref-idx-l1 sh) (1+ (ue br)))))
-        (when (pps-lists-modification-present pps)
-          (%err "reference picture list modification is not supported"))
-        (when (sh-b-slice-p sh) (setf (sh-mvd-l1-zero sh) (= 1 (u1 br))))
-        (when (pps-cabac-init-present pps) (setf (sh-cabac-init sh) (= 1 (u1 br))))
-        (when (sh-temporal-mvp sh)
-          (when (sh-b-slice-p sh) (setf (sh-collocated-from-l0 sh) (= 1 (u1 br))))
-          (when (or (and (sh-collocated-from-l0 sh) (> (sh-num-ref-idx-l0 sh) 1))
-                    (and (not (sh-collocated-from-l0 sh)) (> (sh-num-ref-idx-l1 sh) 1)))
-            (setf (sh-collocated-ref-idx sh) (ue br))))
-        (when (or (and (pps-weighted-pred pps) (sh-p-slice-p sh))
-                  (and (pps-weighted-bipred pps) (sh-b-slice-p sh)))
-          (%err "weighted prediction is not supported"))
-        (setf (sh-max-merge-cand sh) (- 5 (ue br))))
-      (setf (sh-qp sh) (+ (pps-init-qp pps) (se br)))
-      (when (pps-slice-chroma-qp-offsets pps)
-        (setf (sh-cb-qp-offset sh) (se br)
-              (sh-cr-qp-offset sh) (se br)))
-      (let ((override (and (pps-deblocking-override-enabled pps) (= 1 (u1 br)))))
-        (when override
-          (setf (sh-deblocking-disabled sh) (= 1 (u1 br)))
-          (unless (sh-deblocking-disabled sh)
-            (setf (sh-beta-offset sh) (* 2 (se br))
-                  (sh-tc-offset sh) (* 2 (se br))))))
-      (when (and (pps-loop-filter-across-slices pps)
-                 (or (sh-sao-luma sh) (sh-sao-chroma sh) (not (sh-deblocking-disabled sh))))
-        (setf (sh-loop-filter-across-slices sh) (= 1 (u1 br))))
+      (unless (sh-dependent sh)
+        (%independent-slice-header br sh nal pps sps))
       (when (or (pps-tiles-enabled pps) (pps-entropy-coding-sync pps))
         (let ((n (ue br)))
           (when (plusp n)

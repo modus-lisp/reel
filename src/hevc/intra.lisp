@@ -113,7 +113,7 @@
    top — anticlockwise — because that is the order in which a missing run can be filled from the
    sample before it.  Any other order leaves a hole or fills it from the wrong side."
   (declare (type ctx c) (type fixnum x0 y0 log2-size c-idx)
-           (type (simple-array (unsigned-byte 8) (*)) top left)
+           (type (simple-array (unsigned-byte 16) (*)) top left)
            (optimize (speed 3) (safety 1)))
   (let* ((n (ash 1 log2-size))
          (n2 (* 2 n))
@@ -169,7 +169,7 @@
    that falls as the block grows: a big block predicted at a shallow angle shows the steps in its
    reference line, a small one does not.  Nothing is signalled — both ends derive it."
   (declare (type ctx c) (type fixnum log2-size c-idx mode)
-           (type (simple-array (unsigned-byte 8) (*)) top left)
+           (type (simple-array (unsigned-byte 16) (*)) top left)
            (optimize (speed 3) (safety 1)))
   (let ((n (ash 1 log2-size)))
     (declare (type fixnum n))
@@ -181,10 +181,15 @@
       (unless (> dist threshold) (return-from %filter-references nil))
       (let ((n2 (* 2 n)))
         (declare (type fixnum n2))
+        ;; "nearly straight" is a distance between SAMPLES, so the threshold has to grow with the
+        ;; range they live in: one part in thirty-two of full scale, which is 8 at eight bits and
+        ;; 32 at ten.  Holding it at 8 makes a ten-bit gradient look bent and takes the strong
+        ;; filter off exactly the flat areas it exists for.
         (if (and (sps-strong-intra-smoothing (cx-sps c))
                  (= n 32)
-                 (< (abs (- (+ (aref top 0) (aref top n2)) (* 2 (aref top n)))) 8)
-                 (< (abs (- (+ (aref left 0) (aref left n2)) (* 2 (aref left n)))) 8))
+                 (let ((flat (ash 1 (- (sps-bit-depth-luma (cx-sps c)) 5))))
+                   (and (< (abs (- (+ (aref top 0) (aref top n2)) (* 2 (aref top n)))) flat)
+                        (< (abs (- (+ (aref left 0) (aref left n2)) (* 2 (aref left n)))) flat))))
             ;; STRONG SMOOTHING: the reference line is already nearly straight, so replace it with
             ;; the straight line exactly.  Filtering a gradient with [1 2 1] leaves a faint stair
             ;; that a 32x32 flat area shows as banding; this is the fix for that and nothing else.
@@ -195,8 +200,8 @@
               (loop for i from 1 below n2
                     do (setf (aref top i) (ash (+ (* (- 64 i) c0) (* i ct) 32) -6)
                              (aref left i) (ash (+ (* (- 64 i) c0) (* i cl) 32) -6))))
-            (let ((ft (make-array (1+ n2) :element-type '(unsigned-byte 8)))
-                  (fl (make-array (1+ n2) :element-type '(unsigned-byte 8))))
+            (let ((ft (make-array (1+ n2) :element-type '(unsigned-byte 16)))
+                  (fl (make-array (1+ n2) :element-type '(unsigned-byte 16))))
               (declare (dynamic-extent ft fl))
               (setf (aref ft 0) (ash (+ (aref left 1) (* 2 (aref top 0)) (aref top 1) 2) -2))
               (loop for i from 1 below n2
@@ -216,7 +221,7 @@
   "Planar (8.4.4.2.4): a bilinear surface through the four edges, which is what a smooth gradient
    looks like and what DC cannot express."
   (declare (type (simple-array (signed-byte 32) (*)) pred)
-           (type (simple-array (unsigned-byte 8) (*)) top left)
+           (type (simple-array (unsigned-byte 16) (*)) top left)
            (type fixnum n log2-size) (optimize (speed 3) (safety 1)))
   (let ((tr (aref top (1+ n)))                  ; p[nTbS][-1]
         (bl (aref left (1+ n))))                ; p[-1][nTbS]
@@ -234,7 +239,7 @@
 (defun %predict-dc (pred n log2-size c-idx top left)
   "DC (8.4.4.2.5), with the boundary smoothing that luma blocks below 32x32 get."
   (declare (type (simple-array (signed-byte 32) (*)) pred)
-           (type (simple-array (unsigned-byte 8) (*)) top left)
+           (type (simple-array (unsigned-byte 16) (*)) top left)
            (type fixnum n log2-size c-idx) (optimize (speed 3) (safety 1)))
   (let ((sum n))
     (declare (type fixnum sum))
@@ -249,7 +254,7 @@
         (loop for y from 1 below n
               do (setf (aref pred (* y n)) (ash (+ (aref left (1+ y)) (* 3 dc) 2) -2)))))))
 
-(defun %predict-angular (pred n c-idx mode top left)
+(defun %predict-angular (pred n c-idx mode top left maxv)
   "The thirty-three angular modes (8.4.4.2.6).
 
    One reference LINE is built — the top edge for the near-vertical modes, the left for the
@@ -257,8 +262,8 @@
    mode's angle.  A negative angle needs samples from the other edge, and invAngle is what projects
    them onto this line; that projection is the part with no counterpart in H.264 at all."
   (declare (type (simple-array (signed-byte 32) (*)) pred)
-           (type (simple-array (unsigned-byte 8) (*)) top left)
-           (type fixnum n c-idx mode) (optimize (speed 3) (safety 1)))
+           (type (simple-array (unsigned-byte 16) (*)) top left)
+           (type fixnum n c-idx mode maxv) (optimize (speed 3) (safety 1)))
   (let* ((angle (aref +intra-pred-angle+ mode))
          (vertical (>= mode 18))
          (main (if vertical top left))
@@ -296,7 +301,7 @@
             (let* ((at (if (= mode 26) (* i n) i))
                    (v (+ (aref main 1) (ash (- (aref side (1+ i)) corner) -1))))
               (declare (type fixnum v))
-              (setf (aref pred at) (max 0 (min 255 v))))))))))
+              (setf (aref pred at) (max 0 (min maxv v))))))))))
 
 (defun %intra-predict (c pic x0 y0 log2-size c-idx mode pred)
   "Fill PRED, nTbS by nTbS in raster order, with the prediction MODE calls for."
@@ -305,12 +310,15 @@
            (optimize (speed 3) (safety 1)))
   (let* ((n (ash 1 log2-size))
          (n2 (* 2 n))
-         (top (make-array (1+ n2) :element-type '(unsigned-byte 8) :initial-element 128))
-         (left (make-array (1+ n2) :element-type '(unsigned-byte 8) :initial-element 128)))
+         ;; WHEN NOTHING IS AVAILABLE THE REFERENCES ARE THE MIDDLE OF THE RANGE, which is 128 only
+         ;; at eight bits.  A ten-bit block with no decoded neighbour predicts from 512.
+         (neutral (ash 1 (1- (pic-bd pic c-idx))))
+         (top (make-array (1+ n2) :element-type '(unsigned-byte 16) :initial-element neutral))
+         (left (make-array (1+ n2) :element-type '(unsigned-byte 16) :initial-element neutral)))
     (declare (type fixnum n n2) (dynamic-extent top left))
     (when (%gather-references c pic x0 y0 log2-size c-idx top left)
       (%filter-references c log2-size c-idx mode top left))
     (case mode
       (0 (%predict-planar pred n log2-size top left))
       (1 (%predict-dc pred n log2-size c-idx top left))
-      (t (%predict-angular pred n c-idx mode top left)))))
+      (t (%predict-angular pred n c-idx mode top left (pic-max pic c-idx))))))

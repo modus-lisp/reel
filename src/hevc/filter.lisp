@@ -39,13 +39,13 @@
 (declaim (type (simple-array (unsigned-byte 8) (52)) +beta-table+))
 (declaim (type (simple-array (unsigned-byte 8) (54)) +tc-table+))
 
-(declaim (inline %clip3 %clip8))
+(declaim (inline %clip3 %clipv))
 (defun %clip3 (lo hi v) (declare (type fixnum lo hi v)) (max lo (min hi v)))
-(defun %clip8 (v) (declare (type fixnum v)) (max 0 (min 255 v)))
+(defun %clipv (maxv v) (declare (type fixnum maxv v)) (max 0 (min maxv v)))
 
 ;;; ---- deblocking ---------------------------------------------------------------------------------
 
-(defun %filter-luma-edge (plane base step line-step bs qp beta-off tc-off allow-p allow-q)
+(defun %filter-luma-edge (plane base step line-step bs qp beta-off tc-off allow-p allow-q bd)
   "One four-line segment of a luma edge.
 
    STEP walks ACROSS the edge and LINE-STEP along it, so the same code filters a vertical edge and
@@ -59,12 +59,18 @@
    bypass, or PCM with the filter disabled — must come out exactly, but that says nothing about the
    block on the OTHER side of the edge, which is still filtered against it.  Suppressing the whole
    edge instead is wrong on one side either way."
-  (declare (type (simple-array (unsigned-byte 8) (*)) plane)
-           (type fixnum base step line-step bs qp beta-off tc-off)
+  (declare (type (simple-array (unsigned-byte 16) (*)) plane)
+           (type fixnum base step line-step bs qp beta-off tc-off bd)
            (optimize (speed 3) (safety 1)))
-  (let* ((beta (aref +beta-table+ (%clip3 0 51 (+ qp beta-off))))
-         (tc (aref +tc-table+ (%clip3 0 53 (+ qp (* 2 (1- bs)) tc-off)))))
-    (declare (type fixnum beta tc))
+  ;; THE TABLES ARE STATED AT EIGHT BITS and scaled up to the sample depth.  Both thresholds are
+  ;; differences between samples, so they have to grow with the range the samples live in — a
+  ;; ten-bit picture whose neighbours differ by four is as flat as an eight-bit one differing by
+  ;; one, and a filter using the narrow threshold on wide samples smooths almost every edge.
+  (let* ((scale (- bd 8))
+         (maxv (1- (ash 1 bd)))
+         (beta (ash (aref +beta-table+ (%clip3 0 51 (+ qp beta-off))) scale))
+         (tc (ash (aref +tc-table+ (%clip3 0 53 (+ qp (* 2 (1- bs)) tc-off))) scale)))
+    (declare (type fixnum scale maxv beta tc))
     (when (zerop beta) (return-from %filter-luma-edge nil))
     (macrolet ((s (line off) `(aref plane (+ base (* ,line line-step) (* ,off step)))))
       (let* ((dp0 (abs (- (s 0 -3) (* 2 (s 0 -2)) (- (s 0 -1)))))
@@ -96,29 +102,29 @@
                 (if strong
                     (let ((lo2 (* -2 tc)) (hi2 (* 2 tc)))
                       (when allow-p
-                       (setf (s line -3) (%clip8 (+ p2 (%clip3 lo2 hi2
+                       (setf (s line -3) (%clipv maxv (+ p2 (%clip3 lo2 hi2
                                                                (- (ash (+ (* 2 p3) (* 3 p2) p1 p0
                                                                           q0 4) -3)
                                                                   p2))))))
                       (when allow-q
-                       (setf (s line 2) (%clip8 (+ q2 (%clip3 lo2 hi2
+                       (setf (s line 2) (%clipv maxv (+ q2 (%clip3 lo2 hi2
                                                               (- (ash (+ p0 q0 q1 (* 3 q2)
                                                                          (* 2 q3) 4) -3)
                                                                  q2))))))
                       (when allow-p
-                        (setf (s line -1) (%clip8 (+ p0 (%clip3 lo2 hi2
+                        (setf (s line -1) (%clipv maxv (+ p0 (%clip3 lo2 hi2
                                                                 (- (ash (+ p2 (* 2 p1) (* 2 p0)
                                                                            (* 2 q0) q1 4) -3)
                                                                    p0))))
-                              (s line -2) (%clip8 (+ p1 (%clip3 lo2 hi2
+                              (s line -2) (%clipv maxv (+ p1 (%clip3 lo2 hi2
                                                                 (- (ash (+ p2 p1 p0 q0 2) -2)
                                                                    p1))))))
                       (when allow-q
-                        (setf (s line 0) (%clip8 (+ q0 (%clip3 lo2 hi2
+                        (setf (s line 0) (%clipv maxv (+ q0 (%clip3 lo2 hi2
                                                                (- (ash (+ p1 (* 2 p0) (* 2 q0)
                                                                           (* 2 q1) q2 4) -3)
                                                                   q0))))
-                              (s line 1) (%clip8 (+ q1 (%clip3 lo2 hi2
+                              (s line 1) (%clipv maxv (+ q1 (%clip3 lo2 hi2
                                                                (- (ash (+ p0 q0 q1 q2 2) -2)
                                                                   q1)))))))
                     ;; the weak filter moves p0 and q0 by one shared delta, and p1 and q1 only
@@ -127,37 +133,38 @@
                       (declare (type fixnum delta))
                       (when (< (abs delta) (* 10 tc))
                         (setf delta (%clip3 (- tc) tc delta))
-                        (when allow-p (setf (s line -1) (%clip8 (+ p0 delta))))
-                        (when allow-q (setf (s line 0) (%clip8 (- q0 delta))))
+                        (when allow-p (setf (s line -1) (%clipv maxv (+ p0 delta))))
+                        (when allow-q (setf (s line 0) (%clipv maxv (- q0 delta))))
                         (when (and filter-p allow-p)
                           (setf (s line -2)
-                                (%clip8 (+ p1 (%clip3 (- (ash tc -1)) (ash tc -1)
+                                (%clipv maxv (+ p1 (%clip3 (- (ash tc -1)) (ash tc -1)
                                                       (ash (+ (- (ash (+ p2 p0 1) -1) p1) delta)
                                                            -1))))))
                         (when (and filter-q allow-q)
                           (setf (s line 1)
-                                (%clip8 (+ q1 (%clip3 (- (ash tc -1)) (ash tc -1)
+                                (%clipv maxv (+ q1 (%clip3 (- (ash tc -1)) (ash tc -1)
                                                       (ash (- (- (ash (+ q2 q0 1) -1) q1) delta)
                                                            -1)))))))))))))))))
 
-(defun %filter-chroma-edge (plane base step line-step qp tc-off allow-p allow-q)
+(defun %filter-chroma-edge (plane base step line-step qp tc-off allow-p allow-q bd)
   "One two-line segment of a chroma edge.  Only strength 2 — an intra edge — is filtered at all:
    chroma has less detail to lose and more to gain from being left alone."
-  (declare (type (simple-array (unsigned-byte 8) (*)) plane)
-           (type fixnum base step line-step qp tc-off)
+  (declare (type (simple-array (unsigned-byte 16) (*)) plane)
+           (type fixnum base step line-step qp tc-off bd)
            (optimize (speed 3) (safety 1)))
-  (let ((tc (aref +tc-table+ (%clip3 0 53 (+ qp 2 tc-off)))))
-    (declare (type fixnum tc))
+  (let ((tc (ash (aref +tc-table+ (%clip3 0 53 (+ qp 2 tc-off))) (- bd 8)))
+        (maxv (1- (ash 1 bd))))
+    (declare (type fixnum tc maxv))
     (when (zerop tc) (return-from %filter-chroma-edge nil))
     (macrolet ((s (line off) `(aref plane (+ base (* ,line line-step) (* ,off step)))))
       (dotimes (line 2)
         (let* ((p0 (s line -1)) (p1 (s line -2)) (q0 (s line 0)) (q1 (s line 1))
                (delta (%clip3 (- tc) tc (ash (+ (ash (- q0 p0) 2) p1 (- q1) 4) -3))))
           (declare (type fixnum p0 p1 q0 q1 delta))
-          (when allow-p (setf (s line -1) (%clip8 (+ p0 delta))))
-          (when allow-q (setf (s line 0) (%clip8 (- q0 delta)))))))))
+          (when allow-p (setf (s line -1) (%clipv maxv (+ p0 delta))))
+          (when allow-q (setf (s line 0) (%clipv maxv (- q0 delta)))))))))
 
-(defun %boundary-strength (pic xp yp xq yq)
+(defun %boundary-strength (pic xp yp xq yq kind)
   "bS for the four samples either side of an edge (8.7.2.4).
 
    Three tiers, and only the first is about the pictures themselves.  An INTRA block on either side
@@ -167,14 +174,17 @@
    Everything else is 0 and is left alone, because filtering two blocks that came from the same
    place with the same vector only blurs something that was never broken.
 
-   The coefficient test applies at every edge the marking pass recorded, without asking what kind
-   it is — because the marking pass only records transform block edges in the first place."
-  (declare (type picture pic) (type fixnum xp yp xq yq))
+   The coefficient test applies only where KIND says this is a TRANSFORM block edge.  A prediction
+   edge inside a transform block has the same coefficients on both sides of it, so the test there
+   is not a test — it says 1 for every block with a residual, and the filter runs over edges the
+   encoder never put a discontinuity at."
+  (declare (type picture pic) (type fixnum xp yp xq yq kind))
   (let ((ip (pic-mv-index pic xp yp))
         (iq (pic-mv-index pic xq yq)))
     (cond
       ((or (plusp (aref (pic-intra pic) ip)) (plusp (aref (pic-intra pic) iq))) 2)
-      ((or (plusp (aref (pic-cbf pic) ip)) (plusp (aref (pic-cbf pic) iq))) 1)
+      ((and (logtest kind 2)
+            (or (plusp (aref (pic-cbf pic) ip)) (plusp (aref (pic-cbf pic) iq)))) 1)
       (t
        ;; the motion test: same pictures, same count of them, and no component differing by a whole
        ;; sample.  A quarter-sample vector is four units, so the threshold of 4 IS one sample.
@@ -222,6 +232,24 @@
 (defun %ctb-of (pic x y)
   (+ (* (ash y (- (pic-ctb-log2 pic))) (pic-ctbs-wide pic)) (ash x (- (pic-ctb-log2 pic)))))
 
+(defun %sao-can-read (pic x y nx ny)
+  "May the sample at (X,Y) read its neighbour at (NX,NY)?  Luma coordinates, both.
+
+   Edge offset compares each sample against two neighbours, and a neighbour across a slice or tile
+   boundary the filter may not cross is not there to be compared against.  The standard leaves such
+   a sample ALONE rather than substituting something for the neighbour — so the test is asked of
+   both neighbours and either one failing means no offset at all.
+
+   Only samples within one of a coding tree block's border can fail this, which is why getting it
+   wrong shows up as a single row or column of wrong samples along a boundary and nothing else."
+  (declare (type picture pic) (type fixnum x y nx ny))
+  (let ((c1 (%ctb-of pic x y)) (c2 (%ctb-of pic nx ny)))
+    (or (= c1 c2)
+        (and (or (= (aref (pic-ctb-slice pic) c1) (aref (pic-ctb-slice pic) c2))
+                 (plusp (aref (pic-ctb-across pic) c1)))
+             (or (= (aref (pic-ctb-tile pic) c1) (aref (pic-ctb-tile pic) c2))
+                 (plusp (aref (pic-ctb-across-tiles pic) c1)))))))
+
 (defun %edge-filterable-p (pic xp yp xq yq)
   "(values filter-at-all allow-p allow-q) for an edge between these two samples.
 
@@ -237,7 +265,12 @@
          (cp (%ctb-of pic xp yp)) (cq (%ctb-of pic xq yq)))
     (values (and (zerop (logand (aref (pic-ctb-dbf pic) cq) 1))
                  (or (= (aref (pic-ctb-slice pic) cp) (aref (pic-ctb-slice pic) cq))
-                     (plusp (aref (pic-ctb-across pic) cq))))
+                     (plusp (aref (pic-ctb-across pic) cq)))
+                 ;; and the same question for tiles, asked separately because the two flags are
+                 ;; separate: a stream may let the filter cross slices and not tiles, or the
+                 ;; reverse, and the seams it is there to hide are different seams
+                 (or (= (aref (pic-ctb-tile pic) cp) (aref (pic-ctb-tile pic) cq))
+                     (plusp (aref (pic-ctb-across-tiles pic) cq))))
             (zerop (aref (pic-blk-nofilt pic) ip))
             (zerop (aref (pic-blk-nofilt pic) iq)))))
 
@@ -260,12 +293,12 @@
       (loop for x of-type fixnum from 8 below w by 8 do
         (loop for y of-type fixnum from 0 below h by 4 do
           (let* ((kind (aref (pic-bs-v pic) (+ (* (ash y -2) (pic-bs-vw pic)) (ash x -3))))
-                 (bs (if (plusp kind) (%boundary-strength pic (1- x) y x y) 0)))
+                 (bs (if (plusp kind) (%boundary-strength pic (1- x) y x y kind) 0)))
             (multiple-value-bind (ok ap aq) (%edge-filterable-p pic (1- x) y x y)
              (when (and (plusp bs) ok)
               (multiple-value-bind (bo to) (offs x y)
                 (%filter-luma-edge (pic-y pic) (+ (* y ys) x) 1 ys bs
-                                   (ash (+ (qp-at (1- x) y) (qp-at x y) 1) -1) bo to ap aq)
+                                   (ash (+ (qp-at (1- x) y) (qp-at x y) 1) -1) bo to ap aq (pic-bd-luma pic))
                 ;; Chroma edges sit on the eight-sample CHROMA grid, which is every sixteen luma
                 ;; columns — but along the edge every four luma rows are two chroma rows, and all
                 ;; of them are filtered.  Testing the row alignment as well leaves half the chroma
@@ -274,26 +307,26 @@
                   (let ((qp (ash (+ (qp-at (1- x) y) (qp-at x y) 1) -1))
                         (cx (ash x -1)) (cy (ash y -1)))
                     (%filter-chroma-edge (pic-u pic) (+ (* cy cs) cx) 1 cs
-                                         (%chroma-qp qp cb-off) to ap aq)
+                                         (%chroma-qp qp cb-off) to ap aq (pic-bd-chroma pic))
                     (%filter-chroma-edge (pic-v pic) (+ (* cy cs) cx) 1 cs
-                                         (%chroma-qp qp cr-off) to ap aq)))))))))
+                                         (%chroma-qp qp cr-off) to ap aq (pic-bd-chroma pic))))))))))
       ;; ---- horizontal edges, top to bottom
       (loop for y of-type fixnum from 8 below h by 8 do
         (loop for x of-type fixnum from 0 below w by 4 do
           (let* ((kind (aref (pic-bs-h pic) (+ (* (ash y -3) (pic-bs-hw pic)) (ash x -2))))
-                 (bs (if (plusp kind) (%boundary-strength pic x (1- y) x y) 0)))
+                 (bs (if (plusp kind) (%boundary-strength pic x (1- y) x y kind) 0)))
             (multiple-value-bind (ok ap aq) (%edge-filterable-p pic x (1- y) x y)
              (when (and (plusp bs) ok)
               (multiple-value-bind (bo to) (offs x y)
                 (%filter-luma-edge (pic-y pic) (+ (* y ys) x) ys 1 bs
-                                   (ash (+ (qp-at x (1- y)) (qp-at x y) 1) -1) bo to ap aq)
+                                   (ash (+ (qp-at x (1- y)) (qp-at x y) 1) -1) bo to ap aq (pic-bd-luma pic))
                 (when (and (= bs 2) (zerop (logand y 15)))
                   (let ((qp (ash (+ (qp-at x (1- y)) (qp-at x y) 1) -1))
                         (cx (ash x -1)) (cy (ash y -1)))
                     (%filter-chroma-edge (pic-u pic) (+ (* cy cs) cx) cs 1
-                                         (%chroma-qp qp cb-off) to ap aq)
+                                         (%chroma-qp qp cb-off) to ap aq (pic-bd-chroma pic))
                     (%filter-chroma-edge (pic-v pic) (+ (* cy cs) cx) cs 1
-                                         (%chroma-qp qp cr-off) to ap aq))))))))))
+                                         (%chroma-qp qp cr-off) to ap aq (pic-bd-chroma pic)))))))))))
     pic))
 
 ;;; ---- sample adaptive offset ---------------------------------------------------------------------
@@ -326,6 +359,14 @@
             (let ((type (aref (pic-sao-type pic) (+ (* 3 addr) comp))))
               (unless (zerop type)
                 (let* ((sub (if (zerop comp) 0 1))
+                       (bd (pic-bd pic comp))
+                       (maxv (1- (ash 1 bd)))
+                       ;; the thirty-two bands always divide the whole range, so the shift that
+                       ;; finds one grows with the depth
+                       (bshift (- bd 5))
+                       ;; and the offsets are sent at ten bits of precision at most: above that
+                       ;; they are scaled up, which is why a twelve-bit picture's are coarser
+                       (oshift (- bd (min bd 10)))
                        (plane (pic-plane pic comp))
                        (ref (aref src comp))
                        (stride (pic-stride pic comp))
@@ -351,12 +392,17 @@
                       (loop for y of-type fixnum from y0 below y1 do
                         (loop for x of-type fixnum from x0 below x1 do
                           (let* ((v (aref ref (+ (* y stride) x)))
-                                 (band (- (ash v -3) param)))
+                                 ;; THE FOUR BANDS WRAP.  They start at sao_band_position and run
+                                 ;; upwards through the thirty-two bands MODULO thirty-two, so a
+                                 ;; position of 30 offsets bands 30, 31, 0 and 1.  Subtracting
+                                 ;; without the wrap silently drops the bands that came round.
+                                 (band (mod (- (ash v (- bshift)) param) 32)))
                             (declare (type fixnum v band))
-                            (when (and (<= 0 band 3) (not (exempt x y)))
+                            (when (and (<= band 3) (not (exempt x y)))
                               (setf (aref plane (+ (* y stride) x))
-                                    (%clip8 (+ v (aref (pic-sao-off pic)
-                                                       (+ base (* 4 comp) band)))))))))
+                                    (%clipv maxv (+ v (ash (aref (pic-sao-off pic)
+                                                                 (+ base (* 4 comp) band))
+                                                            oshift))))))))
                       ;; EDGE: which of a valley, a step or a peak this sample sits on
                       (let ((dx (aref +eo-dx+ param)) (dy (aref +eo-dy+ param)))
                         (declare (type fixnum dx dy))
@@ -368,6 +414,10 @@
                               (declare (type fixnum ax ay bx by))
                               (when (and (<= 0 ax (1- pw)) (<= 0 ay (1- ph))
                                          (<= 0 bx (1- pw)) (<= 0 by (1- ph))
+                                         (%sao-can-read pic (ash x sub) (ash y sub)
+                                                        (ash ax sub) (ash ay sub))
+                                         (%sao-can-read pic (ash x sub) (ash y sub)
+                                                        (ash bx sub) (ash by sub))
                                          (not (exempt x y)))
                                 (let* ((v (aref ref (+ (* y stride) x)))
                                        (a (aref ref (+ (* ay stride) ax)))
@@ -378,6 +428,8 @@
                                   (unless (= cat 2)
                                     (let ((k (if (< cat 2) cat (1- cat))))
                                       (setf (aref plane (+ (* y stride) x))
-                                            (%clip8 (+ v (aref (pic-sao-off pic)
-                                                               (+ base (* 4 comp) k))))))))))))))))))))))
+                                            (%clipv maxv
+                                                    (+ v (ash (aref (pic-sao-off pic)
+                                                                    (+ base (* 4 comp) k))
+                                                              oshift)))))))))))))))))))))
     pic))

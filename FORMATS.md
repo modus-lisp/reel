@@ -17,6 +17,7 @@ as data.
 |---|---|
 | **VP8**, key and inter frames | libvpx, bit-exact on eight clips and on Big Buck Bunny |
 | **H.264 Baseline, Main and High** | 69 of the JVT conformance streams bit-exact, plus ffmpeg's output on a 7672-frame YouTube file and 300 frames of 640x360 High profile, every frame |
+| **HEVC / H.265**, Main profile | 166 of the JCT-VC conformance streams bit-exact, whole streams, 2000 frames |
 | **MPEG-1 and MPEG-2 video** | ffmpeg, bit-exact on thirteen fixtures, every frame |
 | **MPEG-4 Part 2** (DivX, XviD) | ffmpeg, bit-exact on eleven fixtures, every frame |
 | **WebM and Matroska** | they are the same demuxer; `.mkv` with H.264 decodes today |
@@ -115,6 +116,14 @@ because nobody knows to disbelieve it.
   on rather than on the profile that permits it, so a High profile stream using none of them decodes
   here. Multiple slices per picture, I_PCM macroblocks and both remaining `pic_order_cnt_type`s are
   decoded, not refused.
+- HEVC: more than 8 bits per sample, the range extension tools, and 4:2:2 and 4:4:4. As with H.264
+  each is refused on the flag that turns it on, so a Main profile stream using none of them decodes
+  here — which is 166 of the 186 conformance streams. Everything else in Main is built: tiles,
+  wavefront entropy coding, dependent slice segments, PCM coding units, long-term references,
+  reference picture list modification, weighted prediction, multiple slices per picture, both loop
+  filters, all four asymmetric partitions, temporal motion vector prediction, and random access
+  from a clean point rather than an IDR. The multilayer and 3D extensions are NOT refused: they describe
+  other layers, and a stereo stream's base layer is ordinary HEVC that this decodes exactly.
 - MPEG-2: field pictures, dual-prime motion vectors, and anything but 4:2:0.
 - MPEG-4 Part 2: sprites and global motion, interlaced objects, data partitioning, scalability, and
   arbitrary shapes. Also Microsoft's pre-standard MPEG-4 variants (DIV3, MP42), which share a name
@@ -264,11 +273,70 @@ What remains, which is the honest part:
   derivation, a second deblocking geometry, and field-paired reference handling throughout.
 - Long-term references and slice groups (FMO) account for the rest. Both are refused by name.
 
+## HEVC, and what building it taught
+
+It was listed here as not worth it — larger than all of H.264 put together, and VP9 cheaper for a
+decoder that wanted one more modern codec. That was a fair estimate of the size and a wrong one of
+the value. It is built: 166 of the 186 JCT-VC conformance streams decode whole and bit-exact,
+sixteen frames each, both loop filters on, 2000 frames in total, with zero wrong.
+
+The other 20 are refused by name, and both are about SAMPLES rather than structure: 10-bit and
+mixed bit depths (12), and the range extension tools (8). Everything that decides which pictures
+exist, what they predict from, and what order they are shown in is built.
+
+**Ten-bit is most of the way there and deliberately still refused.** The machinery is in: every
+shift, clamp and neutral value derives its constant from the picture's own depth rather than
+assuming eight, and luma and chroma carry separate depths — which the suite needs, because one
+stream is ten-bit luma with nine-bit chroma, and ffmpeg refuses that outright. Sample planes are
+sixteen bits wide unconditionally, which measured level against byte planes: the arithmetic
+dominates and a block is cache-resident either way, so there is one code path instead of two.
+
+With the gate lifted, most ten-bit streams decode and several are bit-exact — including one over a
+hundred and fourteen thirty-two-square transform blocks. Six are not, five of them wavefront and
+one not, and they share no feature that could be refused instead. Four candidate gates were
+proposed and each died by measurement: quantisation group depth, coding tree block size,
+thirty-two-square transforms, and wavefront alone. Accepting the depth without a gate would mean
+silently wrong pictures for content that cannot be named in advance — and refusing rather than
+decoding wrong is the property that makes the rest of this worth trusting. It is not a good trade.
+The commit that restores the gate records what is already eliminated, so the next attempt starts
+from a bin-level trace rather than a fifth hypothesis.
+
+Five things generalise beyond this codec.
+
+- **Read the reference implementation, not your memory of the standard.** Half a day went into
+  rewriting AMVP from memory, which made the stream it was meant to fix measurably worse. Every
+  fix after the decision to read ffmpeg's `hevc_mvs.c`, `hevc_cabac.c` and `hevc_filter.c` landed
+  the same day it was looked for. The bugs were not arithmetic; they were structural, and a
+  structure recalled wrongly reads as plausible.
+- **A skipped block is an oracle.** A block coded as SKIP carries no residual, so the reference
+  decoder's samples for it are a pure motion compensation of a picture already reproduced exactly.
+  Searching the vector space for the one that regenerates those samples recovers the vector the
+  reference used — no instrumentation of it required, and no guessing about which of the two
+  decoders is wrong.
+- **The initialisation of state you never read is state.** The motion field's per-block "is this
+  intra" flag has to start as ALL ONES, because a neighbour in a coding tree block not yet decoded
+  must look unavailable, and unavailable is spelled intra. Starting it at zero is the same answer
+  for the merge list and the opposite one for AMVP's isScaledFlag. That single bit was worth 45
+  streams.
+- **An ordering bug and a reconstruction bug are indistinguishable from the totals.** POC_A had
+  every one of its five pictures decoding bit-exactly with exactly one in the wrong place, and
+  presented as 86 per cent of three frames wrong. Cross-comparing every picture against every
+  reference frame — rather than comparing frame k to frame k — is what said so in one measurement.
+  The cause was that a sub-layer non-reference picture must not update the order count predictors.
+  Four more of exactly this family turned up later, in the streams that test the buffer rather than
+  the samples: a picture may be decoded and never shown; a random access point may ask for the
+  pictures still waiting to be thrown away rather than shown; a picture must be handed out when the
+  BUFFER IS FULL and not only when reordering says so; and at a random access point that resets,
+  the order count's high bits are ZERO rather than derived from zeroed predictors — which is a
+  different computation, and a negative one for any count past the halfway mark.
+- **A parse error is not a refusal, and neither is a wrong decode.** Both misattribute the problem.
+  A stream written to check that a decoder SKIPS extension data it does not understand was read as
+  though its bits were a structure invented afterwards, ran off the end of its payload, and was
+  reported as a broken stream when the decoder was the older party. Refusing on the flag that turns
+  a tool on is only half the discipline; the other half is not claiming a fault that is yours.
+
 ## Not worth it, and why
 
-- **HEVC / H.265.** Larger than all of H.264 put together: coding tree units with quadtrees, 35
-  intra directions, a different CABAC context set, transform unit trees, sample adaptive offset. If
-  another modern codec is wanted, VP9 costs less and appears more often.
 - **Flash-era video** (Sorenson Spark, VP6 in FLV), **RealVideo**, **Windows Media and VC-1**,
   **MJPEG**. Real content exists in all of them, but each is a separate codec for a shrinking
   audience. Curiosities rather than plans.

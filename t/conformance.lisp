@@ -119,50 +119,71 @@
     (format t "~&H.264: ~d passed, ~d failed, ~d refused~%" pass fail refused)
     fail))
 
-;;; ---- HEVC: the JCT-VC conformance streams, headers only for now -------------------------------
+;;; ---- HEVC: the JCT-VC conformance streams -----------------------------------------------------
 ;;;
-;;; The decoder is still being built and reads no pictures yet, so what can be checked is what the
-;;; parser claims about a stream's geometry against what ffprobe says it is.  That is a real test
-;;; and not a placeholder: the sequence parameter set declares the coding tree size, the quadtree
-;;; depths and the conformance window, and getting any of them wrong moves the picture size.  A
-;;; stream this cannot parse at all is a FAILURE; one it refuses by naming a tool is not.
+;;; Three checks, in increasing strength.  The geometry the parser claims against what ffprobe
+;;; says: the sequence parameter set declares the coding tree size, the quadtree depths and the
+;;; conformance window, and getting any of them wrong moves the picture size.  Then that every
+;;; all-intra picture's slice segments TILE it, which catches a parse that ends in the wrong place
+;;; without needing samples.  Then the samples themselves, for SIXTEEN FRAMES of every stream --
+;;; not only the first picture, because the first picture cannot be wrong in any of the ways
+;;; inter prediction, reference management and picture output ordering can be.
+;;;
+;;; A stream this cannot parse at all is a FAILURE; one it refuses by naming a tool is not.
 
-(defun %hevc-first-picture (f spss ppss)
-  "Decode F's first picture, if it is entirely intra.  Returns (values picture reason).
+(defun %adler32 (bytes)
+  "The checksum ffmpeg's framecrc muxer writes: Adler-32 INITIALISED TO ZERO.
 
-   Comparing this against ffmpeg is what the tiling check was standing in for: the whole pipeline —
-   prediction, dequantisation, both transforms, deblocking and sample adaptive offset — either
-   agrees to the sample or it does not."
-  (let ((pic nil) (done nil) (why nil) (last-sh nil))
-    (handler-case
-        (dolist (nal (reel.hevc:annex-b-nals (slurp f)))
-          (when (and (reel.hevc:nal-base-layer-p nal) (not done))
-            (cond
-              ((= (reel.hevc::nal-type nal) reel.hevc::+nal-sps+)
-               (let ((sp (reel.hevc:parse-sps (reel.hevc:nal-rbsp nal))))
-                 (setf (gethash (reel.hevc:sps-id sp) spss) sp)))
-              ((= (reel.hevc::nal-type nal) reel.hevc::+nal-pps+)
-               (let ((pp (reel.hevc:parse-pps (reel.hevc:nal-rbsp nal))))
-                 (setf (gethash (reel.hevc:pps-id pp) ppss) pp)))
-              ((reel.hevc:nal-slice-p nal)
-               (let* ((br (reel.hevc:make-bitreader (reel.hevc:nal-rbsp nal)))
-                      (sh (reel.hevc:parse-slice-header br nal spss ppss)))
-                 (cond
-                   ((and pic (reel.hevc:sh-first-in-pic sh)) (setf done t))
-                   ((not (reel.hevc:sh-i-slice-p sh))
-                    (setf why "the first picture is not all intra" done t pic nil))
-                   (t (unless pic
-                        (setf pic (reel.hevc:make-picture-for (reel.hevc::sh-sps sh))))
-                      (setf last-sh sh)
-                      (reel.hevc:decode-slice-data (reel.hevc::sh-sps sh)
-                                                   (reel.hevc::sh-pps sh) sh br pic))))))))
-      (reel.hevc:hevc-error (e) (setf why (reel.hevc:hevc-error-message e) pic nil)))
-    ;; the in-loop filters run over the finished picture, every vertical edge before any
-    ;; horizontal one and SAO after all of them
-    (when pic
-      (reel.hevc:deblock-picture pic (reel.hevc::sh-pps last-sh) last-sh)
-      (reel.hevc:sao-picture pic last-sh))
-    (values pic why)))
+   The usual definition starts the low half at one.  libavformat calls av_adler32_update(0, ...),
+   so a checker using a stock Adler-32 disagrees by one in the low half and by the frame length in
+   the high half — which looks like every frame being wrong rather than like a convention mismatch."
+  (declare (type (simple-array (unsigned-byte 8) (*)) bytes)
+           (optimize (speed 3) (safety 1)))
+  (let ((a 0) (b 0))
+    (declare (type (unsigned-byte 32) a b))
+    (loop for x of-type (unsigned-byte 8) across bytes
+          do (setf a (mod (+ a x) 65521)
+                   b (mod (+ b a) 65521)))
+    (logior (ash b 16) a)))
+
+(defun %split-commas (line)
+  (let ((out '()) (start 0) (i nil))
+    (loop
+      (setf i (position #\, line :start start))
+      (push (string-trim " " (subseq line start i)) out)
+      (unless i (return))
+      (setf start (1+ i)))
+    (nreverse out)))
+
+(defun %framecrcs (path)
+  "(size . checksum) for each frame ffmpeg decoded, from a framecrc file."
+  (with-open-file (s path)
+    (loop for line = (read-line s nil nil)
+          while line
+          unless (or (zerop (length line)) (char= (char line 0) #\#))
+            collect (let* ((fields (%split-commas line))
+                           (size (parse-integer (fifth fields)))
+                           (crc (sixth fields)))
+                      (cons size (parse-integer crc :start 2 :radix 16))))))
+
+(defun %hevc-whole-stream (f want)
+  "Decode as much of F as WANT has references for, checking every frame.  (values checked reason)."
+  (let ((pics (reel.hevc:decode-annex-b (slurp f) :limit (length want)))
+        (checked 0))
+    (loop for pic in pics
+          for w in want
+          do (let ((mine (reel.hevc:picture->yuv420 pic)))
+               (when (/= (length mine) (car w))
+                 (return-from %hevc-whole-stream
+                   (values checked (format nil "frame ~d is ~d bytes, reference ~d"
+                                           checked (length mine) (car w)))))
+               (when (/= (%adler32 mine) (cdr w))
+                 (return-from %hevc-whole-stream
+                   (values checked (format nil "frame ~d is not bit-exact" checked))))
+               (incf checked)))
+    (if (< checked (length want))
+        (values checked (format nil "decoded ~d frames, reference has ~d" checked (length want)))
+        (values checked nil))))
 
 (defun %hevc-intra-pictures (f spss ppss)
   "Decode the slice data of every ALL-INTRA picture in F.  Returns (values checked good reason).
@@ -173,7 +194,10 @@
    because a single misread syntax element desynchronises the arithmetic decoder and a
    desynchronised decoder does not stop in the right place."
   (let ((pics 0) (good 0) (why nil) (refusal nil)
-        (any nil) (inter nil) (covered 0) (broke nil) (total 0))
+        (any nil) (inter nil) (covered 0) (broke nil) (total 0)
+        ;; a dependent segment inherits its header from the last independent one and CONTINUES its
+        ;; context, so walking slice segments means carrying both along
+        (indep nil) (ctx nil))
     (labels ((finish ()
                ;; a picture with a P or B slice in it is not something this can decode yet, so it
                ;; is not counted either way
@@ -194,16 +218,19 @@
                (setf (gethash (reel.hevc:pps-id pp) ppss) pp)))
             ((reel.hevc:nal-slice-p nal)
              (let* ((br (reel.hevc:make-bitreader (reel.hevc:nal-rbsp nal)))
-                    (sh (reel.hevc:parse-slice-header br nal spss ppss)))
-               (when (reel.hevc:sh-first-in-pic sh) (finish))
+                    (sh (reel.hevc::inherit-slice-header
+                         indep (reel.hevc:parse-slice-header br nal spss ppss))))
+               (when (reel.hevc:sh-first-in-pic sh) (finish) (setf indep nil ctx nil))
+               (unless (reel.hevc::sh-dependent sh) (setf indep sh))
                (setf total (reel.hevc:sps-ctbs (reel.hevc::sh-sps sh)) any t)
                (if (not (reel.hevc:sh-i-slice-p sh))
                    (setf inter t)
                    (handler-case
                        (multiple-value-bind (c n term)
                            (reel.hevc:decode-slice-data (reel.hevc::sh-sps sh)
-                                                        (reel.hevc::sh-pps sh) sh br)
-                         (declare (ignore c))
+                                                        (reel.hevc::sh-pps sh) sh br
+                                                        nil nil nil nil ctx)
+                         (setf ctx c)
                          (if term (incf covered n) (setf broke t)))
                      ;; a refusal names a tool this does not implement; it is not a wrong answer
                      (reel.hevc:hevc-error (e)
@@ -213,7 +240,7 @@
     (values pics good (or refusal why) (and refusal t))))
 
 (defun run-hevc ()
-  (let ((pass 0) (fail 0) (refused 0) (intra-ok 0) (exact 0))
+  (let ((pass 0) (fail 0) (refused 0) (intra-ok 0) (exact 0) (frames 0))
     (dolist (f (sort (directory (format nil "~a/hevc/*.bit" *conf*)) #'string< :key #'namestring))
       (let ((dims (probe-file (format nil "~a.dims" (namestring f)))))
         (handler-case
@@ -235,7 +262,12 @@
                      (reel.hevc:parse-slice-header
                       (reel.hevc:make-bitreader (reel.hevc:nal-rbsp n)) n spss ppss)
                      (incf slices)))))
-              (let ((want (and dims (with-open-file (s dims) (read-line s nil "")))))
+              ;; a fixture of 0x0 means ffprobe could not read the stream at all — EXT_A_ericsson_3
+              ;; overreads its own sequence parameter set as far as ffmpeg is concerned, and ffmpeg
+              ;; emits no frames for it.  There is no oracle for a stream the oracle refuses, so it
+              ;; is not checked rather than counted either way: parsing it proves nothing.
+              (let ((want (let ((w (and dims (with-open-file (s dims) (read-line s nil "")))))
+                            (if (equal w "0x0") nil w))))
                 (cond ((zerop slices)
                        (incf fail)
                        (format t "~&  FAIL ~a: no slice headers~%" (pathname-name f)))
@@ -257,33 +289,26 @@
                                 (progn (incf fail)
                                        (format t "~&  FAIL ~a: ~d of ~d intra pictures~@[ — ~a~]~%"
                                                (pathname-name f) good pics why))))
-                           ;; the syntax ends where it should; now the SAMPLES, against ffmpeg
+                           ;; the syntax ends where it should; now the SAMPLES, against ffmpeg —
+                           ;; every frame the reference has, not only the first picture
                            (t
-                            (let ((refp (probe-file (format nil "~a.filt.yuv" (namestring f))))
-                                  (pic (%hevc-first-picture f (make-hash-table)
-                                                            (make-hash-table))))
+                            (let ((crcs (probe-file (format nil "~a.framecrc" (namestring f)))))
                               (cond
-                                ((or (null refp) (null pic)) (incf pass))
-                                (t (let ((mine (reel.hevc:picture->yuv420 pic))
-                                         (ref (slurp refp)))
+                                ((null crcs) (incf pass))
+                                (t (multiple-value-bind (checked bad)
+                                       (%hevc-whole-stream f (%framecrcs crcs))
                                      (cond
-                                       ((/= (length mine) (length ref))
-                                        (incf fail)
-                                        (format t "~&  FAIL ~a: ~d sample bytes, reference ~d~%"
-                                                (pathname-name f) (length mine) (length ref)))
-                                       ((loop for i below (length mine)
-                                              always (= (aref mine i) (aref ref i)))
-                                        (incf pass) (incf exact))
-                                       (t (incf fail)
-                                          (format t "~&  FAIL ~a: not bit-exact~%"
-                                                  (pathname-name f)))))))))))))))
+                                       (bad (incf fail)
+                                            (format t "~&  FAIL ~a: ~a~%" (pathname-name f) bad))
+                                       (t (incf pass) (incf exact) (incf frames checked))))))))))))))
           (reel.hevc:hevc-error (e) (incf refused)
             (format t "~&  --   ~a: refused — ~a~%" (pathname-name f) e))
           (error (e) (incf fail) (format t "~&  FAIL ~a: ~a~%" (pathname-name f) e)))))
     (format t "~&HEVC: ~d streams parsed with the geometry ffprobe reports, ~d failed, ~d refused~%"
             pass fail refused)
     (format t "      ~d all-intra pictures parse to exactly the right end~%" intra-ok)
-    (format t "      ~d first pictures reconstruct BIT-EXACTLY against ffmpeg~%" exact)
+    (format t "      ~d streams decode WHOLE and BIT-EXACTLY against ffmpeg, ~d frames~%"
+            exact frames)
     fail))
 
 (let ((bad 0))

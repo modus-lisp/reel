@@ -9,6 +9,12 @@
 
 (deftype samples () '(simple-array (unsigned-byte 8) (*)))
 
+;; SAMPLE PLANES ARE SIXTEEN BITS WIDE WHATEVER THE STREAM SAYS.  Ten- and twelve-bit video needs
+;; the room, and eight-bit video does not pay for it: measured against the same work over byte
+;; planes, the wider ones came out level or a shade faster, because the arithmetic dominates and a
+;; block is cache-resident either way.  One code path is worth more than a byte per sample.
+(deftype plane () '(simple-array (unsigned-byte 16) (*)))
+
 (defstruct (picture (:conc-name pic-))
   (width 0 :type fixnum) (height 0 :type fixnum)          ; coded, a whole number of coding blocks
   ;; the conformance window: where the picture the file claims begins inside the coded one, and
@@ -16,9 +22,9 @@
   ;; reason and with the same trap.
   (crop-x 0 :type fixnum) (crop-y 0 :type fixnum)
   (disp-width 0 :type fixnum) (disp-height 0 :type fixnum)
-  (y (make-array 0 :element-type '(unsigned-byte 8)) :type samples)
-  (u (make-array 0 :element-type '(unsigned-byte 8)) :type samples)
-  (v (make-array 0 :element-type '(unsigned-byte 8)) :type samples)
+  (y (make-array 0 :element-type '(unsigned-byte 16)) :type plane)
+  (u (make-array 0 :element-type '(unsigned-byte 16)) :type plane)
+  (v (make-array 0 :element-type '(unsigned-byte 16)) :type plane)
   (ystride 0 :type fixnum) (cstride 0 :type fixnum)
   (poc 0 :type fixnum)
   ;; ---- what the loop filters need, recorded as the picture is decoded
@@ -36,7 +42,10 @@
   (bs-vw 0 :type fixnum) (bs-hw 0 :type fixnum)
   ;; per eight-by-eight luma block: the quantiser it was reconstructed at, and whether it is
   ;; exempt from filtering at all (PCM with the filter disabled, or a transquant bypass block)
-  (blk-qp (make-array 0 :element-type '(unsigned-byte 8)) :type samples)
+  ;; QpY per eight-by-eight block, SIGNED: deeper samples extend the quantiser downwards, so a
+  ;; ten-bit picture's runs from -12 rather than from zero
+  (blk-qp (make-array 0 :element-type '(signed-byte 16))
+   :type (simple-array (signed-byte 16) (*)))
   (blk-nofilt (make-array 0 :element-type 'bit) :type simple-bit-vector)
   (blk-w 0 :type fixnum)
   ;; per coding tree block: the slice that coded it, its deblocking controls, and its SAO table
@@ -45,6 +54,10 @@
   (ctb-dbf (make-array 0 :element-type '(signed-byte 32))
    :type (simple-array (signed-byte 32) (*)))   ; disabled | beta<<8 | tc<<16, packed
   (ctb-across (make-array 0 :element-type 'bit) :type simple-bit-vector)
+  ;; and the same pair for TILES, which bound the filter on their own terms
+  (ctb-tile (make-array 0 :element-type '(signed-byte 32))
+   :type (simple-array (signed-byte 32) (*)))
+  (ctb-across-tiles (make-array 0 :element-type 'bit) :type simple-bit-vector)
   ;; SAO: three components per coding tree block, each a type, four offsets and one parameter
   (sao-type (make-array 0 :element-type '(unsigned-byte 8)) :type samples)
   (sao-off (make-array 0 :element-type '(signed-byte 32))
@@ -61,39 +74,69 @@
   (ref-idx (make-array 0 :element-type '(signed-byte 8)) :type (simple-array (signed-byte 8) (*)))
   (ref-poc (make-array 0 :element-type '(signed-byte 32))
    :type (simple-array (signed-byte 32) (*)))
+  ;; and whether what it pointed at was a LONG-TERM reference, which travels with the motion for
+  ;; the same reason the order count does: a later picture reads this field and has no access to
+  ;; the lists that gave it meaning.  Long-term-ness is not a property of the vector but it decides
+  ;; whether the vector may be scaled, so it has to be here.
+  (ref-lt (make-array 0 :element-type 'bit) :type simple-bit-vector)
   (mv-w 0 :type fixnum) (mv-h 0 :type fixnum)
   (reference-p nil)
+  (long-term nil)                       ; kept for random access rather than for the next picture
+  (needed nil)                          ; still named by the reference picture set in force
   (output-done nil)                     ; has this picture been handed out yet
-  ;; true where a 4x4 block was coded intra, which the candidate derivations test constantly
+  ;; true where a 4x4 block was coded intra, which the candidate derivations test constantly.
+  ;; IT STARTS AS ALL ONES.  A block that has not been decoded yet must look unavailable to the
+  ;; candidate derivations, and "intra" is how they spell unavailable — an intra block has no
+  ;; motion to lend.  Starting at zero instead makes an undecoded neighbour look like an inter
+  ;; block with no motion, which is the same answer for the merge list and the OPPOSITE one for
+  ;; AMVP's isScaledFlag, where the question is whether the position is a decoded block at all.
   (intra (make-array 0 :element-type 'bit) :type simple-bit-vector)
   ;; and true where its transform block carried any non-zero coefficient, which is one of the
   ;; three things the deblocking filter's boundary strength is derived from
-  (cbf (make-array 0 :element-type 'bit) :type simple-bit-vector))
+  (cbf (make-array 0 :element-type 'bit) :type simple-bit-vector)
+  ;; LUMA AND CHROMA DEPTHS ARE SEPARATE NUMBERS.  They are usually equal and a decoder that keeps
+  ;; only one is right until it meets a stream that does not, which the suite has: ten-bit luma
+  ;; with nine-bit chroma.  Every shift, every clamp and every neutral value below is derived from
+  ;; whichever of these applies to the plane being touched.
+  (bd-luma 8 :type fixnum) (bd-chroma 8 :type fixnum))
+
+(declaim (inline pic-bd pic-max))
+(defun pic-bd (pic c-idx)
+  (if (zerop c-idx) (pic-bd-luma pic) (pic-bd-chroma pic)))
+(defun pic-max (pic c-idx)
+  "The largest value a sample of this component can take."
+  (1- (ash 1 (pic-bd pic c-idx))))
 
 (defun make-picture-for (sps)
   (let* ((w (sps-width sps)) (h (sps-height sps))
          (cw (floor w (sps-sub-width sps))) (ch (floor h (sps-sub-height sps))))
     (make-picture
+     :bd-luma (sps-bit-depth-luma sps) :bd-chroma (sps-bit-depth-chroma sps)
      :width w :height h
      :crop-x (* (sps-sub-width sps) (sps-conf-left sps))
      :crop-y (* (sps-sub-height sps) (sps-conf-top sps))
      :disp-width (sps-display-width sps) :disp-height (sps-display-height sps)
-     :y (make-array (* w h) :element-type '(unsigned-byte 8) :initial-element 128)
-     :u (make-array (* cw ch) :element-type '(unsigned-byte 8) :initial-element 128)
-     :v (make-array (* cw ch) :element-type '(unsigned-byte 8) :initial-element 128)
+     :y (make-array (* w h) :element-type '(unsigned-byte 16)
+                            :initial-element (ash 1 (1- (sps-bit-depth-luma sps))))
+     :u (make-array (* cw ch) :element-type '(unsigned-byte 16)
+                              :initial-element (ash 1 (1- (sps-bit-depth-chroma sps))))
+     :v (make-array (* cw ch) :element-type '(unsigned-byte 16)
+                              :initial-element (ash 1 (1- (sps-bit-depth-chroma sps))))
      :ystride w :cstride cw
      :bs-v (make-array (* (ash w -3) (ash h -2)) :element-type '(unsigned-byte 8)
                                                  :initial-element 0)
      :bs-h (make-array (* (ash w -2) (ash h -3)) :element-type '(unsigned-byte 8)
                                                  :initial-element 0)
      :bs-vw (ash w -3) :bs-hw (ash w -2)
-     :blk-qp (make-array (* (ash w -3) (ash h -3)) :element-type '(unsigned-byte 8)
+     :blk-qp (make-array (* (ash w -3) (ash h -3)) :element-type '(signed-byte 16)
                                                    :initial-element 26)
      :blk-nofilt (make-array (* (ash w -3) (ash h -3)) :element-type 'bit :initial-element 0)
      :blk-w (ash w -3)
      :ctb-slice (make-array (sps-ctbs sps) :element-type '(signed-byte 32) :initial-element -1)
      :ctb-dbf (make-array (sps-ctbs sps) :element-type '(signed-byte 32) :initial-element 0)
      :ctb-across (make-array (sps-ctbs sps) :element-type 'bit :initial-element 0)
+     :ctb-tile (make-array (sps-ctbs sps) :element-type '(signed-byte 32) :initial-element 0)
+     :ctb-across-tiles (make-array (sps-ctbs sps) :element-type 'bit :initial-element 1)
      :sao-type (make-array (* 3 (sps-ctbs sps)) :element-type '(unsigned-byte 8)
                                                 :initial-element 0)
      :sao-off (make-array (* 12 (sps-ctbs sps)) :element-type '(signed-byte 32)
@@ -108,8 +151,9 @@
                                                       :initial-element -1)
      :ref-poc (make-array (* 2 (ash w -2) (ash h -2)) :element-type '(signed-byte 32)
                                                       :initial-element 0)
+     :ref-lt (make-array (* 2 (ash w -2) (ash h -2)) :element-type 'bit :initial-element 0)
      :mv-w (ash w -2) :mv-h (ash h -2)
-     :intra (make-array (* (ash w -2) (ash h -2)) :element-type 'bit :initial-element 0)
+     :intra (make-array (* (ash w -2) (ash h -2)) :element-type 'bit :initial-element 1)
      :cbf (make-array (* (ash w -2) (ash h -2)) :element-type 'bit :initial-element 0))))
 
 (declaim (inline pic-mv-index))
@@ -119,22 +163,24 @@
   (+ (* (ash y -2) (pic-mv-w pic)) (ash x -2)))
 
 (defun pic-motion (pic x y lx)
-  "(values mvx mvy ref-idx ref-poc) for the 4x4 block at (X,Y) in list LX.
+  "(values mvx mvy ref-idx ref-poc long-term-p) for the 4x4 block at (X,Y) in list LX.
    A REF-IDX of -1 means this block does not predict from that list."
   (declare (type fixnum x y lx))
   (let ((i (pic-mv-index pic x y)))
     (values (aref (pic-mv pic) (+ (* 4 i) (* 2 lx)))
             (aref (pic-mv pic) (+ (* 4 i) (* 2 lx) 1))
             (aref (pic-ref-idx pic) (+ (* 2 i) lx))
-            (aref (pic-ref-poc pic) (+ (* 2 i) lx)))))
+            (aref (pic-ref-poc pic) (+ (* 2 i) lx))
+            (plusp (aref (pic-ref-lt pic) (+ (* 2 i) lx))))))
 
-(defun set-pic-motion (pic x y lx mvx mvy idx poc)
+(defun set-pic-motion (pic x y lx mvx mvy idx poc &optional lt)
   (declare (type fixnum x y lx mvx mvy idx poc))
   (let ((i (pic-mv-index pic x y)))
     (setf (aref (pic-mv pic) (+ (* 4 i) (* 2 lx))) mvx
           (aref (pic-mv pic) (+ (* 4 i) (* 2 lx) 1)) mvy
           (aref (pic-ref-idx pic) (+ (* 2 i) lx)) idx
-          (aref (pic-ref-poc pic) (+ (* 2 i) lx)) poc)))
+          (aref (pic-ref-poc pic) (+ (* 2 i) lx)) poc
+          (aref (pic-ref-lt pic) (+ (* 2 i) lx)) (if lt 1 0))))
 
 (declaim (inline pic-plane pic-stride))
 (defun pic-plane (pic c-idx)
@@ -143,7 +189,34 @@
   (if (zerop c-idx) (pic-ystride pic) (pic-cstride pic)))
 
 (defun picture->yuv420 (pic)
-  "The visible picture as tightly packed I420 octets, the conformance window applied."
+  "The visible picture as tightly packed I420, the conformance window applied.
+
+   Eight-bit video comes out one octet per sample; anything deeper comes out two, LITTLE ENDIAN,
+   which is what every tool in this area means by p010le and friends.  The two cases are written
+   separately because the narrow one is a row-at-a-time REPLACE and the wide one cannot be."
+  (if (and (= 8 (pic-bd-luma pic)) (= 8 (pic-bd-chroma pic)))
+      (%picture->yuv420-8 pic)
+      (%picture->yuv420-16 pic)))
+
+(defun %picture->yuv420-16 (pic)
+  (let* ((w (pic-disp-width pic)) (h (pic-disp-height pic))
+         (cw (ceiling w 2)) (ch (ceiling h 2))
+         (out (make-array (* 2 (+ (* w h) (* 2 cw ch))) :element-type '(unsigned-byte 8)))
+         (o 0))
+    (flet ((emit (v)
+             (setf (aref out o) (logand v 255)
+                   (aref out (1+ o)) (ash v -8))
+             (incf o 2)))
+      (let ((base (+ (* (pic-crop-y pic) (pic-ystride pic)) (pic-crop-x pic))))
+        (dotimes (y h)
+          (dotimes (x w) (emit (aref (pic-y pic) (+ base (* y (pic-ystride pic)) x))))))
+      (let ((base (+ (* (ash (pic-crop-y pic) -1) (pic-cstride pic)) (ash (pic-crop-x pic) -1))))
+        (dolist (plane (list (pic-u pic) (pic-v pic)))
+          (dotimes (y ch)
+            (dotimes (x cw) (emit (aref plane (+ base (* y (pic-cstride pic)) x))))))))
+    out))
+
+(defun %picture->yuv420-8 (pic)
   (let* ((w (pic-disp-width pic)) (h (pic-disp-height pic))
          (cw (ceiling w 2)) (ch (ceiling h 2))
          (out (make-array (+ (* w h) (* 2 cw ch)) :element-type '(unsigned-byte 8)))

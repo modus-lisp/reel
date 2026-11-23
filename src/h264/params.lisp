@@ -5,7 +5,8 @@
 ;;;; at, and whether the deblocking filter runs.  None of them can be skipped past, because every
 ;;;; field is an Exp-Golomb code whose length is its own value (see bits.lisp).
 ;;;;
-;;;; WHAT IS DELIBERATELY NOT HERE.  Interlace (field pictures, MBAFF), multiple slice groups
+;;;; WHAT IS DELIBERATELY NOT HERE.  (Interlace and long-term references are PARSED -- a hardware
+;;;; decoder above this needs their headers -- but decode.lisp refuses them.)  Multiple slice groups
 ;;;; (FMO/ASO), and the High-profile scaling matrices are parsed only far enough to REFUSE them
 ;;;; clearly.  Each is a large feature that Constrained Baseline does not use, and a decoder that
 ;;;; parsed them silently and then ignored them would produce a wrong picture instead of an error.
@@ -42,8 +43,11 @@
      (* 2 (+ (sps-crop-left s) (sps-crop-right s)))))
 
 (defun sps-height (s)
+  "The displayed height.  The vertical crop unit doubles when the stream may carry fields
+   (CropUnitY = SubHeightC * (2 - frame_mbs_only_flag)), because a field picture's rows are every
+   other row of the frame."
   (- (* 16 (sps-mb-height s))
-     (* 2 (+ (sps-crop-top s) (sps-crop-bottom s)))))
+     (* (if (sps-frame-mbs-only s) 2 4) (+ (sps-crop-top s) (sps-crop-bottom s)))))
 
 (defparameter +flat-scale-4x4+
   (make-array 16 :element-type '(unsigned-byte 8) :initial-element 16)
@@ -175,10 +179,12 @@
     (let ((map-units (1+ (ue br))))
       (setf (sps-frame-mbs-only s) (= 1 (u1 br)))
       (unless (sps-frame-mbs-only s)
-        (setf (sps-mb-adaptive s) (= 1 (u1 br)))
-        (%err "field and MBAFF pictures are not supported"))
-      ;; for a progressive stream the map units ARE the macroblock rows
-      (setf (sps-mb-height s) map-units))
+        (setf (sps-mb-adaptive s) (= 1 (u1 br))))
+      ;; for a progressive stream the map units ARE the macroblock rows; for one that may carry
+      ;; fields a map unit is a macroblock PAIR, so the frame has twice as many rows.  (The parser
+      ;; reads interlaced streams -- a hardware decoder needs their headers -- but this package's
+      ;; own decoder refuses them in FEED-NAL.)
+      (setf (sps-mb-height s) (if (sps-frame-mbs-only s) map-units (* 2 map-units))))
     (setf (sps-direct-8x8 s) (= 1 (u1 br)))
     (when (= 1 (u1 br))                                ; frame_cropping_flag
       (setf (sps-crop-left s) (ue br) (sps-crop-right s) (ue br)
@@ -256,6 +262,7 @@
 (defstruct (slice-header (:conc-name sh-))
   (first-mb 0) (slice-type 0) (pps-id 0)
   (frame-num 0)
+  (field-pic nil) (bottom-field nil)    ; a field picture, and which field
   (idr-pic-id 0)
   (poc-lsb 0) (delta-poc-bottom 0)
   (delta-poc-0 0) (delta-poc-1 0)       ; pic_order_cnt_type 1's per-picture corrections
@@ -379,14 +386,20 @@
       (setf (sh-pps sh) pps (sh-sps sh) sps
             (sh-scale-4x4 sh) (resolve-scaling-matrices sps pps))
       (setf (sh-frame-num sh) (ub br (sps-log2-max-frame-num sps)))
-      ;; frame_mbs_only_flag is asserted in PARSE-SPS, so there is no field_pic_flag here
+      (unless (sps-frame-mbs-only sps)
+        (setf (sh-field-pic sh) (= 1 (u1 br)))
+        (when (sh-field-pic sh) (setf (sh-bottom-field sh) (= 1 (u1 br)))))
       (when (nal-idr-p nal) (setf (sh-idr-pic-id sh) (ue br)))
+      ;; the bottom field's order-count correction is sent only for a FRAME: a field picture is
+      ;; one field and has the one count
       (when (= 0 (sps-poc-type sps))
         (setf (sh-poc-lsb sh) (ub br (sps-log2-max-poc-lsb sps)))
-        (when (pps-bottom-field-order pps) (setf (sh-delta-poc-bottom sh) (se br))))
+        (when (and (pps-bottom-field-order pps) (not (sh-field-pic sh)))
+          (setf (sh-delta-poc-bottom sh) (se br))))
       (when (and (= 1 (sps-poc-type sps)) (not (sps-delta-poc-always-zero sps)))
         (setf (sh-delta-poc-0 sh) (se br))
-        (when (pps-bottom-field-order pps) (setf (sh-delta-poc-1 sh) (se br))))
+        (when (and (pps-bottom-field-order pps) (not (sh-field-pic sh)))
+          (setf (sh-delta-poc-1 sh) (se br))))
       (when (pps-redundant-pic-cnt pps) (setf (sh-redundant-pic-cnt sh) (ue br)))
       ;; which of the two direct prediction methods a B slice uses, chosen per slice
       (when (sh-b-slice-p sh)
@@ -422,24 +435,22 @@
       (when (plusp (nal-ref-idc nal))
         (cond ((nal-idr-p nal)
                (setf (sh-no-output-of-prior-pics sh) (= 1 (u1 br))
-                     (sh-long-term-reference sh) (= 1 (u1 br)))
-               (when (sh-long-term-reference sh)
-                 (%err "long-term reference pictures are not supported")))
+                     (sh-long-term-reference sh) (= 1 (u1 br))))
               (t
                (setf (sh-adaptive-ref-marking sh) (= 1 (u1 br)))
                (when (sh-adaptive-ref-marking sh)
                  (loop for op = (ue br)
                        until (zerop op)
                        do (case op
-                            ;; 1: retire one short-term reference, named by how far back it is
-                            (1 (push (cons 1 (ue br)) (sh-mmco sh)))
-                            ;; 4: raise or lower the long-term ceiling.  With no long-term
-                            ;; references there is nothing for it to evict, so it is a no-op here —
-                            ;; but the value still has to be read or the next operation is garbage
-                            (4 (ue br))
-                            ((2 3 6) (ue br) (when (= op 3) (ue br))
-                             (%err "long-term reference pictures are not supported"))
-                            (5 (%err "memory management control operation 5 (reset all references)"))
+                            ;; 1: retire a short-term reference, named by how far back it is
+                            ;; 2: retire a long-term one, by its LongTermPicNum
+                            ;; 4: the long-term ceiling (max_long_term_frame_idx_plus1)
+                            ;; 6: make the current picture long-term, at a LongTermFrameIdx
+                            ((1 2 4 6) (push (cons op (ue br)) (sh-mmco sh)))
+                            ;; 3: make a short-term reference long-term: (3 difference . index)
+                            (3 (let ((diff (ue br))) (push (list* 3 diff (ue br)) (sh-mmco sh))))
+                            ;; 5: every reference retired, and the counts start again
+                            (5 (push (cons 5 nil) (sh-mmco sh)))
                             (t (%err "memory management control operation ~d" op))))
                  (setf (sh-mmco sh) (nreverse (sh-mmco sh)))))))
       ;; 7.3.3 puts cabac_init_idc HERE: after the reference picture marking and immediately

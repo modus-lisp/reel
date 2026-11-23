@@ -329,6 +329,13 @@
      (let* ((br (make-bitreader (nal-rbsp nal)))
             (sh (parse-slice-header br nal (h264-sps d) (h264-pps d)))
             (sps (sh-sps sh)))
+       ;; the parser reads what this decoder does not do; refuse it here
+       (unless (sps-frame-mbs-only sps) (%err "field and MBAFF pictures are not supported"))
+       (when (or (sh-long-term-reference sh)
+                 (some (lambda (op) (member (car op) '(2 3 6))) (sh-mmco sh)))
+         (%err "long-term reference pictures are not supported"))
+       (when (find 5 (sh-mmco sh) :key #'car)
+         (%err "memory management control operation 5 (reset all references)"))
        ;; a new picture starts at first_mb_in_slice 0; with one slice per picture that is every
        ;; slice, but the test is the right one for a stream that splits pictures into several
        (when (zerop (sh-first-mb sh))
